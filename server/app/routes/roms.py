@@ -259,7 +259,7 @@ def _save_dir_to_cache(temp_dir: Path, source_path: Path, fmt: str) -> Path:
 # never holds more than this much in RAM at a time, so 4GB ROMs over slow
 # WAN links cost ~1MB of process memory regardless of file size.
 _STREAM_CHUNK = 1 << 20
-from app.services import ctr_rom, ra_index, rom_scanner
+from app.services import ctr_rom, game_names, ra_index, rom_scanner
 from shared import wiiu_meta
 
 router = APIRouter()
@@ -2246,6 +2246,8 @@ async def _extract_ps1_eboot(source_path: Path, system: str, entry) -> Response:
     tmpdir = tempfile.mkdtemp(prefix='ps1_eboot_', dir=_conversion_tmp_dir())
 
     title = entry.name or _ps1_clean_title(disc_paths[0].name)
+    # A hand-tagged serial (``Game [SLUS-00748]``) is identity, not title.
+    title = game_names.strip_tagged_psx_serial(title) or title
     # Only a real product code may reach the converter.  A hack or fan
     # edition with no DAT match is catalogued under a slug title_id
     # (``PS1_resident_evil_2_ultimate_edition``); pop-fe indexes its

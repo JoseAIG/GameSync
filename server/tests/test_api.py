@@ -875,6 +875,10 @@ class TestPs1Lookup:
         )
         assert game_names.tagged_psx_serial("Crash (SCUS_949.00)") == "SCUS94900"
         assert game_names.tagged_psx_serial("Resident Evil 2 - Ultimate Edition") is None
+        assert (
+            game_names.strip_tagged_psx_serial("Resident Evil 2 - Ultimate Edition [SLUS-00748]")
+            == "Resident Evil 2 - Ultimate Edition"
+        )
 
     def test_eboot_argv_drops_unknown_gamecode(self):
         from app.routes import roms

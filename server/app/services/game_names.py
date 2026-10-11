@@ -1178,6 +1178,11 @@ def tagged_psx_serial(name: str) -> str | None:
     return re.sub(r'[^A-Za-z0-9]', '', m.group(1)).upper()
 
 
+def strip_tagged_psx_serial(name: str) -> str:
+    """``name`` without its hand-tagged serial, for display."""
+    return re.sub(r'\s+', ' ', _PSX_TAGGED_SERIAL_RE.sub('', name or '')).strip()
+
+
 def lookup_psx_serial(name: str) -> str | None:
     """Return the PS1 product code for a game name or ROM filename, or None.
 

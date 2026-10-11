@@ -865,6 +865,31 @@ class TestPs1Lookup:
 
         assert game_names.lookup_psx_serial("Breath of Fire IV (USA)") == "SLUS01324"
 
+    def test_lookup_psx_serial_honours_tagged_serial(self, monkeypatch):
+        monkeypatch.setattr(game_names, "_psx_by_slug", {})
+        monkeypatch.setattr(game_names, "_psx_serials_by_slug", {})
+
+        assert (
+            game_names.lookup_psx_serial("Resident Evil 2 - Ultimate Edition [SLUS-00748]")
+            == "SLUS00748"
+        )
+        assert game_names.tagged_psx_serial("Crash (SCUS_949.00)") == "SCUS94900"
+        assert game_names.tagged_psx_serial("Resident Evil 2 - Ultimate Edition") is None
+
+    def test_eboot_argv_drops_unknown_gamecode(self):
+        from app.routes import roms
+
+        unknown = roms._PS1_GAMECODE_UNKNOWN
+        assert roms._ps1_drop_unknown_gamecode(
+            ["pop-fe.py", "--title", "RE2", "--game_id", unknown, "--no-libcrypt", "a.chd"]
+        ) == ["pop-fe.py", "--title", "RE2", "--no-libcrypt", "a.chd"]
+        assert roms._ps1_drop_unknown_gamecode(
+            ["pop-fe.py", f"--game_id={unknown}", "a.chd"]
+        ) == ["pop-fe.py", "a.chd"]
+        assert roms._ps1_drop_unknown_gamecode(
+            ["popstation", "a.bin", unknown]
+        ) == ["popstation", "a.bin", "SLUS00000"]
+
     def test_normalize_endpoint_uses_region_aware_ps1_serial_lookup(
         self, client, auth_headers, monkeypatch
     ):

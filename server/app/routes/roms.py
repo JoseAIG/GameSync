@@ -2098,6 +2098,35 @@ def _ps1_normalize_gamecode(value: str | None) -> str:
     return re.sub(r'[^A-Za-z0-9]', '', value).upper()
 
 
+_PS1_GAMECODE_RE = re.compile(r'^[A-Z]{4}\d{5}$')
+# Stand-in for ``{gamecode}`` when the disc has no known product code;
+# ``_ps1_drop_unknown_gamecode`` removes it from the argv again.
+_PS1_GAMECODE_UNKNOWN = '\x00gamecode\x00'
+
+
+def _ps1_drop_unknown_gamecode(cmd: list[str]) -> list[str]:
+    """Remove the game-id option from an expanded converter argv.
+
+    Handles both ``--game_id {gamecode}`` and ``--game_id={gamecode}``.
+    A positional ``{gamecode}`` with no option in front of it can't be
+    dropped, so it gets the generic ``SLUS00000`` placeholder instead.
+    """
+    out: list[str] = []
+    for part in cmd:
+        if part == _PS1_GAMECODE_UNKNOWN:
+            if out and out[-1].startswith('-'):
+                out.pop()
+            else:
+                out.append('SLUS00000')
+            continue
+        if _PS1_GAMECODE_UNKNOWN in part:
+            if part.startswith('-'):
+                continue
+            part = part.replace(_PS1_GAMECODE_UNKNOWN, 'SLUS00000')
+        out.append(part)
+    return out
+
+
 def _ps1_disc_siblings(entry) -> list:
     """Return all PS1 catalog entries sharing ``entry.title_id`` (i.e. the
     full multi-disc set), sorted by disc number derived from filename.
@@ -2217,10 +2246,21 @@ async def _extract_ps1_eboot(source_path: Path, system: str, entry) -> Response:
     tmpdir = tempfile.mkdtemp(prefix='ps1_eboot_', dir=_conversion_tmp_dir())
 
     title = entry.name or _ps1_clean_title(disc_paths[0].name)
-    gamecode = (
-        _ps1_normalize_gamecode(entry.title_id)
-        or _ps1_normalize_gamecode(_extract_ps1_serial_from_filename(disc_paths[0].name))
-        or 'SLUS00000'  # last-resort placeholder; pop-fe still emits a PBP
+    # Only a real product code may reach the converter.  A hack or fan
+    # edition with no DAT match is catalogued under a slug title_id
+    # (``PS1_resident_evil_2_ultimate_edition``); pop-fe indexes its
+    # gamelist with whatever --game_id says and dies with a KeyError on
+    # anything it doesn't know.  Without --game_id it reads the serial off
+    # the disc itself, so an unknown code drops the option entirely.
+    gamecode = next(
+        (
+            code for code in (
+                _ps1_normalize_gamecode(entry.title_id),
+                _ps1_normalize_gamecode(_extract_ps1_serial_from_filename(disc_paths[0].name)),
+            )
+            if _PS1_GAMECODE_RE.match(code)
+        ),
+        '',
     )
     primary = disc_paths[0]
 
@@ -2237,9 +2277,11 @@ async def _extract_ps1_eboot(source_path: Path, system: str, entry) -> Response:
             output_dir=str(stage),
             stem=primary.stem,
             title=title,
-            gamecode=gamecode,
+            gamecode=gamecode or _PS1_GAMECODE_UNKNOWN,
             compression='9',
         )
+        if not gamecode:
+            cmd = _ps1_drop_unknown_gamecode(cmd)
         # pop-fe + ATRAC3 encoding + asset fetching can take 5-15 min
         # per disc on a Pi — give multi-disc runs a full hour.  Run with
         # ``cwd`` set to the configured pop-fe source tree so its

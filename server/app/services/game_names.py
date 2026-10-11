@@ -1155,12 +1155,39 @@ def lookup_dc_serial(name: str) -> str | None:
     return min(candidates, key=lambda code: _dc_serial_region_rank(code, region_hint))
 
 
+# A serial written into the filename by hand: ``Game [SLUS-00748].chd``.
+_PSX_TAGGED_SERIAL_RE = re.compile(
+    r'[\[\(]\s*((?:SLUS|SCUS|SLES|SCES|SLPS|SLPM|SCPS|SCPM|SLPN|SCAJ|SLAJ|'
+    r'PAPX|PBPX|SLED|SCED)[-_ ]?\d{3}[._]?\d{2})\s*[\]\)]',
+    re.IGNORECASE,
+)
+
+
+def tagged_psx_serial(name: str) -> str | None:
+    """PS1 product code tagged explicitly in a filename, or ``None``.
+
+    Hacks and fan editions match no DAT entry, and their SYSTEM.CNF often
+    boots a menu rather than a serial-named executable.  Tagging the file
+    (``Resident Evil 2 - Ultimate Edition [SLUS-00748].chd``) is how the
+    operator says which retail disc it stands in for; the tag wins over any
+    name lookup.
+    """
+    m = _PSX_TAGGED_SERIAL_RE.search(name or "")
+    if not m:
+        return None
+    return re.sub(r'[^A-Za-z0-9]', '', m.group(1)).upper()
+
+
 def lookup_psx_serial(name: str) -> str | None:
     """Return the PS1 product code for a game name or ROM filename, or None.
 
     Strips region/disc tags before matching, so both "Final Fantasy VII (USA)"
-    and "Final Fantasy VII [Disc1of3]" resolve to the same serial.
+    and "Final Fantasy VII [Disc1of3]" resolve to the same serial.  A serial
+    tagged in the name itself (``[SLUS-00748]``) is returned as-is.
     """
+    tagged = tagged_psx_serial(name)
+    if tagged:
+        return tagged
     slug = _psx_name_slug(name)
     candidates = _psx_serials_by_slug.get(slug)
     if not candidates:

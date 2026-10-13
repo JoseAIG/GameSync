@@ -1,7 +1,7 @@
 @echo off
 REM Build script for 3dssync - builds all or specific versions
 REM Usage: build_all.bat [targets...]
-REM   Targets: 3ds, nds, gc, wiiu, android, ps2, ps3, psp, vita, xbox, all (default: all)
+REM   Targets: 3ds, nds, gc, wiiu, android, ps2, ps3, psp, vita, xbox, ps5, all (default: all)
 REM Example: build_all.bat ps2 ps3 psp
 REM
 REM A failing target no longer aborts the run: every requested target is
@@ -25,6 +25,7 @@ set BUILD_PS3=0
 set BUILD_PSP=0
 set BUILD_VITA=0
 set BUILD_XBOX=0
+set BUILD_PS5=0
 
 REM Accumulators for the end-of-run summary
 set OK_LIST=
@@ -48,6 +49,7 @@ if /i "%ARG%"=="ps3" set BUILD_PS3=1
 if /i "%ARG%"=="psp" set BUILD_PSP=1
 if /i "%ARG%"=="vita" set BUILD_VITA=1
 if /i "%ARG%"=="xbox" set BUILD_XBOX=1
+if /i "%ARG%"=="ps5" set BUILD_PS5=1
 shift
 goto :parse_args
 :done_parsing
@@ -63,6 +65,7 @@ if "%BUILD_ALL%"=="1" (
     set BUILD_PSP=1
     set BUILD_VITA=1
     set BUILD_XBOX=1
+    set BUILD_PS5=1
 )
 
 echo ============================================
@@ -80,6 +83,7 @@ if "%BUILD_ALL%"=="1" (
     if "!BUILD_PSP!"=="1" echo   - PSP
     if "!BUILD_VITA!"=="1" echo   - Vita
     if "!BUILD_XBOX!"=="1" echo   - Xbox ^(original^)
+    if "!BUILD_PS5!"=="1" echo   - PS5
 )
 echo ============================================
 echo.
@@ -261,6 +265,22 @@ if "!BUILD_XBOX!"=="1" (
         if exist xbox\SaveSync.iso copy xbox\SaveSync.iso "%OUTPUT_DIR%\xboxsync.iso"
         echo [Xbox build complete!]
         set OK_LIST=!OK_LIST! Xbox
+    )
+)
+
+REM Build PS5 client via WSL (ps5-native-app-boilerplate toolchain, fetched
+REM into ~/.cache/gamesync-ps5 on first use; needs clang-18/lld-18 in WSL)
+if "!BUILD_PS5!"=="1" (
+    echo.
+    echo [Building PS5 client via WSL...]
+    wsl bash /mnt/e/projects/3dssync/ps5/build.sh
+    if errorlevel 1 (
+        echo [ERROR] PS5 build failed!
+        set FAIL_LIST=!FAIL_LIST! PS5
+    ) else (
+        copy ps5\dist\ps5sync.zip "%OUTPUT_DIR%\ps5sync.zip"
+        echo [PS5 build complete!]
+        set OK_LIST=!OK_LIST! PS5
     )
 )
 

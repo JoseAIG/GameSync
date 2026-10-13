@@ -19,6 +19,7 @@ self-hosted local server. One Python FastAPI server plus these clients:
 | `psp/` | C, pspdev/PSPSDK (WSL) | `EBOOT.PBP` |
 | `vita/` | C, VitaSDK (WSL) | `vitasync.vpk` |
 | `xbox/` | C, nxdk + SDL2/SDL_ttf (WSL) | `default.xbe`, `.iso` |
+| `ps5/` | C, PS5 Payload SDK via ps5-native-app-boilerplate (WSL) | `ps5sync.zip` (`PPSA90543`) |
 | `android/` | Kotlin, Compose, Room, Retrofit | `gamesync.apk` |
 | `desktop/` | Python, PyQt6 | — |
 | `steamdeck/` | Python, PyQt6 + pygame | — |
@@ -40,7 +41,7 @@ build_all.bat ps2 ps3 psp        :: specific targets
 ```
 
 Targets: `3ds`, `nds`, `gc`, `wiiu`, `android`, `ps2`, `ps3`, `psp`, `vita`,
-`xbox`, `all`. A failing target does not abort the run; failures are summarized
+`xbox`, `ps5`, `all`. A failing target does not abort the run; failures are summarized
 at the end and the exit code is non-zero. Artifacts land in `build_output/`.
 
 Individual builds, if you need them:
@@ -56,6 +57,7 @@ Individual builds, if you need them:
 # WSL targets — see build_all.bat for the full env var incantations
 wsl bash /mnt/e/projects/3dssync/ps2/tools/build-wsl.sh
 wsl bash /mnt/e/projects/3dssync/xbox/build.sh
+wsl bash /mnt/e/projects/3dssync/ps5/build.sh     # fetches the boilerplate into ~/.cache/gamesync-ps5
 
 # Android
 cd android && ./gradlew.bat --no-daemon :app:assembleDebug
@@ -69,6 +71,7 @@ cd server && uv run pytest tests/test_sync.py -v
 cd server && uv run pytest tests/test_api.py::TestUploadEndpoint::test_upload_success -v
 cd steamdeck && python -m pytest tests/ -q
 cd desktop  && python -m pytest tests/ -q
+wsl bash ps5/tests/run_host_tests.sh             # needs a Python that imports server/app
 python -m pytest shared/tests/ -q
 ```
 
@@ -393,6 +396,48 @@ DAT has never seen). A card scan only ever walks a real `Dreamcast/` or
 `OPENMENU/SAVES/` folder — never a bare drive root, since a reader's drive
 letter can point anywhere. `MemoryCard1` (the shared card) and `openmenu` (the
 menu's own VMU) are skipped.
+
+**PS5** — a native title (`PPSA90543`, loaded from `/data/homebrew/` by
+ShadowMountPlus), not a payload. Emulator saves only, no PS5 game saves:
+PS5_RetroArch `.srm` (system from the ROM's `content/<system>/` folder or its
+playlist, save id from the server's `/catalog/resolve/batch`; saves sit in
+`savefiles/<core name>/` because this port sorts by core unless
+`sort_savefiles_enable = "false"`, `ps5/src/retroarch.c`), SwanStationPS5 per-game
+`saves/<SERIAL>_1.mcd` cards (`/ps1-card`), PS5SX2 folders on the shared
+`memcards/Mcd001.ps2` (`/ps2-files`; `src/ps2mc.c` ports `ps2mc.py` — the P2FD
+it builds must hash identically to the server's, `ps5/tests/test_ps2mc.c`
+checks that against the Python), Porpoise (Dolphin) GameCube `.gci` files as
+`GC_<CODE>` via `/gc-card?format=gci` and Wii `title/00010000/<hex>/data/` as
+`WII_<CODE>` 3DSS bundles, ProsperoEden Switch saves as `NSW_<TITLEID>` bundles,
+PS5CEMU-HAR Wii U (`mlc01/usr/save/00050000/<lo>/user`) and 3DS (Azahar
+`.../title/00040000/<lo>/data/00000001`) folders as the Wii U / 3DS clients'
+16-hex ids. XPSemu (Xbox) is catalog-only: its saves are inside a qcow2 HDD
+image. SwanStationPS5 keeps its data in `/data/SwanStationPS5` (builds before
+Oct 2026: `/data/PSXS5`, still scanned for games); the auto dir prefers the
+new one. Its card names depend on its *Memory Card 1 Type*
+(`swanstation_MemoryCards_Card1Type` in the active profile's
+`SwanStationPS5.ini`/`psxs5.ini`, per-game `game-settings/<serial>.ini`;
+profiles under `profiles/<name>/`): Libretro → `<SERIAL>_1.mcd` or, for a
+`.chd`, `<game file>_1.mcd` unless a `serial.txt` sits beside the game (GameSync
+writes it); PerGame → serial; PerGameTitle → `<title>_1.mcd`.
+`saves_swanstation_info()` reads all of it and `saves_swanstation_fix()` moves a
+card filed under the other name (rename, or `.bak` when it's a copy of the card
+in use or of the server's save; two genuinely different cards are left alone).
+**`NSW_<16 hex>` is the Switch save-id scheme** — the PS5 client is the first
+to sync Switch; a bare `0100…` id would validate as a 3DS title. Folder saves
+hash like the server: sha256 of file contents in `strcmp` path order, the
+order the bundle is written in (`ps5/tests/test_bundle.c` cross-checks with
+`bundle.py`). Gotchas:
+- A sandboxed title can open files in `/data` but not list folders; the app
+  asks the HEN for access first thing in `main()` (`ps5_unlock.c`).
+- The title's own C heap can't hand out a few MB: `malloc` is `--wrap`ped onto
+  dlmalloc over direct memory (`ps5_heap.c`).
+- Never let the link import `libScePosixForWebKit` (`getaddrinfo`,
+  `strcasestr` live only there and crash a game process) or
+  `libSceKeyboard`/`libSceImeDialog` (the title won't launch). Hence IP-only
+  server URLs and the `--as-needed` patch in `ps5/build.sh`.
+- Files written for an emulator must be world-writable (`0666`/`0777`): each
+  emulator is another sandboxed title.
 
 **Android / Steam Deck** — emulator save locations live in per-emulator scanners
 (`android/.../emulators/impl/`, `steamdeck/scanner/`), kept deliberately parallel

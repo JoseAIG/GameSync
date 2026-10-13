@@ -95,6 +95,7 @@ desktop/.ra_cache/
 
 # others
 *.json
+!ps5/sce_sys/param.json
 *.exe
 *.bak
 *.lst

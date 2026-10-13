@@ -40,7 +40,7 @@ typedef struct
     char system[12];
     char title_id[64];
     char name[128];
-    char rom_file[256];     /* RetroArch: the ROM's file name (its id comes from it) */
+    char rom_file[256];     /* RetroArch: the ROM's file name (its id comes from it); PS5SX2: the game file's stem */
     char path[PATH_LEN];    /* .srm / .mcd / the shared .ps2 card */
     char ps2_dir[33];       /* SAVE_PS2_FOLDER: the folder on the card */
     bool path_is_dir;       /* SAVE_GCI not here yet: path is the card folder it goes to */
@@ -115,6 +115,26 @@ const char *saves_swanstation_mode_name(SsCardMode mode);
  * file's name without extension (what the title mode names it after), or NULL. */
 void saves_swanstation_card_path(const Config *config, const char *serial, const char *game_stem,
                                  char *out, size_t size);
+
+/* PS5SX2 per-game cards (ps2_cards=per_game). stem is the game file's name
+ * without extension. The game's card is <card folder>/<card> where <card> is what
+ * settings/<stem>.ini sets as MemoryCards/Slot1_Filename, or <stem>.ps2 when
+ * that's unset or a shared card (written into the ini when assign). */
+/* PS5SX2's card folder: <dir>/memcards, or <dir> when cards sit there and
+ * memcards/ doesn't exist; memcards/ is made when create and neither has any. */
+void saves_ps5sx2_card_dir(const Config *config, bool create, char *out, size_t size);
+bool saves_ps5sx2_game_card(const Config *config, const char *stem, bool assign, char *out,
+                            size_t size);
+/* PS5SX2's own record of a game image's serial (its chd-serials.txt cache),
+ * compact ("SLUS20488"); and the other way, the stem of the game file in
+ * that cache with a serial. false when PS5SX2 hasn't read the game yet. */
+bool saves_ps5sx2_serial(const Config *config, const char *game_path, char *out, size_t size);
+bool saves_ps5sx2_game_for_serial(const Config *config, const char *serial, char *stem,
+                                  size_t size);
+/* Gives an installed game its own card: assigned in its settings, made when
+ * missing, and holding its save (serial) copied from a shared card when it
+ * has none yet. True when something changed. */
+bool saves_ps5sx2_setup_game(const Config *config, const char *stem, const char *serial);
 
 /* After a card is replaced: sets aside the game's quick-resume state
  * (<user>/states/<game id>.resume), which carries the old card and would

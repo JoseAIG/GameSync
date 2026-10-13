@@ -131,6 +131,18 @@ Slug rules live in `shared/rom_id/normalizer.py`. Server and clients must agree
 here or the same save lands under two different keys — change this module with
 care and run `shared/tests/test_sync_id.py`.
 
+**Square-bracket tags are not identity.** `normalize_rom_name` drops every
+`[...]` group — fan translations (`[T-En by X v1.1]`), hacks (`[Hack by Y]`),
+GoodTools flags (`[!]`) — so every version of a translation, a hack and the
+unpatched ROM share one save slot (Android's `toTitleId` always did this).
+Regions in `(...)` still keep releases apart. `normalize_rom_name(name,
+keep_tags=True)` keeps them for the callers that need a key for one *file*
+(is this exact ROM installed? the RA-variant pickers in MiSTer and Steam
+Deck). `server/migrate_tagged_slug_ids.py` re-keys saves stored under a
+tagged id. Saturn's rule is `{"strategy": "serial", "prefix": "SAT_"}` with
+`canonical_saturn_serial` (hyphen kept, `-N` disc index dropped), so
+`/catalog/resolve` returns `SAT_T-4507G` like the catalog and every client.
+
 ### Sync protocol — three-way hash
 
 Metadata-first, conflict-free across multiple consoles. Client state is the hash
@@ -196,6 +208,7 @@ server/app/
   middleware/auth.py   X-API-Key on everything except GET /status
   models/save.py       SaveBundle, SaveMetadata, SyncPlan, ConflictInfo
   routes/              saves sync titles roms catalog normalize status update web
+                       emulators (support files, e.g. PS5SX2 GameIndex.yaml)
   services/            bundle storage db game_names rom_scanner rom_db
                        ps1mc ps2mc gc_cards ps1_cards ps2_cards mcr2vmp_tool
                        ctr_rom dat_normalizer saturn_archives serialstation share_token
@@ -255,8 +268,9 @@ with the single wrapping folder stripped and every client hoists it on
 extract (`msu.plan_extraction`). Identity: a pack must share the save slot of
 the ROM it patched, but its name keeps the MSU author's `[Hack by …]` (which
 no plain ROM carries) while a translated baseline keeps *its* tags
-(`[T-En …] [FastROM …] [n]`) — so neither "keep brackets" nor "strip
-brackets" works. `msu.identity_candidates` yields name → name minus `[Hack
+(`[T-En …] [FastROM …] [n]`) in its display name. (The save id drops every
+bracket tag anyway; `identity_candidates` predates that and still picks which
+catalog name a pack is filed under.) `msu.identity_candidates` yields name → name minus `[Hack
 by …]` → cart member → cart minus hack tags; `rom_scanner._resolve_msu_identities`
 runs after the whole scan and takes the first candidate that is a plain ROM
 in the catalog, else the first DAT hit, else the hack-stripped name. Display
@@ -403,8 +417,11 @@ PS5_RetroArch `.srm` (system from the ROM's `content/<system>/` folder or its
 playlist, save id from the server's `/catalog/resolve/batch`; saves sit in
 `savefiles/<core name>/` because this port sorts by core unless
 `sort_savefiles_enable = "false"`, `ps5/src/retroarch.c`), SwanStationPS5 per-game
-`saves/<SERIAL>_1.mcd` cards (`/ps1-card`), PS5SX2 folders on the shared
-`memcards/Mcd001.ps2` (`/ps2-files`; `src/ps2mc.c` ports `ps2mc.py` — the P2FD
+`saves/<SERIAL>_1.mcd` cards (`/ps1-card`), PS5SX2 game folders, each
+game on its own `memcards/<game file>.ps2` by default (GameSync writes
+`MemoryCards/Slot1_Filename` into PS5SX2's per-game `settings/<game file>.ini`
+and copies the save off the shared `Mcd001.ps2`; `ps2_cards=shared` keeps one
+card for all) (`/ps2-files`; `src/ps2mc.c` ports `ps2mc.py` — the P2FD
 it builds must hash identically to the server's, `ps5/tests/test_ps2mc.c`
 checks that against the Python), Porpoise (Dolphin) GameCube `.gci` files as
 `GC_<CODE>` via `/gc-card?format=gci` and Wii `title/00010000/<hex>/data/` as
@@ -438,6 +455,10 @@ order the bundle is written in (`ps5/tests/test_bundle.c` cross-checks with
   server URLs and the `--as-needed` patch in `ps5/build.sh`.
 - Files written for an emulator must be world-writable (`0666`/`0777`): each
   emulator is another sandboxed title.
+- A store install of PS5SX2 (ProsperoStore) has no `/data/PCSX2/resources/`,
+  so no `GameIndex.yaml` and no per-game fixes (Star Ocean 3 crashes at boot).
+  The client installs it from the server's `GET /emulators/ps5sx2/game-index`
+  (`server/app/routes/emulators.py` proxies PS5SX2's latest release) when missing.
 
 **Android / Steam Deck** — emulator save locations live in per-emulator scanners
 (`android/.../emulators/impl/`, `steamdeck/scanner/`), kept deliberately parallel

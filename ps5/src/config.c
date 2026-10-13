@@ -52,6 +52,7 @@ void config_defaults(Config *config)
     util_copy(config->porpoise_dir, sizeof(config->porpoise_dir), "/data/porpoise");
     util_copy(config->eden_dir, sizeof(config->eden_dir), "/data/prosperoeden");
     util_copy(config->ps2_card, sizeof(config->ps2_card), "Mcd001.ps2");
+    config->ps2_per_game = true;
     util_copy(config->cemu_dir, sizeof(config->cemu_dir), "/data/ps5cemu");
     util_copy(config->xemu_dir, sizeof(config->xemu_dir), "/data/xemu");
     config->auto_dirs = CFG_AUTO_RETROARCH | CFG_AUTO_SWANSTATION | CFG_AUTO_PS5SX2 |
@@ -243,6 +244,8 @@ bool config_load(Config *config)
             set_dir(config, CFG_AUTO_CEMU, config->cemu_dir, value, "/data/ps5cemu");
         else if (strcmp(key, "xemu_dir") == 0)
             set_dir(config, CFG_AUTO_XEMU, config->xemu_dir, value, "/data/xemu");
+        else if (strcmp(key, "ps2_cards") == 0)
+            config->ps2_per_game = !util_ieq(value, "shared");
         else if (strcmp(key, "ps2_card") == 0 && *value)
             util_copy(config->ps2_card, sizeof(config->ps2_card), value);
         else if (strcmp(key, "ps1_target") == 0)
@@ -277,7 +280,9 @@ bool config_save(const Config *config)
                      "eden_dir=%s\n"
                      "cemu_dir=%s\n"
                      "xemu_dir=%s\n"
-                     "# PS5SX2 card that new PS2 saves are written to (in <ps5sx2_dir>/memcards)\n"
+                     "# PS5SX2 cards: per_game = memcards/<game file>.ps2 for each game, set as\n"
+                     "# its Slot 1 card in settings/<game file>.ini; shared = every game on ps2_card\n"
+                     "ps2_cards=%s\n"
                      "ps2_card=%s\n"
                      "# Where PS1 games from the catalog go: swanstation or retroarch\n"
                      "ps1_target=%s\n",
@@ -288,7 +293,8 @@ bool config_save(const Config *config)
                      dir_value(config, CFG_AUTO_PORPOISE, config->porpoise_dir),
                      dir_value(config, CFG_AUTO_EDEN, config->eden_dir),
                      dir_value(config, CFG_AUTO_CEMU, config->cemu_dir),
-                     dir_value(config, CFG_AUTO_XEMU, config->xemu_dir), config->ps2_card,
+                     dir_value(config, CFG_AUTO_XEMU, config->xemu_dir),
+                     config->ps2_per_game ? "per_game" : "shared", config->ps2_card,
                      config->ps1_in_retroarch ? "retroarch" : "swanstation");
     if (n < 0 || (size_t)n >= sizeof(text))
         return false;

@@ -49,7 +49,13 @@ if "$OUT/test_unzip" "$OUT/evil.zip" "$OUT/evil" 2>/dev/null; then echo "travers
 
 $CC $CFLAGS -o "$OUT/test_logic" "$HERE/test_logic.c" "$SRC/json.c" "$SRC/naming.c" \
     "$SRC/http.c" "$SRC/sync.c" "$SRC/saves.c" "$SRC/retroarch.c" "$SRC/bundle.c" \
-    "$SRC/config.c" "$SRC/ps2mc.c" "$SRC/catalog.c" "$SRC/unzip.c" "$SRC/util.c" "$SRC/sha256.c" -lz
-"$OUT/test_logic"
+    "$SRC/config.c" "$SRC/ps2mc.c" "$SRC/saturn.c" "$SRC/catalog.c" "$SRC/unzip.c" "$SRC/util.c" "$SRC/sha256.c" -lz
+# the GameIndex.yaml download, against a stand-in for the server's route
+head -c 300000 /dev/urandom > "$OUT/GameIndex.yaml"
+"$PY" "$HERE/game_index_fixture.py" "$OUT/port" "$OUT/GameIndex.yaml" &
+FIXTURE=$!
+trap 'kill $FIXTURE 2>/dev/null; rm -rf "$OUT"' EXIT
+for _ in $(seq 50); do [ -s "$OUT/port" ] && break; sleep 0.1; done
+"$OUT/test_logic" "http://127.0.0.1:$(cat "$OUT/port")" "$OUT/GameIndex.yaml"
 
 echo "all host tests passed"

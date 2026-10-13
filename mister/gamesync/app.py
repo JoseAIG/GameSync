@@ -3188,7 +3188,8 @@ def _normalize(name: str) -> str:
     if cached is None:
         from shared.rom_id import normalize_rom_name
 
-        cached = normalize_rom_name(key)
+        # a file key: a translation is a different ROM from the retail one
+        cached = normalize_rom_name(key, keep_tags=True)
         if len(_NORMALIZE_CACHE) > 40000:
             _NORMALIZE_CACHE.clear()
         _NORMALIZE_CACHE[key] = cached

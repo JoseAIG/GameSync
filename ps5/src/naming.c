@@ -144,7 +144,7 @@ static const SystemInfo SYSTEMS[] = {
     {"SG1000", "sg-1000", "SG-1000", true},
     {"32X", "sega32x", "32X", true},
     {"SEGACD", "segacd", "Sega CD", false},
-    {"SAT", "Saturn", "Saturn", false},
+    {"SAT", "Saturn", "Saturn", true}, /* Beetle Saturn: <game>.bkr */
     {"DC", "dreamcast", "Dreamcast", false},
     {"PCE", "pcengine", "PC Engine", true},
     {"TG16", "pcengine", "TurboGrafx-16", true},

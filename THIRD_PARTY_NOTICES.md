@@ -167,7 +167,7 @@ are in [README.md](README.md).
 | PSPSDK debug font (**M. R. Brown**, **J. Forshaw**, **J. Kelley**) | BSD | `vita/` |
 | Vegur typeface (**Sora Sagano**) | Public domain | `xbox/assets/font.ttf`, `psp/source/font_data.c` |
 | Vegur typeface (**Sora Sagano**) | Public domain | `xbox/assets/font.ttf`, `ps2/source/font_data.c` (baked glyph atlas) |
-| Vegur typeface (**Sora Sagano**) | Public domain | `ps5/src/font_data.c` (baked glyph atlas), `ps5/sce_sys/icon0.png` |
+| Vegur typeface (**Sora Sagano**) | Public domain | `ps5/src/font_data.c` (baked glyph atlas); the GameSync wordmark in every client's artwork (`tools/brand_art.py`) |
 | Apktool (**Connor Tumbleson**) | Apache-2.0 — [`licenses/Apache-2.0.txt`](licenses/Apache-2.0.txt) | `tools/apktool.jar` |
 | zlib (**Gailly**, **Adler**) | zlib | several clients |
 | PolarSSL / mbed TLS | Apache-2.0 | `ps3/` via PSL1GHT |
@@ -213,6 +213,7 @@ are **not** covered by GameSync's license and retain their original terms:
 | `server/data/ps3db.txt` | PS3 title lists |
 | `server/data/xbox_titleids.json`, `xbox_titleid_map.txt` | dbox.tools |
 | Wii U title ids in `server/data/dats/Nintendo - Wii U.dat` | wiiubrew Title database |
+| `GameIndex.yaml` (not in the repository) | PCSX2's game database (GPL-3.0) as shipped by [PS5SX2](https://github.com/Swordpdf/PS5SX2); downloaded at run time by `server/app/routes/emulators.py` and passed unchanged to the PS5 client, which writes it to `/data/PCSX2/resources/` |
 
 ---
 

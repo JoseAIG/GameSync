@@ -24,6 +24,8 @@
 #include <time.h>
 
 #define PS1_CARD_SIZE 131072u
+/* the id rules ids.txt was made under (bumped when they change) */
+#define ID_RULES "2"
 
 static void progress(SyncContext *ctx, const char *message, int done, int total)
 {
@@ -39,6 +41,18 @@ void sync_init(SyncContext *ctx)
     config_apply(&ctx->config, &ctx->server);
     kv_load(&ctx->state, data_path("state.txt"));
     kv_load(&ctx->ids, data_path("ids.txt"));
+    /* ids.txt from before translations and hacks shared their game's slot
+     * (and Saturn went by serial): resolved again */
+    if (strcmp(kv_get(&ctx->ids, "_rules") ? kv_get(&ctx->ids, "_rules") : "", ID_RULES) != 0)
+    {
+        char path[PATH_LEN];
+        util_copy(path, sizeof(path), ctx->ids.path);
+        kv_free(&ctx->ids);
+        memset(&ctx->ids, 0, sizeof(ctx->ids));
+        util_copy(ctx->ids.path, sizeof(ctx->ids.path), path);
+        kv_set(&ctx->ids, "_rules", ID_RULES);
+        kv_save(&ctx->ids);
+    }
     kv_load(&ctx->installed, data_path("installed.txt"));
 }
 
@@ -66,6 +80,30 @@ static void set_error(SyncContext *ctx, const char *what, int code)
  * shared/rom_id. Results are cached in ids.txt. */
 static bool resolve_ids(SyncContext *ctx)
 {
+    /* the catalog already knows the id of a file it installed: a Saturn CHD
+     * (no IP.BIN to read) or a translation keeps its game's serial there */
+    for (int i = 0; ctx->catalog && i < ctx->saves.count; ++i)
+    {
+        SaveEntry *e = &ctx->saves.items[i];
+        if (e->title_id[0] || e->emu != EMU_RETROARCH || !e->rom_file[0])
+            continue;
+        const RomRow *r = catalog_find_file(ctx->catalog, e->system, e->rom_file);
+        if (!r)
+        {
+            /* a CUE/BIN install: the catalog row is the CHD of the same name */
+            char chd[300];
+            util_copy(chd, sizeof(chd), e->rom_file);
+            util_strip_ext(chd);
+            util_copy(chd + strlen(chd), sizeof(chd) - strlen(chd), ".chd");
+            r = catalog_find_file(ctx->catalog, e->system, chd);
+        }
+        if (!r || !r->title_id[0])
+            continue;
+        util_copy(e->title_id, sizeof(e->title_id), r->title_id);
+        char key[300];
+        snprintf(key, sizeof(key), "%s|%s", e->system, e->rom_file);
+        kv_set(&ctx->ids, key, r->title_id);
+    }
     const int batch = 100;
     int pending = 0;
     for (int i = 0; i < ctx->saves.count; ++i)
@@ -308,6 +346,7 @@ static void add_server_only(SyncContext *ctx, const JsonValue *t, const char *ti
     const char *console = json_get_str(t, "console_type", json_get_str(t, "system", ""));
     bool ps1 = util_ieq(console, "PS1") || util_ieq(console, "PSX");
     bool ps2 = util_ieq(console, "PS2");
+    bool here = false; /* a PS2 game file with this serial is in PS5SX2 */
     bool gc = strncmp(tid, "GC_", 3) == 0 && strlen(tid) == 7;
     bool wii = strncmp(tid, "WII_", 4) == 0 && strlen(tid) == 8;
     bool nsw = strncmp(tid, "NSW_", 4) == 0 && strlen(tid) == 20;
@@ -393,10 +432,33 @@ static void add_server_only(SyncContext *ctx, const JsonValue *t, const char *ti
         e->emu = EMU_PS5SX2;
         e->kind = SAVE_PS2_FOLDER;
         util_copy(e->system, sizeof(e->system), "PS2");
-        snprintf(e->path, sizeof(e->path), "%s/memcards/%s", ctx->config.ps5sx2_dir,
-                 ctx->config.ps2_card);
+        /* per game: the card of the game file here with that serial (PS5SX2
+         * knows it, also for CHDs the catalog only has a name slug for),
+         * else of the file the catalog installs */
+        char stem[200] = "";
+        if (ctx->config.ps2_per_game)
+            here = saves_ps5sx2_game_for_serial(&ctx->config, tid, stem, sizeof(stem));
+        for (int i = 0; ctx->config.ps2_per_game && !stem[0] && ctx->catalog && i < ctx->catalog->rom_count; ++i)
+        {
+            const RomRow *r = &ctx->catalog->roms[i];
+            if (util_ieq(r->system, "PS2") && strcmp(r->title_id, tid) == 0)
+            {
+                util_safe_filename(stem, sizeof(stem), r->filename);
+                util_strip_ext(stem);
+                break;
+            }
+        }
+        /* the game's settings name the card once its save is downloaded */
+        util_copy(e->rom_file, sizeof(e->rom_file), stem);
+        if (!stem[0] || !saves_ps5sx2_game_card(&ctx->config, stem, false, e->path, sizeof(e->path)))
+        {
+            char dir[PATH_LEN];
+            saves_ps5sx2_card_dir(&ctx->config, false, dir, sizeof(dir));
+            snprintf(e->path, sizeof(e->path), "%s/%s", dir, ctx->config.ps2_card);
+        }
     }
-    e->installed = kv_get(&ctx->installed, tid) != NULL;
+    /* installed.txt has the catalog's id, a name slug for some PS2 CHDs */
+    e->installed = here || kv_get(&ctx->installed, tid) != NULL;
     e->status = ST_SERVER_ONLY;
 }
 
@@ -673,8 +735,10 @@ static bool download_ps2(SaveEntry *e, const uint8_t *data, size_t size)
     char error[96] = "";
     if (!util_file_exists(e->path))
     {
-        /* no card yet: a blank one in PCSX2's own .ps2 form */
+        /* no card yet: a blank one in PCSX2's own .ps2 form (a game's own
+         * card can be the first in a memcards/ folder not made yet) */
         memset(&card, 0, sizeof(card));
+        util_mkdirs_parent(e->path);
         card.ecc = !util_has_suffix_i(e->path, ".mc2");
     }
     else if (!ps2mc_load_file(e->path, &card, error, sizeof(error)))
@@ -832,6 +896,11 @@ bool sync_download(SyncContext *ctx, SaveEntry *e)
     /* quick resume would load the old card back out of the game's state */
     if (e->emu == EMU_SWANSTATION && e->kind == SAVE_PS1_CARD)
         saves_swanstation_drop_resume(&ctx->config, e->path, e->title_id);
+    if (e->emu == EMU_PS5SX2 && ctx->config.ps2_per_game && e->rom_file[0])
+    {
+        char card[PATH_LEN];
+        saves_ps5sx2_game_card(&ctx->config, e->rom_file, true, card, sizeof(card));
+    }
     record_synced(ctx, e, hash);
     util_copy(e->local_hash, sizeof(e->local_hash), hash);
     util_copy(e->server_hash, sizeof(e->server_hash), hash);
@@ -887,4 +956,43 @@ SyncSummary sync_all(SyncContext *ctx)
             s.failed++;
     }
     return s;
+}
+
+/* PCSX2's game database, which PS5SX2 reads from resources/GameIndex.yaml
+ * (OrbisDir("resources")): every game's fixes come from it, and Star Ocean 3
+ * doesn't even boot without its VuAddSubHack. PS5SX2's installer copies it;
+ * a store install of just the app doesn't, so it comes from the server
+ * (server/app/routes/emulators.py, the latest PS5SX2 release's copy). Only
+ * written when missing: a copy that's there is PS5SX2's own. */
+int sync_ps5sx2_game_index(SyncContext *ctx)
+{
+    const Config *c = &ctx->config;
+    if (!c->ps5sx2_dir[0] || !util_dir_exists(c->ps5sx2_dir))
+        return 0;
+    char path[PATH_LEN];
+    snprintf(path, sizeof(path), "%s/resources/GameIndex.yaml", c->ps5sx2_dir);
+    if (util_file_exists(path))
+        return 0;
+    HttpBuffer out = {0};
+    HttpResult res = {0};
+    int status = http_get(&ctx->server, "/api/v1/emulators/ps5sx2/game-index", &out, &res);
+    char want[65] = "", got[65] = "", tag[64] = "";
+    http_header(&res, "X-File-Hash", want, sizeof(want));
+    http_header(&res, "X-Source-Tag", tag, sizeof(tag));
+    if (status == 200)
+        util_sha256_hex(out.data, out.len, got);
+    int result = -1;
+    if (status != 200)
+        app_log("PS5SX2 GameIndex.yaml: the server answered %s", http_error_text(status));
+    else if (!want[0] || strcmp(want, got) != 0)
+        app_log("PS5SX2 GameIndex.yaml: damaged download");
+    else if (util_mkdirs_parent(path) && util_write_file_atomic(path, out.data, out.len))
+    {
+        app_log("PS5SX2 GameIndex.yaml from %s installed (%zu bytes)", tag, out.len);
+        result = 1;
+    }
+    else
+        app_log("PS5SX2 GameIndex.yaml: can't write %s", path);
+    http_buffer_free(&out);
+    return result;
 }

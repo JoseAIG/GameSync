@@ -18,6 +18,7 @@
  * USB drives and say which core runs them.
  */
 #include "retroarch.h"
+#include "saturn.h"
 
 #include "json.h"
 #include "naming.h"
@@ -156,6 +157,7 @@ static const DefaultCore CORES[] = {
     {"LYNX", "handy_libretro", "Handy"},
     {"POKEMINI", "pokemini_libretro", "PokeMini"},
     {"JAGUAR", "virtualjaguar_libretro", "Virtual Jaguar"},
+    {"SAT", "mednafen_saturn_libretro", "Beetle Saturn"},
     {"PS1", "mednafen_psx_hw_libretro", "Beetle PSX HW"},
 };
 
@@ -388,12 +390,20 @@ static bool find_existing(const char *base, const char *srm, char *out, size_t s
     return found;
 }
 
+/* The save's extension: .srm (RetroArch's save RAM), except Beetle Saturn,
+ * which writes the Saturn's internal backup RAM itself as <game>.bkr - the
+ * 32 KB Mednafen image the server keeps for SAT_ ids (shared/saturn_format.py). */
+static const char *save_ext(const char *system)
+{
+    return util_ieq(system, "SAT") ? ".bkr" : ".srm";
+}
+
 static void save_path(const RaSettings *s, const RaGame *game, char *out, size_t size)
 {
     char stem[256], srm[300];
     util_copy(stem, sizeof(stem), util_basename(game->path));
     util_strip_ext(stem);
-    snprintf(srm, sizeof(srm), "%s.srm", stem);
+    snprintf(srm, sizeof(srm), "%s%s", stem, save_ext(game->system));
     char content_dir[PATH_LEN];
     util_copy(content_dir, sizeof(content_dir), game->path);
     char *slash = strrchr(content_dir, '/');
@@ -479,8 +489,13 @@ void retroarch_scan(const Config *config, const KvStore *ids, SaveList *list)
         char key[300];
         snprintf(key, sizeof(key), "%s|%s", g->system, file);
         const char *id = kv_get(ids, key);
+        char sat[64];
         if (id)
             util_copy(e->title_id, sizeof(e->title_id), id);
+        /* a Saturn disc says which game it is (a translation keeps the
+         * original's IP.BIN), whatever the file is called */
+        else if (util_ieq(g->system, "SAT") && saturn_title_id(g->path, sat, sizeof(sat)))
+            util_copy(e->title_id, sizeof(e->title_id), sat);
         e->installed = true; /* the ROM is here: Sync all may fetch its save */
         saves_hash_local(e);
     }

@@ -31,6 +31,7 @@
 #include "sync.h"
 #include "version.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1020,17 +1021,22 @@ static void draw_settings(void)
             masked[i] = i < 4 ? c->api_key[i] : '*';
         masked[n] = 0;
     }
+    char ps2_cards[96];
+    if (c->ps2_per_game)
+        util_copy(ps2_cards, sizeof(ps2_cards), "One per game");
+    else
+        snprintf(ps2_cards, sizeof(ps2_cards), "Shared: %s", c->ps2_card);
     const char *labels[SET_COUNT] = {"Server URL",
                                      "API key",
                                      "PS1 games install to",
-                                     "PS5SX2 card for new PS2 saves",
+                                     "PS5SX2 memory cards",
                                      "Test connection",
                                      "Refresh catalog",
                                      "Rescan saves and games"};
     const char *values[SET_COUNT] = {c->server_url[0] ? c->server_url : "(not set)",
                                      masked,
                                      c->ps1_in_retroarch ? "RetroArch" : "SwanStation",
-                                     c->ps2_card,
+                                     ps2_cards,
                                      "",
                                      "",
                                      ""};
@@ -1370,6 +1376,37 @@ static void repair_swanstation(void)
         app_log("SwanStation: fixed the cards of %d game(s)", fixed);
 }
 
+/* Per-game PS5SX2 cards: each installed PS2 game gets its card assigned in
+ * its settings, made, and its save copied over from a shared card
+ * (saves_ps5sx2_setup_game). The catalog gives each game file's serial. */
+static void setup_ps5sx2_cards(void)
+{
+    if (!sync_ctx.config.ps2_per_game)
+        return;
+    InstalledList games = {0};
+    installed_scan(&sync_ctx.config, &games);
+    int changed = 0;
+    for (int i = 0; i < games.count; ++i)
+    {
+        const InstalledGame *g = &games.items[i];
+        if (g->emu != EMU_PS5SX2)
+            continue;
+        /* PS5SX2's serial for the image, else the catalog's id when it is one */
+        char serial[32] = "";
+        if (!saves_ps5sx2_serial(&sync_ctx.config, g->path, serial, sizeof(serial)))
+        {
+            const RomRow *row = catalog_loaded ? catalog_find_file(&catalog, "PS2", g->filename) : NULL;
+            if (row && !strchr(row->title_id, '_'))
+                util_copy(serial, sizeof(serial), row->title_id);
+        }
+        if (saves_ps5sx2_setup_game(&sync_ctx.config, g->name, serial))
+            changed++;
+    }
+    installed_free(&games);
+    if (changed)
+        app_log("PS5SX2: set up the cards of %d game(s)", changed);
+}
+
 static void refresh_saves(void)
 {
     Busy busy = {.title = "Looking at saves"};
@@ -1381,6 +1418,8 @@ static void refresh_saves(void)
         load_catalog();
     sync_ctx.catalog = catalog_loaded ? &catalog : NULL;
     repair_swanstation();
+    setup_ps5sx2_cards();
+    int game_index = config_ready(&sync_ctx.config) ? sync_ps5sx2_game_index(&sync_ctx) : 0;
     busy_draw(&busy, true);
     bool ok = sync_refresh(&sync_ctx);
     sync_ctx.progress = NULL;
@@ -1399,11 +1438,211 @@ static void refresh_saves(void)
         set_banner(attention ? COL_WARN : COL_OK, "%d saves, %d need attention",
                    sync_ctx.saves.count, attention);
     }
+    if (game_index > 0)
+        set_banner(COL_OK, "PS5SX2: installed its game database (per-game fixes) from the server");
+    else if (game_index < 0)
+        set_banner(COL_WARN, "PS5SX2 has no game database (resources/GameIndex.yaml) and the "
+                             "server couldn't send one: some games won't boot");
     if (ss_conflicts)
         set_banner(COL_WARN,
                    "SwanStation: %d game(s) have two different cards under both names; left as they "
                    "are (gamesync.log lists them)",
                    ss_conflicts);
+}
+
+/* ------------------------------------------------------------ install for a save */
+
+/* "Star Ocean - Till the End of Time (USA) (Disc 1).chd" and the server's
+ * "Star Ocean - Till the End of Time (USA)" both become
+ * "staroceantilltheendoftimeusa": letters and digits, no extension, no disc tag. */
+static void name_key(char *out, size_t size, const char *name)
+{
+    char tmp[256];
+    util_copy(tmp, sizeof(tmp), name);
+    const char *dot = strrchr(tmp, '.');
+    if (dot && strlen(dot) <= 5 && !strchr(dot, ' ') && !strchr(dot, ')'))
+        tmp[dot - tmp] = 0;
+    size_t n = 0;
+    for (const char *p = tmp; *p && n + 1 < size; ++p)
+    {
+        if (*p == '(' && tolower((unsigned char)p[1]) == 'd' && tolower((unsigned char)p[2]) == 'i' &&
+            tolower((unsigned char)p[3]) == 's' && tolower((unsigned char)p[4]) == 'c' && p[5] == ' ')
+        {
+            const char *close = strchr(p, ')');
+            if (close)
+            {
+                p = close;
+                continue;
+            }
+        }
+        if (isalnum((unsigned char)*p))
+            out[n++] = (char)tolower((unsigned char)*p);
+    }
+    out[n] = 0;
+}
+
+/* The catalog game a save belongs to: same title id (a disc and its card share
+ * a serial, a ROM and its .srm a slug), else the same system and name - a PS2
+ * CHD's catalog id can be a name slug while its save goes by serial. -1 if none. */
+static int game_for_save(const SaveEntry *e)
+{
+    if (!catalog_loaded)
+        return -1;
+    char want[200] = "", key[200];
+    name_key(want, sizeof(want), e->name);
+    int by_name = -1;
+    for (int i = 0; i < catalog.rom_count; ++i)
+    {
+        const RomRow *r = &catalog.roms[i];
+        if (e->title_id[0] && strcmp(r->title_id, e->title_id) == 0)
+            return i;
+        if (by_name < 0 && want[0] && util_ieq(r->system, e->system))
+        {
+            name_key(key, sizeof(key), r->filename);
+            if (strcmp(key, want) == 0)
+                by_name = i;
+        }
+    }
+    return by_name;
+}
+
+/* How a game is installed for its save: as the catalog installs it. */
+static void plan_for_save(const RomRow *r, InstallPlan *plan)
+{
+    catalog_plan(&sync_ctx.config, r, plan);
+}
+
+static bool game_on_console(const RomRow *r)
+{
+    InstallPlan plan;
+    catalog_plan(&sync_ctx.config, r, &plan);
+    if (plan.supported && catalog_installed(&plan))
+        return true;
+    if (!r->has_cue)
+        return false;
+    catalog_plan_cue(&sync_ctx.config, r, &plan);
+    return plan.supported && catalog_installed(&plan);
+}
+
+/* Saves waiting for their game's download: synced once it has arrived. */
+typedef struct
+{
+    char rom_id[128];
+    char save_id[64];
+} PendingSync;
+static PendingSync pending[16];
+static int pending_count;
+
+/* Queues a save's game; with sync, the save follows once it's installed. */
+static void install_for_save(const SaveEntry *e, int ri, bool sync)
+{
+    const RomRow *rom = &catalog.roms[ri];
+    InstallPlan plan;
+    plan_for_save(rom, &plan);
+    if (!plan.supported)
+    {
+        set_banner(COL_WARN, "%s", plan.reason);
+        return;
+    }
+    downloads_set_server(&sync_ctx.server);
+    bool queued = downloads_add(rom, &plan);
+    if (sync && pending_count < (int)(sizeof(pending) / sizeof(pending[0])))
+    {
+        util_copy(pending[pending_count].rom_id, sizeof(pending[0].rom_id), rom->rom_id);
+        util_copy(pending[pending_count].save_id, sizeof(pending[0].save_id), e->title_id);
+        pending_count++;
+    }
+    if (!queued)
+        set_banner(COL_DIM, "%s is already in the queue%s", rom->name,
+                   sync ? "; its save follows once it's installed" : "");
+    else
+        set_banner(COL_OK, "Queued %s%s  -  see Downloads", rom->name,
+                   sync ? "; its save follows once it's installed" : "");
+}
+
+/* Saves whose game has arrived: synced from the main loop (run_ready_syncs),
+ * not from inside the download bookkeeping. */
+typedef struct
+{
+    char save_id[64];
+    char game[160];
+    char stem[200]; /* the installed file's name without extension */
+} ReadySync;
+static ReadySync ready[16];
+static int ready_count;
+
+/* A download finished: the saves that were waiting for it are ready. */
+static void mark_ready(const DlItem *done)
+{
+    for (int i = 0; i < pending_count;)
+    {
+        if (strcmp(pending[i].rom_id, done->rom.rom_id) != 0)
+        {
+            ++i;
+            continue;
+        }
+        if (ready_count < (int)(sizeof(ready) / sizeof(ready[0])))
+        {
+            ReadySync *r = &ready[ready_count++];
+            util_copy(r->save_id, sizeof(r->save_id), pending[i].save_id);
+            util_copy(r->game, sizeof(r->game), done->rom.name);
+            util_copy(r->stem, sizeof(r->stem), util_basename(done->plan.dest));
+            util_strip_ext(r->stem);
+        }
+        pending[i] = pending[--pending_count];
+    }
+}
+
+/* The game is installed: rescan, so the save gets the path the emulator
+ * will read for it, and download it. */
+static void run_ready_syncs(void)
+{
+    if (!ready_count)
+        return;
+    ReadySync jobs[16];
+    int n = ready_count;
+    memcpy(jobs, ready, sizeof(ReadySync) * (size_t)n);
+    ready_count = 0;
+    app_log("install and sync: rescanning for %d save(s)", n);
+    refresh_saves();
+    for (int k = 0; k < n; ++k)
+    {
+        const ReadySync *job = &jobs[k];
+        SaveEntry *e = saves_find(&sync_ctx.saves, job->save_id);
+        if (!e)
+        {
+            app_log("install and sync: %s isn't in the list", job->save_id);
+            set_banner(COL_WARN, "Installed %s, but its save isn't on the server any more",
+                       job->game);
+            continue;
+        }
+        /* PS5SX2 hasn't read the new game's serial yet: its card is named
+         * after the file just installed */
+        if (e->emu == EMU_PS5SX2 && e->status == ST_SERVER_ONLY && sync_ctx.config.ps2_per_game)
+        {
+            util_copy(e->rom_file, sizeof(e->rom_file), job->stem);
+            saves_ps5sx2_game_card(&sync_ctx.config, job->stem, false, e->path, sizeof(e->path));
+        }
+        app_log("install and sync: %s is %s, to %s", job->save_id, save_status_text(e->status),
+                e->path);
+        if (e->status != ST_SERVER_ONLY && e->status != ST_DOWNLOAD)
+        {
+            set_banner(COL_WARN, "Installed %s; its save is %s, so it's left for you (Details)",
+                       job->game, save_status_text(e->status));
+            continue;
+        }
+        Busy busy = {.title = "Syncing the save"};
+        snprintf(busy.message, sizeof(busy.message), "%s", e->name);
+        busy_draw(&busy, true);
+        bool ok = sync_apply(&sync_ctx, e);
+        app_log("install and sync: %s %s", job->save_id, ok ? "done" : e->message);
+        if (ok)
+            set_banner(COL_OK, "Installed %s and synced its save", job->game);
+        else
+            set_banner(COL_ERR, "Installed %s; the save: %s", job->game,
+                       e->message[0] ? e->message : "failed");
+    }
+    rebuild_saves();
 }
 
 static void save_details(SaveEntry *e)
@@ -1412,8 +1651,24 @@ static void save_details(SaveEntry *e)
     snprintf(body, sizeof(body), "%s\nThis console: %s\nServer: %s\nStatus: %s", e->name,
              e->local ? "has a save" : "no save", e->server ? "has a save" : "no save",
              save_status_text(e->status));
-    const char *opts[3];
-    int n = 0, up = -1, down = -1;
+    const char *opts[5];
+    int n = 0, up = -1, down = -1, install_sync = -1, install_only = -1;
+    /* the game isn't here: install it (and bring the save along), as the
+     * MiSTer and the other clients offer */
+    int ri = game_for_save(e);
+    if (ri >= 0 && !game_on_console(&catalog.roms[ri]))
+    {
+        size_t len = strlen(body);
+        snprintf(body + len, sizeof(body) - len, "\nGame not installed: %s",
+                 catalog.roms[ri].filename);
+        if (e->server && !e->local)
+        {
+            install_sync = n;
+            opts[n++] = "Install the game and sync the save";
+        }
+        install_only = n;
+        opts[n++] = "Install the game only";
+    }
     if (e->local && sync_ctx.compared)
     {
         up = n;
@@ -1427,6 +1682,11 @@ static void save_details(SaveEntry *e)
     opts[n++] = "Close";
     int pick = ui_choose(e->status == ST_CONFLICT ? "Both saves changed" : "Save details", body,
                          opts, n);
+    if (pick >= 0 && (pick == install_sync || pick == install_only))
+    {
+        install_for_save(e, ri, pick == install_sync);
+        return;
+    }
     if (pick < 0 || (pick != up && pick != down))
         return;
     Busy busy = {.title = pick == up ? "Uploading" : "Downloading"};
@@ -1457,6 +1717,15 @@ static void sync_selected(void)
     case ST_DOWNLOAD:
     case ST_SERVER_ONLY: break;
     default: save_details(e); return;
+    }
+    if (e->status == ST_SERVER_ONLY)
+    {
+        int ri = game_for_save(e);
+        if (ri >= 0 && !game_on_console(&catalog.roms[ri]))
+        {
+            save_details(e);
+            return;
+        }
     }
     if (e->status == ST_SERVER_ONLY && e->kind == SAVE_PS2_FOLDER)
     {
@@ -1671,8 +1940,17 @@ static void settings_activate(void)
         settings_changed();
         break;
     case SET_PS2_CARD:
-        if (ui_keyboard("PS5SX2 card file (in memcards/)", c->ps2_card, sizeof(c->ps2_card)))
-            settings_changed();
+        /* per game -> shared (asking which card) -> per game */
+        if (c->ps2_per_game)
+        {
+            c->ps2_per_game = false;
+            ui_keyboard("Shared PS5SX2 card (in memcards/)", c->ps2_card, sizeof(c->ps2_card));
+            if (!c->ps2_card[0])
+                util_copy(c->ps2_card, sizeof(c->ps2_card), "Mcd001.ps2");
+        }
+        else
+            c->ps2_per_game = true;
+        settings_changed();
         break;
     case SET_TEST: test_connection(); break;
     case SET_REFRESH_CATALOG:
@@ -1871,11 +2149,19 @@ static void collect_completed(void)
             kv_set(&sync_ctx.installed, done.rom.title_id, emulator_tag(done.plan.emu));
             kv_save(&sync_ctx.installed);
         }
+        if (done.plan.emu == EMU_PS5SX2 && sync_ctx.config.ps2_per_game)
+        {
+            char stem[200];
+            util_copy(stem, sizeof(stem), util_basename(done.plan.dest));
+            util_strip_ext(stem);
+            saves_ps5sx2_setup_game(&sync_ctx.config, stem, done.rom.title_id);
+        }
         if (done.plan.emu == EMU_SWANSTATION)
             saves_swanstation_fix(&sync_ctx.config, done.plan.cue ? done.plan.check : done.plan.dest,
                                   done.rom.title_id, NULL);
         set_banner(COL_OK, "Installed %s", done.rom.name);
         app_log("installed %s -> %s", done.rom.rom_id, done.plan.dest);
+        mark_ready(&done);
     }
     if (any)
     {
@@ -1919,6 +2205,7 @@ void ui_run(bool data_listable, const char *status)
             continue;
         }
         collect_completed();
+        run_ready_syncs();
         handle_input(pressed);
         draw_view();
         plat_present();

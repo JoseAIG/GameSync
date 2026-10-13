@@ -36,7 +36,8 @@ typedef struct
     char eden_dir[PATH_LEN];        /* /data/prosperoeden (Switch) */
     char cemu_dir[PATH_LEN];        /* /data/ps5cemu (Wii U, 3DS in azahar/) */
     char xemu_dir[PATH_LEN];        /* /data/xemu (Xbox) */
-    char ps2_card[64];              /* card new PS2 saves go to: Mcd001.ps2 */
+    bool ps2_per_game;              /* PS5SX2: a card per game (<game file>.ps2), else ps2_card */
+    char ps2_card[64];              /* the shared card new PS2 saves go to: Mcd001.ps2 */
     bool ps1_in_retroarch;          /* PS1 catalog installs: RetroArch, not SwanStation */
     unsigned auto_dirs;             /* CFG_AUTO_*: found on the console, "auto" in the file */
     char retroarch_title[PATH_LEN]; /* where the RetroArch title folder was found, "" if not */

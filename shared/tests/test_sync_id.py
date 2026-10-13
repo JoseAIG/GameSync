@@ -408,3 +408,65 @@ def test_dreamcast_serial_helpers_round_trip():
     # Devices name folders after IP.BIN, which keeps Sega's MK prefix.
     assert dc_device_folder_ids("51000") == ["MK51000", "51000"]
     assert dc_device_folder_ids("T-1249M") == ["T1249M"]
+
+
+# ---------------------------------------------------------------------------
+# Saturn: SAT_<product code>, hyphen kept, one slot for every disc
+# ---------------------------------------------------------------------------
+
+
+def test_saturn_uses_the_stored_serial_form():
+    result = resolve(ResolveInput(system="SAT", serial="T-4507G"))
+    assert result.sync_id == "SAT_T-4507G"
+    assert result.strategy == "serial"
+
+
+def test_saturn_later_discs_share_the_first_discs_slot():
+    assert resolve(ResolveInput(system="SAT", serial="T-4507G-1")).sync_id == "SAT_T-4507G"
+
+
+def test_saturn_resolves_a_translated_file_to_the_games_serial():
+    def lookup(system, filename):
+        assert "[T-En" in filename  # the server's DAT lookup strips it
+        return "T-4507G"
+
+    result = resolve(
+        ResolveInput(system="SAT",
+                     rom_filename="Grandia (Japan) (Disc 1) [T-En by TrekkiesUnite118 v1.1].cue"),
+        serial_lookup=lookup,
+    )
+    assert result.sync_id == "SAT_T-4507G"
+
+
+# ---------------------------------------------------------------------------
+# Translations and hacks share the original game's slot
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("name", [
+    "Chrono Trigger (Japan).sfc",
+    "Chrono Trigger (Japan) [T-En by X v1.0].sfc",
+    "Chrono Trigger (Japan) [T-En by X v1.1].sfc",
+    "Chrono Trigger (Japan) [T-En by X v1.1] [Hack by Y].sfc",
+    "Chrono Trigger (Japan) [!].sfc",
+])
+def test_every_version_of_a_game_shares_one_slug(name):
+    assert slug_sync_id("SNES", name) == "SNES_chrono_trigger_japan"
+
+
+def test_a_hack_plays_its_base_games_save():
+    assert slug_sync_id("SNES", "Super Mario World (USA) [Hack by Foo v2].sfc") == \
+        "SNES_super_mario_world_usa"
+
+
+def test_regions_still_keep_releases_apart():
+    assert slug_sync_id("SNES", "Chrono Trigger (USA).sfc") != \
+        slug_sync_id("SNES", "Chrono Trigger (Japan) [T-En by X].sfc")
+
+
+def test_keep_tags_tells_the_files_apart():
+    from shared.rom_id import normalize_rom_name
+
+    assert normalize_rom_name("Game (Japan) [T-En by X].sfc", keep_tags=True) != \
+        normalize_rom_name("Game (Japan).sfc", keep_tags=True)
+    assert normalize_rom_name("Game (Japan) [T-En by X].sfc") == normalize_rom_name("Game (Japan).sfc")

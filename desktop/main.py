@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import traceback
+from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication, QMessageBox
 from window import SaveManagerWindow
 
@@ -44,6 +45,8 @@ def main(argv: list[str] | None = None):
 
     qt_argv = [sys.argv[0]]
     app = QApplication(qt_argv)
+    # window/taskbar icon (tools/brand_art.py)
+    app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "gamesync.png")))
     sys.excepthook = _global_excepthook
     window = SaveManagerWindow()
     window.show()

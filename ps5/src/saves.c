@@ -6,8 +6,9 @@
  *  - RetroArch (PPSA99169): see retroarch.c.
  *  - SwanStationPS5 (PPSA98510): one card per game, <dir>/saves/<serial>_1.mcd
  *    with the serial as the disc spells it (SLUS-01041).
- *  - PS5SX2 (PPSA99203): PCSX2 cards in <dir>/memcards/, every game on one
- *    shared 8 MB card (Mcd001.ps2 unless the user picked another).
+ *  - PS5SX2 (PPSA99203): PCSX2 cards in <dir>/memcards/ (or <dir>): a card per game
+ *    (<game file>.ps2, set in the game's settings/<game file>.ini), or every
+ *    game on one shared 8 MB card (Mcd001.ps2 unless the user picked another).
  */
 #include "saves.h"
 
@@ -19,6 +20,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -463,39 +465,382 @@ static void scan_ps2_card(const char *path, SaveList *list, int *duplicates)
     ps2mc_free(&card.card);
 }
 
-static void scan_ps5sx2(const Config *config, SaveList *list)
+/* PS5SX2's card folder: memcards/ when it exists, else the PCSX2 folder
+ * itself (ps5/coreorbis/orbis-shims/orbis_paths.cpp, OrbisDir). Where no
+ * card is yet, memcards/ is made (create), the folder PS5SX2 then uses. */
+void saves_ps5sx2_card_dir(const Config *config, bool create, char *out, size_t size)
 {
-    char dir[PATH_LEN];
-    util_path_join(dir, sizeof(dir), config->ps5sx2_dir, "memcards");
-    /* the configured card first, so a game on two cards binds to it */
-    char preferred[PATH_LEN];
-    util_path_join(preferred, sizeof(preferred), dir, config->ps2_card);
-    int duplicates = 0;
-    int64_t size = util_file_size(preferred);
-    if (size == PS2MC_PS2_SIZE || size == PS2MC_MC2_SIZE)
-        scan_ps2_card(preferred, list, &duplicates);
-    DIR *d = opendir(dir);
+    util_path_join(out, size, config->ps5sx2_dir, "memcards");
+    if (util_dir_exists(out))
+        return;
+    DIR *d = opendir(config->ps5sx2_dir);
     if (d)
     {
         struct dirent *de;
-        while ((de = readdir(d)) != NULL)
-        {
-            if (!util_has_suffix_i(de->d_name, ".ps2") && !util_has_suffix_i(de->d_name, ".mc2"))
-                continue;
-            if (strcmp(de->d_name, config->ps2_card) == 0)
-                continue;
-            char path[PATH_LEN];
-            util_path_join(path, sizeof(path), dir, de->d_name);
-            size = util_file_size(path);
-            if (size == PS2MC_PS2_SIZE || size == PS2MC_MC2_SIZE)
-                scan_ps2_card(path, list, &duplicates);
-        }
+        bool cards = false;
+        while (!cards && (de = readdir(d)) != NULL)
+            cards = util_has_suffix_i(de->d_name, ".ps2") || util_has_suffix_i(de->d_name, ".mc2");
         closedir(d);
+        if (cards)
+        {
+            util_copy(out, size, config->ps5sx2_dir);
+            return;
+        }
     }
+    if (create)
+        util_mkdirs(out);
+}
+
+/* The cards every game shares: PCSX2's two default slots and the configured one. */
+static bool is_shared_card(const Config *config, const char *name)
+{
+    return util_ieq(name, "Mcd001.ps2") || util_ieq(name, "Mcd002.ps2") ||
+           util_ieq(name, config->ps2_card);
+}
+
+static void scan_card_dir(const Config *config, const char *dir, bool shared, SaveList *list,
+                          int *duplicates)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return;
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL)
+    {
+        if (!util_has_suffix_i(de->d_name, ".ps2") && !util_has_suffix_i(de->d_name, ".mc2"))
+            continue;
+        if (is_shared_card(config, de->d_name) != shared || strcmp(de->d_name, config->ps2_card) == 0)
+            continue;
+        char path[PATH_LEN];
+        util_path_join(path, sizeof(path), dir, de->d_name);
+        int64_t size = util_file_size(path);
+        if (size == PS2MC_PS2_SIZE || size == PS2MC_MC2_SIZE)
+            scan_ps2_card(path, list, duplicates);
+    }
+    closedir(d);
+}
+
+static void scan_ps5sx2(const Config *config, SaveList *list)
+{
+    char dir[PATH_LEN];
+    saves_ps5sx2_card_dir(config, false, dir, sizeof(dir));
+    int duplicates = 0;
+    /* Per game: each game's own card first, so it wins over a copy of the
+     * same save left on a shared card (expected after the move, not counted). */
+    if (config->ps2_per_game)
+        scan_card_dir(config, dir, false, list, &duplicates);
+    int own_duplicates = duplicates;
+    /* the configured card next, so a game on two shared cards binds to it */
+    char preferred[PATH_LEN];
+    util_path_join(preferred, sizeof(preferred), dir, config->ps2_card);
+    int64_t size = util_file_size(preferred);
+    if (size == PS2MC_PS2_SIZE || size == PS2MC_MC2_SIZE)
+        scan_ps2_card(preferred, list, &duplicates);
+    scan_card_dir(config, dir, true, list, &duplicates);
+    if (!config->ps2_per_game)
+        scan_card_dir(config, dir, false, list, &duplicates);
+    else
+        duplicates = own_duplicates;
     if (duplicates && !list->warning[0])
         snprintf(list->warning, sizeof(list->warning),
                  "%d extra PS2 save folder(s) share a game's serial and aren't synced",
                  duplicates);
+}
+
+/* PS5SX2 per-game cards. When a game starts, PS5SX2 applies
+ * settings/<game file>.ini over gs.ini (ps5/coreorbis/main-boot.cpp,
+ * orbis_apply_ini_file): "Section/Key=value" lines, the last one winning,
+ * <game file> being the image's name without its extension. A game's card
+ * is the one its MemoryCards/Slot1_Filename names in memcards/. */
+static void ini_value(const char *text, const char *key, char *out, size_t size)
+{
+    out[0] = 0;
+    size_t key_len = strlen(key);
+    for (const char *line = text; line && *line;)
+    {
+        const char *end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line) : strlen(line);
+        while (len && (*line == ' ' || *line == '\t'))
+            line++, len--;
+        if (len > key_len && strncmp(line, key, key_len) == 0)
+        {
+            const char *p = line + key_len;
+            const char *stop = line + len;
+            while (p < stop && (*p == ' ' || *p == '\t'))
+                p++;
+            if (p < stop && *p == '=')
+            {
+                p++;
+                while (p < stop && (*p == ' ' || *p == '\t'))
+                    p++;
+                while (stop > p && (stop[-1] == ' ' || stop[-1] == '\t' || stop[-1] == '\r'))
+                    stop--;
+                size_t n = (size_t)(stop - p);
+                if (n >= size)
+                    n = size - 1;
+                memcpy(out, p, n);
+                out[n] = 0;
+            }
+        }
+        line = end ? end + 1 : NULL;
+    }
+}
+
+/* Replaces every key= line of text (or appends one): a malloc'd text. */
+static char *ini_set(const char *text, const char *key, const char *value)
+{
+    size_t key_len = strlen(key);
+    size_t cap = strlen(text) + key_len + strlen(value) + 4;
+    char *out = malloc(cap);
+    if (!out)
+        return NULL;
+    size_t n = 0;
+    bool done = false;
+    for (const char *line = text; *line;)
+    {
+        const char *end = strchr(line, '\n');
+        size_t len = end ? (size_t)(end - line + 1) : strlen(line);
+        const char *k = line;
+        while (*k == ' ' || *k == '\t')
+            k++;
+        const char *after = k + key_len;
+        bool match = strncmp(k, key, key_len) == 0 && after < line + len;
+        while (match && after < line + len && (*after == ' ' || *after == '\t'))
+            after++;
+        if (match && after < line + len && *after == '=')
+        {
+            if (!done)
+                n += (size_t)sprintf(out + n, "%s=%s\n", key, value);
+            done = true;
+        }
+        else
+        {
+            memcpy(out + n, line, len);
+            n += len;
+            if (!end)
+                out[n++] = '\n';
+        }
+        line += len;
+    }
+    if (!done)
+        n += (size_t)sprintf(out + n, "%s=%s\n", key, value);
+    out[n] = 0;
+    return out;
+}
+
+/* PS5SX2's serial cache: <cache>/chd-serials.txt, OrbisDir("cache") being
+ * cache/ when it exists, else the PCSX2 folder (ps5/frontend/fe_games.cpp,
+ * MakeSerialKey). One line per image: path TAB size TAB mtime TAB serial.
+ * The shelf reads a serial once and keeps it there, CHDs included, which the
+ * catalog can't always name (its id is then a name slug). Calls found() with
+ * each image path and its compact serial ("SLUS20488") until it returns true. */
+static bool ps5sx2_serials(const Config *config,
+                           bool (*found)(const char *path, const char *serial, void *user),
+                           void *user)
+{
+    char file[PATH_LEN];
+    snprintf(file, sizeof(file), "%s/cache/chd-serials.txt", config->ps5sx2_dir);
+    char *text = (char *)util_read_file(file, NULL);
+    if (!text)
+    {
+        snprintf(file, sizeof(file), "%s/chd-serials.txt", config->ps5sx2_dir);
+        text = (char *)util_read_file(file, NULL);
+    }
+    if (!text)
+        return false;
+    bool done = false;
+    char *save = NULL;
+    for (char *line = strtok_r(text, "\r\n", &save); line && !done;
+         line = strtok_r(NULL, "\r\n", &save))
+    {
+        char *fields[4];
+        int n = 0;
+        for (char *p = line; n < 4; ++n)
+        {
+            fields[n] = p;
+            char *tab = strchr(p, '\t');
+            if (!tab)
+            {
+                ++n;
+                break;
+            }
+            *tab = 0;
+            p = tab + 1;
+        }
+        if (n < 4 || !fields[3][0])
+            continue;
+        char serial[32];
+        util_compact_serial(serial, sizeof(serial), fields[3]);
+        if (serial[0])
+            done = found(fields[0], serial, user);
+    }
+    free(text);
+    return done;
+}
+
+typedef struct
+{
+    const char *key;  /* the image path, or the serial */
+    char *out;
+    size_t size;
+} SerialLookup;
+
+static bool serial_of_path(const char *path, const char *serial, void *user)
+{
+    SerialLookup *l = user;
+    if (strcmp(path, l->key) != 0)
+        return false;
+    util_copy(l->out, l->size, serial);
+    return true;
+}
+
+static bool path_of_serial(const char *path, const char *serial, void *user)
+{
+    SerialLookup *l = user;
+    if (strcmp(serial, l->key) != 0 || !util_file_exists(path))
+        return false;
+    util_copy(l->out, l->size, path);
+    return true;
+}
+
+bool saves_ps5sx2_serial(const Config *config, const char *game_path, char *out, size_t size)
+{
+    SerialLookup l = {game_path, out, size};
+    return ps5sx2_serials(config, serial_of_path, &l);
+}
+
+bool saves_ps5sx2_game_for_serial(const Config *config, const char *serial, char *stem,
+                                  size_t size)
+{
+    char compact[32], path[PATH_LEN];
+    util_compact_serial(compact, sizeof(compact), serial);
+    SerialLookup l = {compact, path, sizeof(path)};
+    if (!compact[0] || !ps5sx2_serials(config, path_of_serial, &l))
+        return false;
+    util_copy(stem, size, util_basename(path));
+    util_strip_ext(stem);
+    return true;
+}
+
+bool saves_ps5sx2_game_card(const Config *config, const char *stem, bool assign, char *out,
+                            size_t size)
+{
+    if (!stem || !stem[0])
+        return false;
+    char ini[PATH_LEN];
+    snprintf(ini, sizeof(ini), "%s/settings/%s.ini", config->ps5sx2_dir, stem);
+    size_t len;
+    char *text = (char *)util_read_file(ini, &len);
+    char card[200];
+    ini_value(text ? text : "", "MemoryCards/Slot1_Filename", card, sizeof(card));
+    /* a card of the player's own choosing stays; a shared one is replaced */
+    if (!card[0] || is_shared_card(config, card))
+    {
+        /* the core reads the line into a 256-byte buffer; '#' would read as a comment */
+        char name[160];
+        util_safe_filename(name, sizeof(name) - 4, stem);
+        for (char *p = name; *p; ++p)
+            if (*p == '#')
+                *p = '_';
+        snprintf(card, sizeof(card), "%s.ps2", name);
+        if (assign)
+        {
+            char *named = ini_set(text ? text : "", "MemoryCards/Slot1_Filename", card);
+            /* and the slot on: a card of its own is the point */
+            char *updated = named ? ini_set(named, "MemoryCards/Slot1_Enable", "true") : NULL;
+            free(named);
+            if (updated && util_mkdirs_parent(ini) &&
+                util_write_file_atomic(ini, updated, strlen(updated)))
+                app_log("PS5SX2: %s uses its own card %s", stem, card);
+            free(updated);
+        }
+    }
+    free(text);
+    char dir[PATH_LEN];
+    saves_ps5sx2_card_dir(config, assign, dir, sizeof(dir));
+    snprintf(out, size, "%s/%s", dir, card);
+    return true;
+}
+
+static bool card_has_serial(const Ps2Card *card, const char *serial)
+{
+    char s[16];
+    for (int i = 0; i < card->count; ++i)
+        if (ps2mc_serial_from_dirname(card->dirs[i].name, s, sizeof(s)) && strcmp(s, serial) == 0)
+            return true;
+    return false;
+}
+
+bool saves_ps5sx2_setup_game(const Config *config, const char *stem, const char *serial)
+{
+    char path[PATH_LEN];
+    if (!saves_ps5sx2_game_card(config, stem, true, path, sizeof(path)))
+        return false;
+    Ps2CardFile own;
+    char error[96] = "";
+    bool exists = util_file_exists(path);
+    if (exists && !ps2mc_load_file(path, &own, error, sizeof(error)))
+    {
+        app_log("PS5SX2: %s: %s", path, error);
+        return false;
+    }
+    if (!exists)
+    {
+        memset(&own, 0, sizeof(own));
+        own.ecc = !util_has_suffix_i(path, ".mc2");
+    }
+    bool changed = false;
+    char ps2_serial[16] = "";
+    util_compact_serial(ps2_serial, sizeof(ps2_serial), serial ? serial : "");
+    /* the game's save still on a shared card: copied over, the original stays */
+    if (ps2_serial[0] && !card_has_serial(&own.card, ps2_serial))
+    {
+        char dir[PATH_LEN];
+        saves_ps5sx2_card_dir(config, false, dir, sizeof(dir));
+        const char *shared[3] = {config->ps2_card, "Mcd001.ps2", "Mcd002.ps2"};
+        for (int c = 0; c < 3 && !changed; ++c)
+        {
+            if (c && util_ieq(shared[c], config->ps2_card))
+                continue;
+            char from[PATH_LEN];
+            util_path_join(from, sizeof(from), dir, shared[c]);
+            int64_t size = util_file_size(from);
+            if (size != PS2MC_PS2_SIZE && size != PS2MC_MC2_SIZE)
+                continue;
+            Ps2CardFile src;
+            if (!ps2mc_load_file(from, &src, error, sizeof(error)))
+                continue;
+            for (int i = 0; i < src.card.count; ++i)
+            {
+                char s[16];
+                if (!ps2mc_serial_from_dirname(src.card.dirs[i].name, s, sizeof(s)) ||
+                    strcmp(s, ps2_serial) != 0)
+                    continue;
+                /* a deep copy through the server's folder format */
+                size_t p2fd_size;
+                uint8_t *p2fd = ps2mc_build_p2fd(&src.card.dirs[i], &p2fd_size);
+                Ps2Dir copy;
+                if (p2fd && ps2mc_parse_p2fd(p2fd, p2fd_size, &copy))
+                {
+                    if (ps2mc_put_dir(&own.card, &copy))
+                        changed = true;
+                    ps2mc_free_dir(&copy);
+                }
+                free(p2fd);
+                if (changed)
+                    app_log("PS5SX2: %s's save %s copied from %s to its own card", stem,
+                            src.card.dirs[i].name, shared[c]);
+            }
+            ps2mc_free(&src.card);
+        }
+    }
+    bool ok = true;
+    if (changed || !exists)
+        ok = ps2mc_save_file(path, &own, (uint32_t)time(NULL), error, sizeof(error));
+    if (!ok)
+        app_log("PS5SX2: can't write %s: %s", path, error);
+    ps2mc_free(&own.card);
+    return ok && (changed || !exists);
 }
 
 /* ------------------------------------------------------------ Porpoise */

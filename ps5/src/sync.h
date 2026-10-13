@@ -56,4 +56,9 @@ typedef struct
  * for games that aren't installed here. */
 SyncSummary sync_all(SyncContext *ctx);
 
+/* Installs PS5SX2's game database (resources/GameIndex.yaml, the per-game
+ * fixes) from the server when PS5SX2 is here without it: 1 installed,
+ * 0 nothing to do, -1 failed (logged). */
+int sync_ps5sx2_game_index(SyncContext *ctx);
+
 #endif

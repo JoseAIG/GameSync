@@ -46,6 +46,9 @@ def main():
     app.setApplicationName("SaveSync")
     app.setApplicationDisplayName("GameSync")
     app.setStyle("Fusion")
+    # window/taskbar icon (tools/brand_art.py)
+    from PyQt6.QtGui import QIcon
+    app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "gamesync.png")))
 
     window = MainWindow()
 

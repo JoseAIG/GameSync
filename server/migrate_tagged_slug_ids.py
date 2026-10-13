@@ -69,10 +69,14 @@ def _stored(title_id: str) -> bool:
     return db.exists(title_id) or (settings.save_dir / title_id).exists()
 
 
-def _collect_groups() -> dict[str, list[str]]:
-    """New id -> the stored ids (old spellings, and the new one) to merge."""
+def _collect_groups(extra: dict[str, str] | None = None) -> dict[str, list[str]]:
+    """New id -> the stored ids (old spellings, and the new one) to merge.
+    extra maps more old ids to new ones (a ROM no longer in the catalog)."""
     rom_db.init_db(settings.save_dir)
     seen: dict[str, set[str]] = defaultdict(set)
+    for old, new in (extra or {}).items():
+        if _stored(old):
+            seen[new].add(old)
     for row in rom_db.list_all():
         pair = old_and_new_ids(str(row.get("system") or ""), str(row.get("filename") or ""))
         if pair and _stored(pair[0]):
@@ -86,9 +90,9 @@ def _collect_groups() -> dict[str, list[str]]:
     return groups
 
 
-def migrate(apply: bool = False) -> tuple[int, int]:
+def migrate(apply: bool = False, extra: dict[str, str] | None = None) -> tuple[int, int]:
     """Return (groups_examined, groups_changed)."""
-    groups = _collect_groups()
+    groups = _collect_groups(extra)
     examined = changed = 0
     for canonical, variants in sorted(groups.items()):
         examined += 1
@@ -142,8 +146,11 @@ def unmatched_tagged() -> list[str]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="write changes (default: dry run)")
+    parser.add_argument("--also", action="append", default=[], metavar="OLD=NEW",
+                        help="also move OLD to NEW (a tagged save whose ROM left the catalog)")
     args = parser.parse_args()
-    examined, changed = migrate(apply=args.apply)
+    extra = dict(item.split("=", 1) for item in args.also)
+    examined, changed = migrate(apply=args.apply, extra=extra)
     mode = "Applied" if args.apply else "DRY RUN - would update"
     print(f"\n{mode}: {changed} of {examined} save(s) under a translation's or hack's own id.")
     left = unmatched_tagged()

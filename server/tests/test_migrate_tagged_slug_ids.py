@@ -72,3 +72,12 @@ def test_two_versions_and_the_original_merge_newest_wins(tmp_save_dir):
     assert (slot / "current" / "game.srm").read_bytes() == b"newest"
     kept = sorted(p.read_bytes() for p in (slot / "history").rglob("game.srm"))
     assert kept == [b"old", b"original"]  # the others are kept in history
+
+
+def test_an_explicit_mapping_moves_a_save_whose_rom_left_the_catalog(tmp_save_dir):
+    _catalog("Something Else (USA).sfc")
+    _make_title("SNES_chrono_trigger_t_en_by_x_v1_1_japan", b"translated", 100)
+
+    assert migrate(apply=True) == (0, 0)
+    migrate(apply=True, extra={"SNES_chrono_trigger_t_en_by_x_v1_1_japan": "SNES_chrono_trigger_japan"})
+    assert _ids() == {"SNES_chrono_trigger_japan"}

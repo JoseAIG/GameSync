@@ -1423,6 +1423,9 @@ static void setup_ps5sx2_cards(void)
 static void refresh_saves(void)
 {
     Busy busy = {.title = "Looking at saves"};
+    /* busy_draw redraws the tab behind the box while the list is freed and
+     * rebuilt: the Saves view must not point into it until rebuild_saves */
+    save_view.count = 0;
     sync_ctx.progress = busy_progress;
     sync_ctx.progress_user = &busy;
     busy_draw(&busy, true);

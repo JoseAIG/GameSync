@@ -7,10 +7,12 @@
 #include "json.h"
 #include "naming.h"
 #include "ps2mc.h"
+#include "retroarch.h"
 #include "saturn.h"
 #include "saves.h"
 #include "sync.h"
 #include "util.h"
+#include "xcci.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,7 +69,7 @@ static void test_naming(void)
     CHECK(system_from_folder("roms") == NULL);
     CHECK(strcmp(retroarch_folder_for_system("MD"), "genesis") == 0);
     CHECK(retroarch_syncs_system("GBA") && !retroarch_syncs_system("PS2"));
-    CHECK(retroarch_syncs_system("SAT")); /* Beetle Saturn .bkr */
+    CHECK(retroarch_syncs_system("SAT")); /* Beetle Saturn backup RAM, .srm */
     CHECK(install_emulator_for_system("PS2", false) == EMU_PS5SX2);
     CHECK(install_emulator_for_system("PS1", false) == EMU_SWANSTATION);
     CHECK(install_emulator_for_system("PS1", true) == EMU_RETROARCH);
@@ -365,8 +367,168 @@ static void test_saturn(void)
     CHECK(system(cmd) == 0);
 }
 
+/* 32 KB Saturn backup RAM, with one save in it or none. */
+static void write_bup(const char *path, bool with_save)
+{
+    static unsigned char d[32768];
+    memset(d, 0, sizeof(d));
+    for (int i = 0; i < 4; ++i)
+        memcpy(d + i * 16, "BackUpRam Format", 16);
+    if (with_save)
+    {
+        d[2 * 64] = 0x80;
+        memcpy(d + 2 * 64 + 4, "GRANDIA_001", 11);
+    }
+    util_mkdirs_parent(path);
+    util_write_file_atomic(path, d, sizeof(d));
+}
+
+static void set_opt(const char *path, const char *text)
+{
+    util_mkdirs_parent(path);
+    util_write_file_atomic(path, text, strlen(text));
+}
+
+/* The Saturn save of the one game in the tree, "" when there's none. */
+static void saturn_entry(const Config *c, char *path, size_t size, char *warning, size_t wsize)
+{
+    SaveList list = {0};
+    KvStore ids = {0};
+    retroarch_scan(c, &ids, &list);
+    path[0] = 0;
+    for (int i = 0; i < list.count; ++i)
+        if (util_ieq(list.items[i].system, "SAT"))
+            snprintf(path, size, "%s", list.items[i].path);
+    snprintf(warning, wsize, "%s", list.warning);
+    saves_free(&list);
+}
+
+static void test_beetle_saturn_save_method(void)
+{
+    char root[] = "/tmp/gs_beetle_XXXXXX";
+    if (!mkdtemp(root))
+    {
+        CHECK(!"mkdtemp");
+        return;
+    }
+    Config c;
+    config_defaults(&c);
+    snprintf(c.retroarch_dir, sizeof(c.retroarch_dir), "%s", root);
+    char game[PATH_LEN], core_opt[PATH_LEN], game_opt[PATH_LEN], srm[PATH_LEN], bkr[PATH_LEN];
+    char bak[PATH_LEN + 8], path[PATH_LEN], warning[200];
+    snprintf(game, sizeof(game), "%s/content/Saturn/Grandia (Japan) (Disc 1).iso", root);
+    util_mkdirs_parent(game);
+    util_write_file_atomic(game, "x", 1);
+    snprintf(core_opt, sizeof(core_opt), "%s/config/Beetle Saturn/Beetle Saturn.opt", root);
+    snprintf(game_opt, sizeof(game_opt), "%s/config/Beetle Saturn/Grandia (Japan) (Disc 1).opt", root);
+    snprintf(srm, sizeof(srm), "%s/savefiles/Beetle Saturn/Grandia (Japan) (Disc 1).srm", root);
+    snprintf(bkr, sizeof(bkr), "%s/savefiles/Beetle Saturn/Grandia (Japan) (Disc 1).bkr", root);
+
+    /* no option anywhere: Libretro, .srm */
+    saturn_entry(&c, path, sizeof(path), warning, sizeof(warning));
+    CHECK(strcmp(path, srm) == 0);
+    /* the core's options say Mednafen: .bkr */
+    set_opt(core_opt, "beetle_saturn_cdimagecache = \"disabled\"\nbeetle_saturn_save_method = \"mednafen\"\n");
+    saturn_entry(&c, path, sizeof(path), warning, sizeof(warning));
+    CHECK(strcmp(path, bkr) == 0);
+    /* the game's own options win */
+    set_opt(game_opt, "beetle_saturn_save_method = \"libretro\"\n");
+    saturn_entry(&c, path, sizeof(path), warning, sizeof(warning));
+    CHECK(strcmp(path, srm) == 0);
+    remove(game_opt);
+    /* Mednafen + shared internal memory: one card for all, not synced */
+    set_opt(core_opt, "beetle_saturn_save_method = \"mednafen\"\nbeetle_saturn_shared_int = \"enabled\"\n");
+    saturn_entry(&c, path, sizeof(path), warning, sizeof(warning));
+    CHECK(!path[0] && strstr(warning, "Shared Internal Memory"));
+
+    /* Libretro, but the save is in a .bkr: renamed to the .srm */
+    set_opt(core_opt, "beetle_saturn_save_method = \"libretro\"\n");
+    write_bup(bkr, true);
+    saturn_entry(&c, path, sizeof(path), warning, sizeof(warning));
+    CHECK(!util_file_exists(bkr) && util_file_exists(srm));
+    /* the core formatted an empty .srm beside a .bkr with saves: they swap */
+    write_bup(srm, false);
+    write_bup(bkr, true);
+    saturn_entry(&c, path, sizeof(path), warning, sizeof(warning));
+    char want[65], got[65];
+    write_bup(game_opt, true); /* scratch copy of a card with saves */
+    util_sha256_file(game_opt, want);
+    remove(game_opt);
+    CHECK(util_sha256_file(srm, got) && strcmp(want, got) == 0);
+    snprintf(bak, sizeof(bak), "%s.bak", srm);
+    CHECK(util_file_exists(bak) && !util_file_exists(bkr));
+
+    char cmd[PATH_LEN + 16];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
+    CHECK(system(cmd) == 0);
+}
+
+/* A two-sector CCI: one stored raw, one LZ4 (5 literals, then a match that
+ * repeats them), checked against the ISO it must decode to. */
+static void test_xcci(void)
+{
+    unsigned char iso[4096];
+    for (int i = 0; i < 2048; ++i)
+        iso[i] = (unsigned char)(i * 7);
+    for (int i = 0; i < 2048; ++i)
+        iso[2048 + i] = "ABCDE"[i % 5];
+    unsigned char lz[16];
+    int n = 0;
+    lz[n++] = (5 << 4) | 15; /* 5 literals, match length 15+ */
+    memcpy(lz + n, "ABCDE", 5);
+    n += 5;
+    lz[n++] = 5; /* offset 5 */
+    lz[n++] = 0;
+    int extra = 2043 - 4 - 15; /* 2043 matched bytes */
+    while (extra >= 255)
+    {
+        lz[n++] = 255;
+        extra -= 255;
+    }
+    lz[n++] = (unsigned char)extra;
+    unsigned char out[2048];
+    CHECK(lz4_block_decode(lz, (size_t)n, out, sizeof(out)) == 2048 && memcmp(out, iso + 2048, 2048) == 0);
+    CHECK(lz4_block_decode(lz, 3, out, sizeof(out)) < 0); /* cut short */
+
+    /* header, sector 0 raw, sector 1 = pad byte + LZ4 + padding, index */
+    unsigned char cci[32 + 2048 + 64 + 12];
+    memset(cci, 0, sizeof(cci));
+    memcpy(cci, "CCIM", 4);
+    cci[4] = 32;
+    unsigned long long usize = 4096;
+    memcpy(cci + 8, &usize, 8);
+    unsigned int pad = (4 - (1 + n) % 4) % 4, s1 = 32 + 2048, idx = s1 + 1 + n + pad;
+    unsigned long long ioff = idx;
+    memcpy(cci + 16, &ioff, 8);
+    cci[24] = 0x00, cci[25] = 0x08; /* block 2048 */
+    cci[28] = 1, cci[29] = 2;
+    memcpy(cci + 32, iso, 2048);
+    cci[s1] = (unsigned char)pad;
+    memcpy(cci + s1 + 1, lz, (size_t)n);
+    unsigned int entries[3] = {32 >> 2, (s1 >> 2) | 0x80000000u, idx >> 2};
+    memcpy(cci + idx, entries, sizeof(entries));
+    char root[] = "/tmp/gs_xcci_XXXXXX";
+    if (!mkdtemp(root))
+        return;
+    char in[PATH_LEN], outp[PATH_LEN], err[160];
+    snprintf(in, sizeof(in), "%s/g.cci", root);
+    snprintf(outp, sizeof(outp), "%s/g.iso", root);
+    util_write_file_atomic(in, cci, idx + sizeof(entries));
+    const char *slices[1] = {in};
+    CHECK(xcci_to_iso(slices, 1, outp, NULL, NULL, err, sizeof(err)));
+    size_t got_size = 0;
+    unsigned char *got = util_read_file(outp, &got_size);
+    CHECK(got && got_size == 4096 && memcmp(got, iso, 4096) == 0);
+    free(got);
+    char cmd[PATH_LEN + 16];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
+    CHECK(system(cmd) == 0);
+}
+
 int main(int argc, char **argv)
 {
+    test_xcci();
+    test_beetle_saturn_save_method();
     test_saturn();
     if (argc == 3)
         test_game_index(argv[1], argv[2]);

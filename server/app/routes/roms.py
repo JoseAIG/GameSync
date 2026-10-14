@@ -786,13 +786,36 @@ def _bundle_zip_for(entry, rom_dir: Path) -> Path | None:
     return zip_path
 
 
-def _serve_zip_member(zip_path: Path, rel_path: str) -> Response:
-    """Stream one member out of a zipped pack.
+# Zip compression methods a member can be served from: stored (0), deflate
+# (8, Python's zipfile) and zstd (93, the zstandard package - zipfile has no
+# zstd before Python 3.14, and Wii RVZ sets are often zipped with it).
+_ZIP_STORED, _ZIP_DEFLATED, _ZIP_ZSTD = 0, 8, 93
 
-    Members are addressed the way the manifest lists them — without the
-    single wrapping folder the pack may have been zipped with — so both
-    spellings are tried.  Deflated members stream through the decompressor;
-    no Range, since a compressed offset can't be seeked to.
+
+def _zip_member_data_offset(zip_path: Path, info: zipfile.ZipInfo) -> int:
+    """Where a member's (compressed) bytes start: past its local header."""
+    with open(zip_path, 'rb') as f:
+        f.seek(info.header_offset)
+        header = f.read(30)
+    if len(header) != 30 or header[:4] != b'PK\x03\x04':
+        raise zipfile.BadZipFile("bad local header")
+    name_len = int.from_bytes(header[26:28], 'little')
+    extra_len = int.from_bytes(header[28:30], 'little')
+    return info.header_offset + 30 + name_len + extra_len
+
+
+def _serve_zip_member(
+    zip_path: Path, rel_path: str, range_header: Optional[str] = None
+) -> Response:
+    """Stream one member out of a zip: a zipped pack's file, or the game in a
+    zipped ROM.
+
+    Members are addressed the way the manifest lists them - without the
+    single wrapping folder the pack may have been zipped with - so both
+    spellings are tried.  A stored member is a plain slice of the zip, so it
+    honours Range (resumable, segmented downloads); a deflated or zstd one
+    streams through its decompressor, without Range, since a compressed
+    offset can't be seeked to.
     """
     try:
         zf = zipfile.ZipFile(zip_path)
@@ -810,31 +833,77 @@ def _serve_zip_member(zip_path: Path, rel_path: str) -> Response:
             break
         except KeyError:
             continue
+    zf.close()
     if info is None or info.is_dir():
-        zf.close()
         return Response(status_code=404,
                         content=f"Bundle file not found: {rel_path}")
+    name = Path(info.filename).name
+    media_type = _content_type(info.filename)
+    disposition = {'Content-Disposition': f'attachment; filename="{name}"'}
+    try:
+        offset = _zip_member_data_offset(zip_path, info)
+    except (OSError, zipfile.BadZipFile) as exc:
+        return Response(status_code=422, content=f"Can't read {info.filename}: {exc}")
 
-    def _iter():
-        try:
-            with zf.open(info) as fh:
+    if info.compress_type == _ZIP_STORED:
+        size = info.file_size
+        start, end = 0, size - 1
+        status = 200
+        headers = dict(disposition, **{'Accept-Ranges': 'bytes'})
+        if range_header:
+            start, end = _parse_range(range_header, size)
+            if start is None:
+                return Response(status_code=416, headers={'Content-Range': f'bytes */{size}'})
+            status = 206
+            headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+        length = end - start + 1 if size else 0
+        headers['Content-Length'] = str(length)
+
+        def _slice():
+            with open(zip_path, 'rb') as f:
+                f.seek(offset + start)
+                remaining = length
+                while remaining > 0:
+                    buf = f.read(min(_STREAM_CHUNK, remaining))
+                    if not buf:
+                        break
+                    remaining -= len(buf)
+                    yield buf
+
+        return StreamingResponse(_slice(), status_code=status, media_type=media_type,
+                                 headers=headers)
+
+    if info.compress_type == _ZIP_DEFLATED:
+        def _inflate():
+            with zipfile.ZipFile(zip_path) as z, z.open(info) as fh:
                 while True:
                     buf = fh.read(_STREAM_CHUNK)
                     if not buf:
                         break
                     yield buf
-        finally:
-            zf.close()
+        body = _inflate()
+    elif info.compress_type == _ZIP_ZSTD:
+        import zstandard
 
-    return StreamingResponse(
-        _iter(),
-        media_type=_content_type(info.filename),
-        headers={
-            'Content-Length': str(info.file_size),
-            'Content-Disposition':
-                f'attachment; filename="{Path(info.filename).name}"',
-        },
-    )
+        def _unzstd():
+            with open(zip_path, 'rb') as f:
+                f.seek(offset)
+                reader = zstandard.ZstdDecompressor().stream_reader(
+                    f, read_across_frames=True, closefd=False)
+                remaining = info.file_size
+                while remaining > 0:
+                    buf = reader.read(min(_STREAM_CHUNK, remaining))
+                    if not buf:
+                        break
+                    remaining -= len(buf)
+                    yield buf
+        body = _unzstd()
+    else:
+        return Response(status_code=422,
+                        content=f"Can't extract {info.filename}: "
+                                f"unsupported zip compression {info.compress_type}")
+    return StreamingResponse(body, media_type=media_type,
+                             headers=dict(disposition, **{'Content-Length': str(info.file_size)}))
 
 
 def _bundle_manifest_files(entry) -> list[dict]:
@@ -1047,7 +1116,7 @@ async def rom_manifest(rom_key: str):
     if not file_path.is_file():
         return JSONResponse(status_code=404,
                             content={"detail": "ROM file missing on disk"})
-    return {
+    manifest = {
         "rom_id": entry.rom_id,
         "is_bundle": False,
         "name": entry.name,
@@ -1055,6 +1124,18 @@ async def rom_manifest(rom_key: str):
         "total_size": file_path.stat().st_size,
         "files": [{"name": entry.filename, "size": file_path.stat().st_size}],
     }
+    if file_path.suffix.lower() == '.zip':
+        # what is inside, for a client that wants one member via /file/<name>
+        try:
+            with zipfile.ZipFile(file_path) as zf:
+                manifest["members"] = [
+                    {"name": i.filename, "size": i.file_size,
+                     "compression": i.compress_type}
+                    for i in zf.infolist() if not i.is_dir()
+                ]
+        except (OSError, zipfile.BadZipFile):
+            pass
+    return manifest
 
 
 @router.api_route("/roms/{rom_key}/file/{rel_path:path}",
@@ -1083,13 +1164,18 @@ async def download_bundle_file(
                 break
     if not entry:
         return Response(status_code=404, content=f"ROM not found: {rom_key}")
-    if not getattr(entry, 'is_bundle', False):
-        return Response(status_code=400,
-                        content="ROM is not a bundle; use /roms/<rom_id>")
-
     rom_dir = settings.rom_dir
     if rom_dir is None:
         return Response(status_code=404, content="ROM directory not configured")
+    if not getattr(entry, 'is_bundle', False):
+        # a zipped single-file ROM: its members, e.g. the .rvz in a Wii zip
+        zip_path = rom_dir / entry.path
+        if zip_path.suffix.lower() != '.zip' or not zip_path.is_file():
+            return Response(status_code=400,
+                            content="ROM is not a bundle; use /roms/<rom_id>")
+        if rel_path.startswith("/") or ".." in Path(rel_path).parts:
+            return Response(status_code=400, content="Bad bundle file path")
+        return _serve_zip_member(zip_path, rel_path, range_header)
 
     bundle_dir = _bundle_dir_for(entry, rom_dir)
     if bundle_dir is None:
@@ -1097,7 +1183,7 @@ async def download_bundle_file(
         if zip_path is not None:
             if rel_path.startswith("/") or ".." in Path(rel_path).parts:
                 return Response(status_code=400, content="Bad bundle file path")
-            return _serve_zip_member(zip_path, rel_path)
+            return _serve_zip_member(zip_path, rel_path, range_header)
         return Response(status_code=404,
                         content="Bundle directory missing on disk")
 

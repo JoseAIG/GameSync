@@ -15,6 +15,11 @@
 #include "ps5_video.h"
 
 #include <SDL2/SDL.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <stdint.h>
+#include <ucontext.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -66,8 +71,68 @@ bool plat_unlock_data(char *status, size_t size)
     return false;
 }
 
+/* A crash leaves a line in gamesync.log: the signal, the address it
+ * faulted on and the instruction, so the next one can be traced (async-
+ * signal-safe: write() only, nothing allocated). */
+static char crash_log[600];
+
+static void put_hex(char **p, uint64_t v)
+{
+    static const char digits[] = "0123456789abcdef";
+    *(*p)++ = '0';
+    *(*p)++ = 'x';
+    for (int i = 60; i >= 0; i -= 4)
+        *(*p)++ = digits[(v >> i) & 15];
+}
+
+static void on_crash(int sig, siginfo_t *info, void *context)
+{
+    char line[160], *p = line;
+    const char *head = "crashed: signal ";
+    while (*head)
+        *p++ = *head++;
+    if (sig >= 10)
+        *p++ = (char)('0' + sig / 10);
+    *p++ = (char)('0' + sig % 10);
+    const char *at = " at ";
+    while (*at)
+        *p++ = *at++;
+    put_hex(&p, (uint64_t)(uintptr_t)(info ? info->si_addr : 0));
+    const ucontext_t *uc = context;
+    if (uc)
+    {
+        const char *pc = " pc ";
+        while (*pc)
+            *p++ = *pc++;
+        put_hex(&p, (uint64_t)uc->uc_mcontext.mc_rip);
+    }
+    *p++ = '\n';
+    int fd = open(crash_log, O_WRONLY | O_APPEND | O_CREAT, 0666);
+    if (fd >= 0)
+    {
+        write(fd, line, (size_t)(p - line));
+        close(fd);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void watch_for_crashes(void)
+{
+    snprintf(crash_log, sizeof(crash_log), "%s", data_path("gamesync.log"));
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = on_crash;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    const int sigs[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+    for (size_t i = 0; i < sizeof(sigs) / sizeof(sigs[0]); ++i)
+        sigaction(sigs[i], &sa, NULL);
+}
+
 bool plat_init(char *error, size_t size)
 {
+    watch_for_crashes();
     sceSystemServiceHideSplashScreen();
     if (SDL_Init(SDL_INIT_EVENTS) != 0)
     {

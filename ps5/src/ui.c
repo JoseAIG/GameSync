@@ -23,6 +23,7 @@
 #include "ui.h"
 
 #include "catalog.h"
+#include "diskbench.h"
 #include "downloads.h"
 #include "gfx.h"
 #include "installed.h"
@@ -2174,6 +2175,13 @@ static void collect_completed(void)
     }
 }
 
+static void bench_tick(const char *mode, void *user)
+{
+    Busy *b = user;
+    snprintf(b->message, sizeof(b->message), "%s (up to 2 minutes each, 6 in all)", mode);
+    busy_draw(b, true);
+}
+
 void ui_run(bool data_listable, const char *status)
 {
     data_ok = data_listable;
@@ -2199,6 +2207,12 @@ void ui_run(bool data_listable, const char *status)
         {
             draw_view();
             plat_present();
+            if (data_ok && diskbench_requested())
+            {
+                Busy busy = {.title = "Testing the disk"};
+                diskbench_run(bench_tick, &busy);
+                set_banner(COL_OK, "Disk test done: the results are in gamesync.log");
+            }
             if (config_ready(&sync_ctx.config) && data_ok)
                 refresh_saves();
             first = false;

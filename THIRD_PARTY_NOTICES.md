@@ -177,7 +177,7 @@ are in [README.md](README.md).
 | dlmalloc 2.8.6 (**Doug Lea**) | Public domain (CC0) | `ps5/` (fetched at build time) |
 | PS5 Payload SDK (**John Törnblom**) | GPL-3.0 | `ps5/` toolchain and system-library stubs |
 | FreeType 2.4.3 (The FreeType Project) | FreeType License — [`licenses/FreeType-FTL.txt`](licenses/FreeType-FTL.txt). Portions of this software are copyright © 2010 The FreeType Project (www.freetype.org). All rights reserved. | `ps3/` |
-| FastAPI, Pydantic, Uvicorn, httpx, Pillow | MIT / BSD | `server/` |
+| FastAPI, Pydantic, Uvicorn, httpx, Pillow, zstandard | MIT / BSD | `server/` |
 | requests, paramiko, py7zr, pygame | Apache-2.0 / LGPL | desktop, Steam Deck |
 | AndroidX, Compose, Room, Retrofit, OkHttp, Kotlin | Apache-2.0 | `android/` |
 

@@ -35,6 +35,7 @@ typedef struct
     size_t body_len;
     const char *content_type; /* defaults to application/octet-stream */
     uint64_t range_start;     /* sends Range: bytes=N- when > 0 */
+    uint64_t range_end;       /* with it, bytes=N-E (inclusive) when > 0 */
     int timeout_sec;          /* receive timeout, 0 = 60 s */
     HttpSinkFn sink;
     void *sink_user;

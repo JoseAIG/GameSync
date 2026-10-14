@@ -34,6 +34,8 @@ typedef struct
     bool ra_dump;
     bool is_bundle;
     bool has_cue;     /* the server can convert it to a CUE/BIN set (?extract=cue) */
+    bool has_iso;     /* an Xbox bundle the server can turn into one XISO (?extract=iso) */
+    bool has_dcci;    /* a 3DS game the server can serve as a decrypted CCI (?extract=decrypted_cci) */
     uint8_t disc_index;
     uint8_t disc_total;
 } RomRow;
@@ -82,6 +84,10 @@ typedef struct
     bool cue;              /* the CUE/BIN variant: dest is a temporary .zip */
     char unzip_dir[PATH_LEN]; /* cue: the game's folder the set goes into */
     char check[PATH_LEN];  /* the file that says it's installed (dest, or the .cue) */
+    const char *extract;   /* ?extract= for a server-side conversion ("iso"), or NULL */
+    bool folder;           /* a bundle fetched file by file into dest, a folder */
+    bool zip_member;       /* a zipped game: just the game file out of the zip, to dest + its
+                              extension (the server's /roms/<id>/file/<member>) */
 } InstallPlan;
 
 void catalog_plan(const Config *config, const RomRow *rom, InstallPlan *plan);

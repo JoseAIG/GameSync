@@ -143,7 +143,10 @@ int http_request(const HttpServer *server, const HttpRequest *req, HttpResult *r
                      "Connection: close\r\n",
                      req->method ? req->method : "GET", server->base_path, req->path, server->host,
                      server->port, server->api_key, server->console_id);
-    if (req->range_start > 0 && n > 0 && (size_t)n < sizeof(head))
+    if (req->range_end > 0 && n > 0 && (size_t)n < sizeof(head))
+        n += snprintf(head + n, sizeof(head) - (size_t)n, "Range: bytes=%llu-%llu\r\n",
+                      (unsigned long long)req->range_start, (unsigned long long)req->range_end);
+    else if (req->range_start > 0 && n > 0 && (size_t)n < sizeof(head))
         n += snprintf(head + n, sizeof(head) - (size_t)n, "Range: bytes=%llu-\r\n",
                       (unsigned long long)req->range_start);
     if ((req->body_len > 0 || (req->method && strcmp(req->method, "POST") == 0)) && n > 0 &&

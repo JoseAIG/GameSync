@@ -334,9 +334,12 @@ static void add_server_only_retroarch(SyncContext *ctx, const JsonValue *t, cons
             continue;
         util_copy(e->rom_file, sizeof(e->rom_file), r->filename);
         retroarch_save_path(&ctx->config, system, plan.dest, e->path, sizeof(e->path));
+        if (!e->path[0])
+            util_copy(e->message, sizeof(e->message),
+                      "Beetle Saturn's Shared Internal Memory is on: not synced per game");
         break;
     }
-    if (!e->path[0])
+    if (!e->path[0] && !e->message[0])
         util_copy(e->message, sizeof(e->message),
                   "no catalog ROM with this id: install the game to name its save");
 }
@@ -802,11 +805,13 @@ static bool gci_file_name(SaveEntry *e, const uint8_t *gci, size_t size)
 static bool download_folder(SaveEntry *e, const uint8_t *data, size_t size, char *hash)
 {
     SaveTree tree;
+    app_log("download %s: %zu-byte bundle into %s", e->title_id, size, e->path);
     if (!bundle_parse(data, size, &tree))
     {
         util_copy(e->message, sizeof(e->message), "bad bundle from the server");
         return false;
     }
+    app_log("download %s: %d file(s) parsed, writing", e->title_id, tree.count);
     bool ok = tree_write_replace(e->path, &tree);
     if (ok)
         tree_hash(&tree, hash, &e->local_size);

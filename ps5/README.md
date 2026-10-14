@@ -6,7 +6,7 @@ emulators. PS5 game saves are not handled yet.
 
 | Emulator | Title | What syncs | Server endpoint |
 |---|---|---|---|
-| [PS5_RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | `PPSA99169` | the `.srm` of every ROM in `content/<system>/` or a playlist (USB games too), in `savefiles/<core>/`; Saturn: Beetle Saturn's `<game>.bkr` (the 32 KB backup RAM the server keeps for `SAT_` ids) | `/saves/{id}/raw` |
+| [PS5_RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | `PPSA99169` | the `.srm` of every ROM in `content/<system>/` or a playlist (USB games too), in `savefiles/<core>/`; Saturn: Beetle Saturn's 32 KB backup RAM (the Mednafen image the server keeps for `SAT_` ids) as its *Save Method* core option says - `<game>.srm` for Libretro (default), `<game>.bkr` for Mednafen, read from `config/Beetle Saturn/<game>.opt`, `<content folder>.opt` or `Beetle Saturn.opt` the way RetroArch does; a card left in the other format is moved over, and with *Shared Internal Memory* on nothing is synced | `/saves/{id}/raw` |
 | [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | `PPSA98510` | per-game PS1 cards `saves/<SERIAL>_1.mcd` (or `<game>_1.mcd`, see below) | `/saves/{serial}/ps1-card` |
 | [PS5SX2](https://github.com/Swordpdf/PS5SX2) | `PPSA99203` | a card per game, `memcards/<game file>.ps2` (or every game on a shared `Mcd001.ps2`) | `/saves/{serial}/ps2-files` |
 | [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) (Dolphin) | `PPSA99764` | GameCube `.gci` saves in `saves/User/GC/<region>/Card A/` as `GC_<CODE>`; Wii saves `saves/User/Wii/title/00010000/<hex>/data/` as `WII_<CODE>` | `/saves/{id}/gc-card?format=gci`; `/saves/{id}` bundle |
@@ -268,9 +268,10 @@ is synced — the server keeps one folder per serial.
 |---|---|---|
 | PS1 | `/data/SwanStationPS5/games/<game>/<file>` (or RetroArch with `ps1_target=retroarch`) | `.chd`, `.pbp`, `.iso` |
 | PS2 | `/data/PCSX2/games/<file>` | `.iso`, `.chd`, `.cso`, `.zso` |
-| Wii U | `<cemu_dir>/games/<file>` (PS5CEMU) | `.wua`, `.wud`, `.wux`, `.rpx`, `.wuhb` (WUP folders not yet) |
-| 3DS | `<cemu_dir>/azahar/games/<file>` (PS5CEMU) | `.3ds`, `.cci`, `.cxi`, `.3dsx`… |
-| Xbox | `<xemu_dir>/games/<file>` (XPSemu) | `.iso`/`.xiso` (XISO) |
+| GC / Wii | `<porpoise_dir>/games/<file>` (Porpoise) | `.rvz`, `.iso`, `.wbfs`, `.gcm`, `.ciso`, `.gcz`, `.wia`, `.wad`; from a zipped game only the game file comes down (`/roms/{id}/file/<member>`, resumable when the zip stores it) |
+| Wii U | `<cemu_dir>/games/<file>` (PS5CEMU) | `.wua`, `.wud`, `.wux`, `.rpx`, `.wuhb`; a WUP/NUS or loadiine folder goes to `games/<game>/` file by file from `/roms/{id}/manifest` + `/file/{name}` (each resumes; `.gamesync-complete` marks a whole set). PS5CEMU runs such an NUS set as it is (Cemu has the key for `title.tik`), but only lists it after a scan: *Settings > Look for games now* on its Wii U side |
+| 3DS | `<cemu_dir>/azahar/games/<file>` (PS5CEMU) | `.3ds`, `.cci`, `.cxi`, `.3dsx`…; a zipped or encrypted dump comes as the decrypted `.cci` the server makes (`?extract=decrypted_cci`, its `SYNC_ROM_3DS_DECRYPTED_CCI_COMMAND`); a zip with no `.3ds`/`.cci` inside (a `.cia` or homebrew) can't be converted |
+| Xbox | `<xemu_dir>/games/<file>` (XPSemu) | `.iso`/`.xiso` (XISO); a game folder (`.cci` + `default.xbe`): its compressed `.cci` slices are downloaded (resumable, often a fraction of the ISO) and decoded on the PS5 into the XISO they hold (`src/xcci.c`, byte-identical to XGDTool's); a folder with a plain `.iso` gets that file, anything else the server's `?extract=iso` |
 | GameCube, Wii | `<porpoise_dir>/games/<file>` (Porpoise) | `.iso`, `.rvz`, `.gcm`, `.ciso`, `.gcz`, `.wbfs`, `.wia` |
 | Switch | `<eden_dir>/roms/<file>` (ProsperoEden) | `.nsp`, `.xci` (the server doesn't list Switch ROMs yet) |
 | everything RetroArch plays | `<retroarch_dir>/content/<system>/<file>` | as served |
@@ -310,6 +311,7 @@ which is how the UI can be exercised against a local server.
 | `src/main.c`, `src/ui.c` | start-up, the three tabs, dialogs, keyboard |
 | `src/saves.c` | finds each emulator's saves |
 | `src/saturn.c` | a Saturn disc's product code from its IP.BIN |
+| `src/xcci.c` | Xbox CCI images to XISO (LZ4 sectors) |
 | `src/retroarch.c` | RetroArch games (content folders, playlists) and their save paths |
 | `src/bundle.c` | save folders and the 3DSS bundle format (Wii, Switch) |
 | `src/sync.c` | server comparison, three-way decisions, transfers |

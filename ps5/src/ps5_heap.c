@@ -57,7 +57,10 @@ static void heap_init(void)
     if (init_state)
         return;
     init_state = -1;
-    static const size_t sizes[] = {(size_t)256 << 20, (size_t)128 << 20, (size_t)64 << 20};
+    /* a catalog of ~50k games, a rescan and a multi-MB save download peak
+     * near 70 MB, so as much as the system will give, from 512 MB down */
+    static const size_t sizes[] = {(size_t)512 << 20, (size_t)384 << 20, (size_t)256 << 20,
+                                   (size_t)128 << 20, (size_t)64 << 20};
     for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i)
     {
         int64_t physical = 0;
@@ -76,6 +79,12 @@ static void heap_init(void)
             return;
         }
     }
+}
+
+size_t ps5_heap_size(void)
+{
+    heap_init();
+    return init_state > 0 ? (size_t)(arena_hi - arena_lo) : 0;
 }
 
 static int ours(const void *p)

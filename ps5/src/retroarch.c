@@ -24,6 +24,8 @@
 #include "naming.h"
 
 #include <dirent.h>
+#include <stdint.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -390,12 +392,135 @@ static bool find_existing(const char *base, const char *srm, char *out, size_t s
     return found;
 }
 
-/* The save's extension: .srm (RetroArch's save RAM), except Beetle Saturn,
- * which writes the Saturn's internal backup RAM itself as <game>.bkr - the
- * 32 KB Mednafen image the server keeps for SAT_ ids (shared/saturn_format.py). */
-static const char *save_ext(const char *system)
+/* ------------------------------------------------------------ Beetle Saturn */
+
+/* A core option the way RetroArch settles it (game_specific_options on):
+ * the game's own config/<core>/<game>.opt, its content folder's
+ * <folder>.opt, the core's <core>.opt, then retroarch-core-options.cfg. */
+static void core_option(const RaSettings *s, const char *core, const char *game_path,
+                        const char *key, char *out, size_t size)
 {
-    return util_ieq(system, "SAT") ? ".bkr" : ".srm";
+    char stem[256], folder[PATH_LEN];
+    util_copy(stem, sizeof(stem), util_basename(game_path));
+    util_strip_ext(stem);
+    util_copy(folder, sizeof(folder), game_path);
+    char *slash = strrchr(folder, '/');
+    if (slash)
+        *slash = 0;
+    const char *names[3] = {stem, util_basename(folder), core};
+    out[0] = 0;
+    for (int i = 0; i < 4 && !out[0]; ++i)
+    {
+        char path[PATH_LEN];
+        if (i < 3)
+            snprintf(path, sizeof(path), "%s/config/%s/%s.opt", s->root, core, names[i]);
+        else
+            snprintf(path, sizeof(path), "%s/config/retroarch-core-options.cfg", s->root);
+        char *text = (char *)util_read_file(path, NULL);
+        if (!text)
+            continue;
+        cfg_value(text, key, out, size);
+        free(text);
+    }
+}
+
+typedef enum
+{
+    SAT_SAVE_SRM,    /* Save Method "Libretro" (default): RetroArch's <game>.srm */
+    SAT_SAVE_BKR,    /* "Mednafen": the core's own <game>.bkr, same folder */
+    SAT_SAVE_SHARED, /* Mednafen + Shared Internal Memory: one .bkr for every game */
+} SatSave;
+
+/* Beetle Saturn's beetle_saturn_save_method / _shared_int core options
+ * (PS5_BeetleSaturn libretro.c: retro_get_memory_data, MDFN_MakeFName). Both
+ * files hold the same 32 KB Mednafen backup RAM the server keeps for SAT_ ids. */
+static SatSave saturn_save_kind(const RaSettings *s, const RaGame *game)
+{
+    char core[96], v[32];
+    core_name(s, game->core_lib, "SAT", core, sizeof(core));
+    if (!core[0])
+        util_copy(core, sizeof(core), "Beetle Saturn");
+    core_option(s, core, game->path, "beetle_saturn_save_method", v, sizeof(v));
+    if (!util_ieq(v, "mednafen"))
+        return SAT_SAVE_SRM;
+    core_option(s, core, game->path, "beetle_saturn_shared_int", v, sizeof(v));
+    return util_ieq(v, "enabled") ? SAT_SAVE_SHARED : SAT_SAVE_BKR;
+}
+
+/* Saves in the Saturn's internal backup RAM (32 KB, 64-byte blocks, the
+ * first two its "BackUpRam Format" header): a save starts on a block whose
+ * first byte is 0x80. */
+static int saturn_bup_saves(const char *path)
+{
+    size_t size;
+    uint8_t *d = util_read_file(path, &size);
+    if (!d)
+        return -1;
+    int n = -1;
+    if (size == 32768 && memcmp(d, "BackUpRam Format", 16) == 0)
+    {
+        n = 0;
+        for (size_t b = 2; b < size / 64; ++b)
+            if (d[b * 64] == 0x80)
+                n++;
+    }
+    free(d);
+    return n;
+}
+
+/* The game's save is where the Save Method reads it: a card left in the
+ * other format (the option was switched, or GameSync wrote the other one)
+ * is moved over - renamed when the right one is missing; when both are
+ * there, an empty, freshly formatted card gives way to the one with saves
+ * and an identical copy is set aside as .bak. Two different cards with
+ * saves are left alone. */
+static void saturn_fix_format(const char *right)
+{
+    char wrong[PATH_LEN];
+    util_copy(wrong, sizeof(wrong), right);
+    size_t n = strlen(wrong);
+    if (n < 4)
+        return;
+    memcpy(wrong + n - 4, util_has_suffix_i(right, ".srm") ? ".bkr" : ".srm", 4);
+    if (!util_file_exists(wrong))
+        return;
+    int in_wrong = saturn_bup_saves(wrong);
+    if (in_wrong < 0)
+        return;
+    char bak[PATH_LEN + 8];
+    if (!util_file_exists(right))
+    {
+        if (rename(wrong, right) == 0)
+        {
+            chmod(right, 0666);
+            app_log("Beetle Saturn: %s is now %s (its Save Method)", wrong, util_basename(right));
+        }
+        return;
+    }
+    int in_right = saturn_bup_saves(right);
+    char hw[65], hr[65];
+    bool same = util_sha256_file(wrong, hw) && util_sha256_file(right, hr) && strcmp(hw, hr) == 0;
+    if (in_right == 0 && in_wrong > 0)
+    {
+        snprintf(bak, sizeof(bak), "%s.bak", right);
+        remove(bak);
+        if (rename(right, bak) == 0 && rename(wrong, right) == 0)
+        {
+            chmod(right, 0666);
+            app_log("Beetle Saturn: the saves in %s replace the empty %s (kept as .bak)", wrong,
+                    util_basename(right));
+        }
+    }
+    else if (same || in_wrong == 0)
+    {
+        snprintf(bak, sizeof(bak), "%s.bak", wrong);
+        remove(bak);
+        if (rename(wrong, bak) == 0)
+            app_log("Beetle Saturn: %s set aside as .bak (%s is in use)", wrong, util_basename(right));
+    }
+    else
+        app_log("Beetle Saturn: %s and %s hold different saves; left both", wrong,
+                util_basename(right));
 }
 
 static void save_path(const RaSettings *s, const RaGame *game, char *out, size_t size)
@@ -403,7 +528,19 @@ static void save_path(const RaSettings *s, const RaGame *game, char *out, size_t
     char stem[256], srm[300];
     util_copy(stem, sizeof(stem), util_basename(game->path));
     util_strip_ext(stem);
-    snprintf(srm, sizeof(srm), "%s%s", stem, save_ext(game->system));
+    const char *ext = ".srm";
+    if (util_ieq(game->system, "SAT"))
+    {
+        SatSave kind = saturn_save_kind(s, game);
+        if (kind == SAT_SAVE_SHARED)
+        {
+            out[0] = 0; /* one card for every game: nothing to sync per game */
+            return;
+        }
+        if (kind == SAT_SAVE_BKR)
+            ext = ".bkr";
+    }
+    snprintf(srm, sizeof(srm), "%s%s", stem, ext);
     char content_dir[PATH_LEN];
     util_copy(content_dir, sizeof(content_dir), game->path);
     char *slash = strrchr(content_dir, '/');
@@ -486,6 +623,16 @@ void retroarch_scan(const Config *config, const KvStore *ids, SaveList *list)
         util_copy(e->name, sizeof(e->name), file);
         util_strip_ext(e->name);
         save_path(&s, g, e->path, sizeof(e->path));
+        if (!e->path[0])
+        {
+            list->count--; /* Beetle Saturn's shared backup memory */
+            snprintf(list->warning, sizeof(list->warning),
+                     "Beetle Saturn shares one backup memory between games (Shared Internal "
+                     "Memory on): Saturn saves aren't synced");
+            continue;
+        }
+        if (util_ieq(g->system, "SAT"))
+            saturn_fix_format(e->path);
         char key[300];
         snprintf(key, sizeof(key), "%s|%s", g->system, file);
         const char *id = kv_get(ids, key);

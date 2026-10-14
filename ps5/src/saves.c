@@ -425,7 +425,9 @@ static void scan_ps2_card(const char *path, SaveList *list, int *duplicates)
     char error[96];
     if (!ps2mc_load_file(path, &card, error, sizeof(error)))
     {
-        snprintf(list->warning, sizeof(list->warning), "%s: %s", util_basename(path), error);
+        /* usually PS5SX2's blank Mcd002.ps2 (made, never formatted): no saves
+         * on it, so nothing to show - just a line in the log */
+        app_log("PS5SX2: %s skipped: %s", util_basename(path), error);
         return;
     }
     list->ps2_cards++;

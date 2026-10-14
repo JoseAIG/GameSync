@@ -121,6 +121,7 @@ No code was copied from these; they documented the binary formats this project
 reads and writes.
 
 - **PS1 memory card filesystem** (`server/app/services/ps1mc.py`) — [PSXSPX / no$psx docs](https://problemkaputt.de/psx-spx.htm) by **Martin Korth**.
+- **Xbox CCI images** (`ps5/src/xcci.c`) — the CCI layout from analysis of [XboxToolkit](https://github.com/Team-Resurgent/XboxToolkit) by **Team Resurgent** (`CCIContainerReader.cs`, `CCISectorDecoder.cs`, GPL-3.0), and an LZ4 block decoder written from the [LZ4 block format description](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md) by **Yann Collet**. No code copied.
 - **PS2 memory card filesystem** (`server/app/services/ps2mc.py`, and its C port `ps5/src/ps2mc.c`) — [ps2savetools.com](http://www.ps2savetools.com/) documentation and [mymc](http://www.csclub.uwaterloo.ca:11068/mymc/) by **Ross Ridge**; also [mymc+](https://git.sr.ht/~thestr4ng3r/mymcplus) by **Florian Märkl** and [mymc++](https://pypi.org/project/mymcplusplus/) used as a cross-check reference.
 - **GameCube memory card filesystem** (`server/app/services/gc_cards.py`, `gc/source/vmcfs.c`) — layout as documented by the **Dolphin** project and mymc.
 - **PS3 `PARAM.PFD` resigning / save decryption** (`ps3/source/pfd.c`, `ps3/source/decrypt.c`) — based on analysis of [Apollo Save Tool](https://github.com/bucanero/apollo-ps3) by **Damián Parrino (bucanero)** and **flatz**'s `pfd_sfo_tools`. `ps3/data/games.conf` is Apollo's per-game key database (Copyright © 2020-2025 Damian Parrino, GPL-3.0-or-later), redistributed verbatim (1818 titles) and shipped inside `ps3sync.pkg` with its notice — thanks also to **SHAkA** and the other key finders credited in that file's header.
@@ -159,9 +160,9 @@ reads and writes.
 - **[3dsdb.com](https://3dsdb.com/)** and **[ds-scene.net](https://www.ds-scene.net/)** — 3DS / DS release lists (`server/data/3dsdb.txt`, `3dstdb.txt`).
 - **[dbox.tools](https://dbox.tools/)** — original Xbox title-id database (`server/data/xbox_titleids.json`).
 - **[Serial Station](https://serialstation.com/)** — PlayStation serial lookups (`server/app/services/serialstation.py`).
-
 - **PCSX2 game database** (`GameIndex.yaml`, [PCSX2](https://github.com/PCSX2/pcsx2) team, GPL-3.0) as shipped by [PS5SX2](https://github.com/Swordpdf/PS5SX2) — fetched by the server from PS5SX2's latest release (`server/app/routes/emulators.py`, cached in `<save_dir>/.emulator_cache/`) and installed by the PS5 client when PS5SX2 lacks it. Not kept in this repository.
 ### External tools invoked or recommended
+
 
 - **[chdman](https://www.mamedev.org/)** — CHD compression (MAMEdev, part of `mame-tools`).
 - **[Wiimms ISO Tools (`wit`)](https://wit.wiimm.de/)** by **Dirk Clemens** — Wii/GameCube disc conversion.
@@ -174,7 +175,7 @@ reads and writes.
 
 ### Libraries and frameworks
 
-- **Server**: [FastAPI](https://fastapi.tiangolo.com/) and [Pydantic](https://docs.pydantic.dev/) (Sebastián Ramírez, Samuel Colvin and contributors), [Uvicorn](https://www.uvicorn.org/) (Encode), [httpx](https://www.python-httpx.org/), [Pillow](https://python-pillow.org/), [pytest](https://pytest.org/), [uv](https://docs.astral.sh/uv/) (Astral).
+- **Server**: [FastAPI](https://fastapi.tiangolo.com/) and [Pydantic](https://docs.pydantic.dev/) (Sebastián Ramírez, Samuel Colvin and contributors), [Uvicorn](https://www.uvicorn.org/) (Encode), [httpx](https://www.python-httpx.org/), [Pillow](https://python-pillow.org/), [pytest](https://pytest.org/), [uv](https://docs.astral.sh/uv/) (Astral), [python-zstandard](https://github.com/indygreg/python-zstandard) (Gregory Szorc, BSD-3-Clause; serves zstd-compressed zip members).
 - **Desktop / Steam Deck**: [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) (Riverbank Computing) and Qt, [requests](https://requests.readthedocs.io/), [paramiko](https://www.paramiko.org/), [py7zr](https://github.com/miurahr/py7zr), [pygame](https://www.pygame.org/).
 - **PS5**: [SDL2](https://www.libsdl.org/) (Sam Lantinga, zlib) for controllers, with [GNU libiconv](https://www.gnu.org/software/libiconv/) (LGPL-2.1-or-later) and [libsamplerate](https://github.com/libsndfile/libsamplerate) (Erik de Castro Lopo, BSD-2-Clause) that it pulls in — all statically linked from the PacBrew ports.
 - **PS Vita**: [libvita2d](https://github.com/xerpi/libvita2d) by Sergi Granell (xerpi) and contributors (MIT), linked from the VitaSDK for the GUI; text uses the console's own PGF/PVF system fonts at runtime (nothing bundled).

@@ -35,9 +35,11 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 #define CACHE_MAGIC "GSC1"
-#define CACHE_VERSION 2u
+#define CACHE_VERSION 4u
 
 void catalog_free(Catalog *catalog)
 {
@@ -71,8 +73,14 @@ static void parse_row(const JsonValue *r, const char *system, RomRow *row)
     row->ra_dump = json_get_bool(r, "ra_dump", false);
     JsonValue *formats = json_get(r, "extract_formats");
     for (JsonValue *f = formats ? formats->child : NULL; f; f = f->next)
+    {
         if (f->type == JSON_STRING && util_ieq(f->str, "cue"))
             row->has_cue = true;
+        if (f->type == JSON_STRING && util_ieq(f->str, "iso"))
+            row->has_iso = true;
+        if (f->type == JSON_STRING && util_ieq(f->str, "decrypted_cci"))
+            row->has_dcci = true;
+    }
     row->disc_index = (uint8_t)json_get_num(r, "disc_index", 0);
     row->disc_total = (uint8_t)json_get_num(r, "disc_total", 0);
     if (!row->name[0])
@@ -487,7 +495,33 @@ void catalog_plan(const Config *config, const RomRow *rom, InstallPlan *plan)
     }
     if (rom->is_bundle)
     {
-        snprintf(plan->reason, sizeof(plan->reason), "multi-file games aren't supported yet");
+        char game[200];
+        util_copy(game, sizeof(game), file);
+        util_strip_ext(game); /* bundles are listed as <name>.zip */
+        if (plan->emu == EMU_XEMU && rom->has_iso)
+        {
+            /* the server turns the Xbox folder (.cci + default.xbe) into one XISO */
+            snprintf(plan->dest, sizeof(plan->dest), "%s/games/%s.iso", config->xemu_dir, game);
+            plan->extract = "iso";
+        }
+        else if (plan->emu == EMU_CEMU && util_ieq(rom->system, "WIIU"))
+        {
+            /* a WUP/NUS set (title.tmd + .app + title.tik) or a loadiine tree,
+             * which Cemu runs as it is from its games folder */
+            snprintf(plan->dest, sizeof(plan->dest), "%s/games/%s", config->cemu_dir, game);
+            snprintf(plan->check, sizeof(plan->check), "%s/.gamesync-complete", plan->dest);
+            plan->folder = true;
+            plan->supported = true;
+            return;
+        }
+        else
+        {
+            snprintf(plan->reason, sizeof(plan->reason), "multi-file %s games aren't supported yet",
+                     rom->system);
+            return;
+        }
+        plan->supported = true;
+        util_copy(plan->check, sizeof(plan->check), plan->dest);
         return;
     }
     if (plan->emu == EMU_SWANSTATION)
@@ -506,8 +540,20 @@ void catalog_plan(const Config *config, const RomRow *rom, InstallPlan *plan)
     }
     else if (plan->emu == EMU_PORPOISE)
     {
-        static const char *const ok[] = {".iso", ".gcm", ".rvz", ".ciso", ".gcz", ".wbfs", ".wia"};
-        if (!ext_in(file, ok, 7))
+        static const char *const ok[] = {".iso", ".gcm", ".rvz", ".ciso", ".gcz", ".wbfs", ".wia", ".wad"};
+        if (util_has_suffix_i(file, ".zip"))
+        {
+            /* the .rvz (or .iso, .wad...) inside, served out of the zip */
+            char game[200];
+            util_copy(game, sizeof(game), file);
+            util_strip_ext(game);
+            snprintf(plan->dest, sizeof(plan->dest), "%s/games/%s", config->porpoise_dir, game);
+            util_copy(plan->check, sizeof(plan->check), plan->dest);
+            plan->zip_member = true;
+            plan->supported = true;
+            return;
+        }
+        if (!ext_in(file, ok, 8))
         {
             snprintf(plan->reason, sizeof(plan->reason), "Porpoise needs .iso/.rvz/.gcm/.wbfs...");
             return;
@@ -521,11 +567,24 @@ void catalog_plan(const Config *config, const RomRow *rom, InstallPlan *plan)
         static const char *const wiiu_ok[] = {".wua", ".wud", ".wux", ".rpx", ".wuhb"};
         static const char *const ds_ok[] = {".3ds", ".cci", ".cxi", ".3dsx", ".app",
                                             ".z3ds", ".zcci", ".zcxi", ".z3dsx"};
+        if (!wiiu && !ext_in(file, ds_ok, 9) && rom->has_dcci)
+        {
+            /* a zipped or encrypted dump: the server decrypts it into the
+             * CCI Azahar loads (SYNC_ROM_3DS_DECRYPTED_CCI_COMMAND) */
+            char game[200];
+            util_copy(game, sizeof(game), file);
+            util_strip_ext(game);
+            snprintf(plan->dest, sizeof(plan->dest), "%s/azahar/games/%s.cci", config->cemu_dir, game);
+            plan->extract = "decrypted_cci";
+            plan->supported = true;
+            util_copy(plan->check, sizeof(plan->check), plan->dest);
+            return;
+        }
         if (wiiu ? !ext_in(file, wiiu_ok, 5) : !ext_in(file, ds_ok, 9))
         {
             snprintf(plan->reason, sizeof(plan->reason),
-                     wiiu ? "PS5CEMU needs a .wua/.wud/.wux/.rpx (WUP folders aren't supported yet)"
-                          : "PS5CEMU's Azahar needs .3ds/.cci/.cxi/.3dsx");
+                     wiiu ? "PS5CEMU needs a .wua/.wud/.wux/.rpx or a WUP folder"
+                          : "PS5CEMU's Azahar needs .3ds/.cci/.cxi/.3dsx (the server can't decrypt this one)");
             return;
         }
         snprintf(plan->dest, sizeof(plan->dest), "%s/%s/%s", config->cemu_dir,
@@ -615,22 +674,386 @@ static bool folder_has_cue(const char *dir)
     return found;
 }
 
+/* What Porpoise loads, in the order a zip's members are preferred. */
+static const char *const DOLPHIN_EXTS[] = {".rvz", ".iso", ".wbfs", ".gcm", ".ciso",
+                                           ".gcz", ".wia", ".wad"};
+#define DOLPHIN_EXT_COUNT (sizeof(DOLPHIN_EXTS) / sizeof(DOLPHIN_EXTS[0]))
+
 bool catalog_installed(const InstallPlan *plan)
 {
     if (!plan->supported)
         return false;
+    if (plan->zip_member)
+    {
+        for (size_t i = 0; i < DOLPHIN_EXT_COUNT; ++i)
+        {
+            char path[PATH_LEN + 8];
+            snprintf(path, sizeof(path), "%s%s", plan->dest, DOLPHIN_EXTS[i]);
+            if (util_file_exists(path))
+                return true;
+        }
+        return false;
+    }
     return plan->cue ? folder_has_cue(plan->unzip_dir) : util_file_exists(plan->check);
 }
 
 typedef struct
 {
     FILE *f;
+    double disk;      /* seconds spent writing, for the speed log */
+    uint64_t pending; /* bytes written since the last flush to disk */
 } FileSink;
+
+/* Written data is pushed to the disk every 128 MB: left to pile up in the
+ * system's cache, gigabytes of it made every write slower and slower (a
+ * download or an Xbox conversion started fast and nearly stopped, and
+ * pausing - which closes the file - made it fast again). */
+#define FLUSH_EVERY ((uint64_t)128 << 20)
+
+static void flush_to_disk(FILE *f)
+{
+    fflush(f);
+    fsync(fileno(f));
+}
+
+static double now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 
 static int file_sink(const void *data, size_t len, void *user)
 {
     FileSink *s = user;
-    return fwrite(data, 1, len, s->f) == len ? 0 : -1;
+    double t = now_sec();
+    bool ok = fwrite(data, 1, len, s->f) == len;
+    s->pending += len;
+    if (ok && s->pending >= FLUSH_EVERY)
+    {
+        flush_to_disk(s->f);
+        s->pending = 0;
+    }
+    s->disk += now_sec() - t;
+    return ok ? 0 : -1;
+}
+
+/* Large downloads come in segments, each on a fresh connection: over Wi-Fi a
+ * long-lived connection keeps slowing down (pausing and resuming made it fast
+ * again), and a new one starts at full speed. */
+#define SEGMENT ((uint64_t)128 << 20)
+
+typedef struct
+{
+    HttpProgressFn progress;
+    void *user;
+    uint64_t base;  /* bytes of this attempt before the segment */
+    uint64_t total; /* bytes this attempt fetches */
+} SegProgress;
+
+static int seg_progress(uint64_t done, uint64_t total, void *user)
+{
+    (void)total;
+    SegProgress *s = user;
+    return s->progress ? s->progress(s->base + done, s->total, s->user) : 0;
+}
+
+/* GET path into sink->f, bytes [have, total): segment by segment when the
+ * size is known, else one request from have. *res is the last response; a
+ * server that ignores Range answers 200 with the whole file, which ends it. */
+static int ranged_get(const HttpServer *server, const char *path, FileSink *sink, uint64_t have,
+                      uint64_t total, int timeout, HttpProgressFn progress, void *user,
+                      HttpResult *res, const char *label)
+{
+    HttpRequest req = {0};
+    req.method = "GET";
+    req.path = path;
+    req.timeout_sec = timeout;
+    req.sink = file_sink;
+    req.sink_user = sink;
+    bool discover = total == UINT64_MAX; /* size unknown: learnt from the first reply */
+    if (discover)
+        total = have + SEGMENT;
+    if (!total || total <= have)
+    {
+        req.range_start = have;
+        req.progress = progress;
+        req.progress_user = user;
+        return http_request(server, &req, res);
+    }
+    SegProgress sp = {progress, user, 0, total - have};
+    req.progress = seg_progress;
+    req.progress_user = &sp;
+    uint64_t pos = have, logged = have;
+    double t0 = now_sec(), disk0 = sink->disk;
+    int rc = HTTP_OK;
+    while (pos < total)
+    {
+        uint64_t end = (pos + SEGMENT < total ? pos + SEGMENT : total) - 1;
+        req.range_start = pos;
+        req.range_end = end;
+        sp.base = pos - have;
+        rc = http_request(server, &req, res);
+        if (rc != HTTP_OK || res->status != 206)
+            break; /* an error, or a 200 that carried the whole file */
+        /* the file's real size, from "Content-Range: bytes S-E/TOTAL" */
+        char range[96];
+        const char *slash = http_header(res, "Content-Range", range, sizeof(range))
+                                ? strrchr(range, '/')
+                                : NULL;
+        if (slash && slash[1] >= '0' && slash[1] <= '9')
+        {
+            uint64_t real = strtoull(slash + 1, NULL, 10);
+            if (real > have)
+            {
+                total = real;
+                sp.total = total - have;
+            }
+        }
+        else if (discover)
+            break; /* no size to go on: what came is what there is */
+        pos = end + 1;
+        if (pos - logged >= ((uint64_t)1 << 30) || pos == total)
+        {
+            double t = now_sec(), secs = t - t0 > 0.001 ? t - t0 : 0.001;
+            app_log("download %s: %.2f GB of %.2f, last %.0f MB at %.1f MB/s (disk %.0f%%)", label,
+                    pos / 1e9, total / 1e9, (pos - logged) / 1e6, (pos - logged) / 1e6 / secs,
+                    100.0 * (sink->disk - disk0) / secs);
+            logged = pos;
+            t0 = t;
+            disk0 = sink->disk;
+        }
+    }
+    return rc;
+}
+
+/* Progress over a whole bundle: each file's bytes on top of the ones before. */
+typedef struct
+{
+    HttpProgressFn progress;
+    void *user;
+    uint64_t base;
+    uint64_t total;
+} BundleProgress;
+
+static int bundle_progress(uint64_t done, uint64_t total, void *user)
+{
+    (void)total;
+    BundleProgress *b = user;
+    return b->progress ? b->progress(b->base + done, b->total, b->user) : 0;
+}
+
+/* "content/0010/a b.bin" -> "content/0010/a%20b.bin": each part encoded, the
+ * slashes kept. false for a path that could leave the game's folder. */
+static bool encode_member(char *out, size_t size, const char *name)
+{
+    if (!name[0] || name[0] == '/' || strstr(name, "..") || strchr(name, '\\'))
+        return false;
+    size_t n = 0;
+    out[0] = 0;
+    char part[256];
+    for (const char *p = name; *p;)
+    {
+        const char *slash = strchr(p, '/');
+        size_t len = slash ? (size_t)(slash - p) : strlen(p);
+        if (len >= sizeof(part))
+            return false;
+        memcpy(part, p, len);
+        part[len] = 0;
+        char enc[768];
+        util_url_encode(enc, sizeof(enc), part);
+        int w = snprintf(out + n, size - n, "%s%s", n ? "/" : "", enc);
+        if (w < 0 || (size_t)w >= size - n)
+            return false;
+        n += (size_t)w;
+        p = slash ? slash + 1 : p + len;
+    }
+    return n > 0;
+}
+
+/* A bundle's file list from /roms/<id>/manifest (NULL on failure). */
+static JsonValue *fetch_manifest(const HttpServer *server, const char *id, char *error, size_t size)
+{
+    char path[400];
+    snprintf(path, sizeof(path), "/api/v1/roms/%s/manifest", id);
+    HttpBuffer out = {0};
+    int status = http_get(server, path, &out, NULL);
+    if (status != 200)
+    {
+        http_buffer_free(&out);
+        http_fail(error, size, "file list", status);
+        return NULL;
+    }
+    JsonValue *root = json_parse((const char *)out.data);
+    http_buffer_free(&out);
+    JsonValue *files = json_get(root, "files");
+    if (!files || !files->child)
+    {
+        json_free(root);
+        snprintf(error, size, "empty file list");
+        return NULL;
+    }
+    return root;
+}
+
+/* One member of a bundle, /roms/<id>/file/<name>, into dest: resumed from
+ * dest.part, kept when it is already there at its size. */
+static bool fetch_member(const HttpServer *server, const char *id, const char *name, uint64_t want,
+                         const char *dest, BundleProgress *bp, char *buffer, char *error,
+                         size_t size)
+{
+    char member[1024], path[1200], part[PATH_LEN + 8];
+    if (!encode_member(member, sizeof(member), name))
+    {
+        snprintf(error, size, "bad file name in the set: %.60s", name);
+        return false;
+    }
+    if (util_file_size(dest) == (int64_t)want)
+    {
+        bp->base += want; /* already here from an earlier attempt */
+        return true;
+    }
+    snprintf(part, sizeof(part), "%s.part", dest);
+    int64_t have = util_file_size(part);
+    if (have < 0 || (uint64_t)have >= want)
+        have = 0;
+    if (!util_mkdirs_parent(dest))
+    {
+        snprintf(error, size, "can't create %s", name);
+        return false;
+    }
+    FileSink sink = {fopen(part, have > 0 ? "ab" : "wb"), 0, 0};
+    if (!sink.f)
+    {
+        snprintf(error, size, "can't write %s", util_basename(part));
+        return false;
+    }
+    if (buffer)
+        setvbuf(sink.f, buffer, _IOFBF, 1024 * 1024);
+    snprintf(path, sizeof(path), "/api/v1/roms/%s/file/%s", id, member);
+    bp->base += (uint64_t)have;
+    HttpResult res;
+    int rc = ranged_get(server, path, &sink, (uint64_t)have, want, 120, bundle_progress, bp, &res,
+                        util_basename(name));
+    bool closed = fclose(sink.f) == 0;
+    bp->base -= (uint64_t)have;
+    if (rc == HTTP_OK && res.status == 200 && have > 0)
+    {
+        snprintf(error, size, "resume refused, try again");
+        remove(part);
+        return false;
+    }
+    if (rc != HTTP_OK || (res.status != 200 && res.status != 206) || !closed)
+    {
+        if (rc == HTTP_OK && res.status >= 300)
+        {
+            remove(part);
+            http_fail(error, size, name, res.status);
+        }
+        else
+            snprintf(error, size, "%s: %s", util_basename(name),
+                     rc == HTTP_OK ? "write failed" : http_error_text(rc));
+        return false;
+    }
+    if (util_file_size(part) != (int64_t)want)
+    {
+        snprintf(error, size, "%s came out the wrong size", util_basename(name));
+        remove(part);
+        return false;
+    }
+    remove(dest);
+    if (rename(part, dest) != 0)
+    {
+        snprintf(error, size, "can't rename %s", util_basename(name));
+        return false;
+    }
+    chmod(dest, 0666); /* the emulator is another sandboxed title */
+    bp->base += want;
+    return true;
+}
+
+/* A zipped game (a Wii zip holding an .rvz): only the game file comes down,
+ * out of the zip on the server, to dest + its extension. */
+static bool download_zip_member(const HttpServer *server, const RomRow *rom,
+                                const InstallPlan *plan, HttpProgressFn progress, void *user,
+                                char *error, size_t size)
+{
+    char id[256];
+    util_url_encode(id, sizeof(id), rom->rom_id);
+    JsonValue *root = fetch_manifest(server, id, error, size);
+    if (!root)
+        return false;
+    JsonValue *members = json_get(root, "members");
+    const char *pick = NULL;
+    uint64_t want = 0;
+    size_t best = DOLPHIN_EXT_COUNT;
+    for (JsonValue *m = members ? members->child : NULL; m; m = m->next)
+    {
+        const char *name = json_get_str(m, "name", "");
+        for (size_t i = 0; i < best; ++i)
+            if (util_has_suffix_i(name, DOLPHIN_EXTS[i]))
+            {
+                pick = name;
+                want = (uint64_t)json_get_num(m, "size", 0);
+                best = i;
+                break;
+            }
+    }
+    if (!pick)
+    {
+        json_free(root);
+        snprintf(error, size, members ? "no game file in the zip" : "the server can't open zips (update it)");
+        return false;
+    }
+    char dest[PATH_LEN + 8];
+    snprintf(dest, sizeof(dest), "%s%s", plan->dest, DOLPHIN_EXTS[best]);
+    char *buffer = malloc(1024 * 1024);
+    BundleProgress bp = {progress, user, 0, want};
+    bool ok = util_mkdirs_parent(dest) &&
+              fetch_member(server, id, pick, want, dest, &bp, buffer, error, size);
+    free(buffer);
+    json_free(root);
+    return ok;
+}
+
+/* A bundle (a Wii U WUP folder): every file of the manifest into the
+ * folder. A marker file says the set is complete. */
+static bool download_folder(const HttpServer *server, const RomRow *rom, const InstallPlan *plan,
+                            HttpProgressFn progress, void *user, char *error, size_t size)
+{
+    char id[256];
+    util_url_encode(id, sizeof(id), rom->rom_id);
+    JsonValue *root = fetch_manifest(server, id, error, size);
+    if (!root)
+        return false;
+    if (!util_mkdirs(plan->dest))
+    {
+        json_free(root);
+        snprintf(error, size, "can't create the game folder");
+        return false;
+    }
+    BundleProgress bp = {progress, user, 0, (uint64_t)json_get_num(root, "total_size", 0)};
+    remove(plan->check);
+    bool ok = true;
+    char *buffer = malloc(1024 * 1024);
+    for (JsonValue *f = json_get(root, "files")->child; f && ok; f = f->next)
+    {
+        const char *name = json_get_str(f, "name", "");
+        char dest[PATH_LEN];
+        if (snprintf(dest, sizeof(dest), "%s/%s", plan->dest, name) >= (int)sizeof(dest))
+        {
+            snprintf(error, size, "file name too long: %.60s", name);
+            ok = false;
+            break;
+        }
+        ok = fetch_member(server, id, name, (uint64_t)json_get_num(f, "size", 0), dest, &bp,
+                          buffer, error, size);
+    }
+    free(buffer);
+    json_free(root);
+    if (ok)
+        ok = util_write_file_atomic(plan->check, "complete\n", 9);
+    return ok;
 }
 
 bool catalog_download(const HttpServer *server, const RomRow *rom, const InstallPlan *plan,
@@ -641,6 +1064,14 @@ bool catalog_download(const HttpServer *server, const RomRow *rom, const Install
         snprintf(error, size, "%s", plan->reason);
         return false;
     }
+    if (plan->folder)
+        return download_folder(server, rom, plan, progress, user, error, size);
+    if (plan->zip_member)
+        return download_zip_member(server, rom, plan, progress, user, error, size);
+    /* Xbox: the server's XISO (?extract=iso), not the .cci decoded here - an
+     * app's writes on the PS5 are throttled to ~2 MB/s after a ~1.3 GB burst,
+     * and a local conversion can't be paused to let that recover. The decoder
+     * (xcci.c) is kept for a helper process that isn't throttled. */
     if (!util_mkdirs_parent(plan->dest))
     {
         snprintf(error, size, "can't create the game folder");
@@ -649,10 +1080,12 @@ bool catalog_download(const HttpServer *server, const RomRow *rom, const Install
     char part[PATH_LEN + 8];
     snprintf(part, sizeof(part), "%s.part", plan->dest);
     int64_t have = util_file_size(part);
-    /* a conversion is made afresh on each request: no Range on it */
-    if (have < 0 || plan->cue || (rom->size && (uint64_t)have >= rom->size))
+    /* a CUE/BIN set is zipped afresh on each request: no Range on it. A
+     * converted ISO/CCI is cached by the server and served with Range, so it
+     * resumes; rom->size is the source's size, not the output's. */
+    if (have < 0 || plan->cue || (!plan->extract && rom->size && (uint64_t)have >= rom->size))
         have = 0;
-    FileSink sink = {fopen(part, have > 0 ? "ab" : "wb")};
+    FileSink sink = {fopen(part, have > 0 ? "ab" : "wb"), 0, 0};
     if (!sink.f)
     {
         snprintf(error, size, "can't write %s", util_basename(part));
@@ -663,18 +1096,15 @@ bool catalog_download(const HttpServer *server, const RomRow *rom, const Install
         setvbuf(sink.f, buffer, _IOFBF, 1024 * 1024);
     char id[256], path[320];
     util_url_encode(id, sizeof(id), rom->rom_id);
-    snprintf(path, sizeof(path), "/api/v1/roms/%s%s", id, plan->cue ? "?extract=cue" : "");
-    HttpRequest req = {0};
-    req.method = "GET";
-    req.path = path;
-    req.range_start = (uint64_t)have;
-    req.timeout_sec = 20 * 60; /* a server-side conversion can take a while to start */
-    req.sink = file_sink;
-    req.sink_user = &sink;
-    req.progress = progress;
-    req.progress_user = user;
+    snprintf(path, sizeof(path), "/api/v1/roms/%s%s%s", id,
+             plan->cue ? "?extract=cue" : plan->extract ? "?extract=" : "",
+             plan->extract && !plan->cue ? plan->extract : "");
     HttpResult res;
-    int rc = http_request(server, &req, &res);
+    /* CUE/BIN: one request. A conversion: segments once its size is known. */
+    int rc = ranged_get(server, path, &sink, (uint64_t)have,
+                        plan->cue ? 0 : plan->extract ? UINT64_MAX : rom->size,
+                        20 * 60, /* a server-side conversion can take a while to start */
+                        progress, user, &res, rom->name);
     bool closed = fclose(sink.f) == 0;
     free(buffer);
     if (rc == HTTP_OK && res.status == 200 && have > 0)

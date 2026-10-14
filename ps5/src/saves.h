@@ -5,6 +5,7 @@
 #ifndef GAMESYNC_SAVES_H
 #define GAMESYNC_SAVES_H
 
+#include "bundle.h"
 #include "config.h"
 #include "naming.h"
 
@@ -18,6 +19,7 @@ typedef enum
     SAVE_PS2_FOLDER, /* one folder on a shared PS2 card, /saves/{id}/ps2-files */
     SAVE_GCI,        /* a Dolphin GameCube .gci, /saves/{id}/gc-card?format=gci */
     SAVE_FOLDER,     /* a save folder (Wii, Switch) as a 3DSS bundle, /saves/{id} */
+    SAVE_XBOX,       /* E:\UDATA\<id> inside XPSemu's disk image (path), a 3DSS bundle */
 } SaveKind;
 
 typedef enum
@@ -75,6 +77,11 @@ void saves_scan(const Config *config, const KvStore *ids, const KvStore *install
 
 /* Recomputes local_hash/local_size/local for one entry. */
 void saves_hash_local(SaveEntry *entry);
+
+/* The biggest Xbox save read out of XPSemu's disk (it is held in memory). */
+#define XBOX_SAVE_MAX (128ull << 20)
+/* An Xbox save's files out of XPSemu's disk image, in bundle order. */
+bool saves_xbox_tree(const SaveEntry *entry, SaveTree *tree, char *err, size_t err_size);
 
 /* ProsperoEden's save folder for the active profile:
  * <eden>/user/nand/user/save/0000000000000000/<USER ID>; false when no

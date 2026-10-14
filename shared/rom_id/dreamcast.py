@@ -45,6 +45,19 @@ def canonical_dc_serial(serial: str) -> str:
     return _SEGA_PREFIX_RE.sub("", compact)
 
 
+_BOX_CODE_RE = re.compile(r"^9\d{2}-?\d{4}-?\d{2}$")
+
+
+def is_dc_box_code(serial: str) -> bool:
+    """A Sega Europe box code (``950-0019-50``): never what IP.BIN says.
+
+    Redump lists one beside the disc's product number for many PAL Sega
+    titles (Soulcalibur: ``950-0019-50`` and ``T-1401D-50``); the disc, and
+    so every save device, only knows the product number.
+    """
+    return bool(_BOX_CODE_RE.match(str(serial or "").strip()))
+
+
 def make_dc_title_id(serial: str) -> str:
     """Canonical sync id for a Dreamcast disc serial (``""`` if unusable)."""
     canonical = canonical_dc_serial(serial)
@@ -297,8 +310,13 @@ def parse_dreamcast_dat(text: str) -> dict[str, str]:
             continue
         if stripped == _GAME_CLOSE and in_game:
             if cur_name and cur_serial:
-                # First occurrence wins, matching the Saturn parser.
-                result.setdefault(cur_name.lower(), cur_serial)
+                # First occurrence wins, matching the Saturn parser - but
+                # never a box code over the disc's own product number.
+                key = cur_name.lower()
+                if key not in result or (
+                    is_dc_box_code(result[key]) and not is_dc_box_code(cur_serial)
+                ):
+                    result[key] = cur_serial
             in_game = False
             continue
         if not in_game:
@@ -447,6 +465,7 @@ __all__ = [
     "canonical_dc_serial",
     "dc_device_folder_ids",
     "find_disc_image",
+    "is_dc_box_code",
     "load_dreamcast_dat",
     "lookup_dreamcast_serial_in_dat",
     "make_dc_title_id",

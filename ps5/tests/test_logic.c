@@ -403,6 +403,48 @@ static void saturn_entry(const Config *c, char *path, size_t size, char *warning
     saves_free(&list);
 }
 
+/* Flycast: Per-Game VMUs turned on in its options, the VMU synced as
+ * <game>.A1.bin; a game whose own options turn them off isn't synced. */
+static void test_flycast_vmus(void)
+{
+    char root[] = "/tmp/gs_flycast_XXXXXX";
+    if (!mkdtemp(root))
+    {
+        CHECK(!"mkdtemp");
+        return;
+    }
+    Config c;
+    config_defaults(&c);
+    snprintf(c.retroarch_dir, sizeof(c.retroarch_dir), "%s", root);
+    char game[PATH_LEN], core_opt[PATH_LEN], game_opt[PATH_LEN], vmu[PATH_LEN];
+    snprintf(game, sizeof(game), "%s/content/dreamcast/Soulcalibur (Europe) (En,Fr,De,Es).chd", root);
+    util_mkdirs_parent(game);
+    util_write_file_atomic(game, "x", 1);
+    snprintf(core_opt, sizeof(core_opt), "%s/config/Flycast/Flycast.opt", root);
+    snprintf(game_opt, sizeof(game_opt), "%s/config/Flycast/Soulcalibur (Europe) (En,Fr,De,Es).opt", root);
+    snprintf(vmu, sizeof(vmu), "%s/savefiles/Flycast/Soulcalibur (Europe) (En,Fr,De,Es).A1.bin", root);
+    set_opt(core_opt, "reicast_widescreen_hack = \"enabled\"\nreicast_per_content_vmus = \"disabled\"\n");
+
+    SaveList list = {0};
+    KvStore ids = {0};
+    retroarch_scan(&c, &ids, &list);
+    CHECK(list.count == 1 && strcmp(list.items[0].path, vmu) == 0);
+    saves_free(&list);
+    char *opt = (char *)util_read_file(core_opt, NULL);
+    CHECK(opt && strstr(opt, "reicast_per_content_vmus = \"VMU A1\"") &&
+          strstr(opt, "reicast_widescreen_hack") && !strstr(opt, "\"disabled\""));
+    free(opt);
+
+    set_opt(game_opt, "reicast_per_content_vmus = \"disabled\"\n");
+    retroarch_scan(&c, &ids, &list);
+    CHECK(list.count == 0 && strstr(list.warning, "Per-Game VMUs"));
+    saves_free(&list);
+
+    char cmd[PATH_LEN + 16];
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s'", root);
+    CHECK(system(cmd) == 0);
+}
+
 static void test_beetle_saturn_save_method(void)
 {
     char root[] = "/tmp/gs_beetle_XXXXXX";
@@ -529,6 +571,7 @@ int main(int argc, char **argv)
 {
     test_xcci();
     test_beetle_saturn_save_method();
+    test_flycast_vmus();
     test_saturn();
     if (argc == 3)
         test_game_index(argv[1], argv[2]);

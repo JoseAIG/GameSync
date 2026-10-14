@@ -14,6 +14,7 @@ import pytest
 from shared.rom_id.dreamcast import (
     IP_BIN_SIZE,
     canonical_dc_serial,
+    is_dc_box_code,
     lookup_dreamcast_serial_in_dat,
     parse_dreamcast_dat,
     parse_ip_bin,
@@ -244,3 +245,17 @@ def test_canonical_serial_matches_the_kotlin_port():
     assert canonical_dc_serial("MK-51064-50") == "5106450"
     assert canonical_dc_serial("t-3601n") == "T3601N"
     assert canonical_dc_serial("HDR-0080") == "HDR0080"
+
+
+def test_dat_lookup_skips_a_sega_box_code():
+    # Redump lists Soulcalibur (Europe) with its box code first; the disc's
+    # IP.BIN, and every save device, says T-1401D-50.
+    dat = (
+        'game (\n\tname "Soulcalibur (Europe) (En,Fr,De,Es)"\n\tserial "950-0019-50"\n)\n'
+        'game (\n\tname "Soulcalibur (Europe) (En,Fr,De,Es)"\n\tserial "T-1401D-50"\n)\n'
+    )
+    parsed = parse_dreamcast_dat(dat)
+    assert parsed["soulcalibur (europe) (en,fr,de,es)"] == "T-1401D-50"
+    assert is_dc_box_code("950-0019-50")
+    assert not is_dc_box_code("T-1401D-50")
+    assert not is_dc_box_code("MK-51064-50")

@@ -6,12 +6,12 @@ emulators. PS5 game saves are not handled yet.
 
 | Emulator | Title | What syncs | Server endpoint |
 |---|---|---|---|
-| [PS5_RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | `PPSA99169` | the `.srm` of every ROM in `content/<system>/` or a playlist (USB games too), in `savefiles/<core>/`; Saturn: Beetle Saturn's 32 KB backup RAM (the Mednafen image the server keeps for `SAT_` ids) as its *Save Method* core option says - `<game>.srm` for Libretro (default), `<game>.bkr` for Mednafen, read from `config/Beetle Saturn/<game>.opt`, `<content folder>.opt` or `Beetle Saturn.opt` the way RetroArch does; a card left in the other format is moved over, and with *Shared Internal Memory* on nothing is synced | `/saves/{id}/raw` |
+| [PS5_RetroArch](https://github.com/mihawk-99/PS5_RetroArch) | `PPSA99169` | the `.srm` of every ROM in `content/<system>/` or a playlist (USB games too), in `savefiles/<core>/`; Saturn: Beetle Saturn's 32 KB backup RAM (the Mednafen image the server keeps for `SAT_` ids) as its *Save Method* core option says - `<game>.srm` for Libretro (default), `<game>.bkr` for Mednafen, read from `config/Beetle Saturn/<game>.opt`, `<content folder>.opt` or `Beetle Saturn.opt` the way RetroArch does; a card left in the other format is moved over, and with *Shared Internal Memory* on nothing is synced; Dreamcast: Flycast's per-game VMU `<game>.A1.bin` (128 KB raw, like a MemCard Pro DC's) - GameSync sets *Per-Game VMUs* to `VMU A1` in `config/Flycast/Flycast.opt` (Flycast otherwise keeps every game on one `system/dc/vmu_save_A1.bin`); a game whose own `.opt` turns it off isn't synced | `/saves/{id}/raw` |
 | [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) | `PPSA98510` | per-game PS1 cards `saves/<SERIAL>_1.mcd` (or `<game>_1.mcd`, see below) | `/saves/{serial}/ps1-card` |
 | [PS5SX2](https://github.com/Swordpdf/PS5SX2) | `PPSA99203` | a card per game, `memcards/<game file>.ps2` (or every game on a shared `Mcd001.ps2`) | `/saves/{serial}/ps2-files` |
 | [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) (Dolphin) | `PPSA99764` | GameCube `.gci` saves in `saves/User/GC/<region>/Card A/` as `GC_<CODE>`; Wii saves `saves/User/Wii/title/00010000/<hex>/data/` as `WII_<CODE>` | `/saves/{id}/gc-card?format=gci`; `/saves/{id}` bundle |
 | [PS5CEMU-HAR](https://github.com/premohq/PS5CEMU-HAR) (Cemu + Azahar) | `PPSA99360` | Wii U `mlc01/usr/save/00050000/<lo>/user/` as `00050000<LO>`; 3DS `azahar/sdmc/Nintendo 3DS/0…/0…/title/00040000/<lo>/data/00000001/` as `00040000<LO>` — the Wii U and 3DS clients' slots | `/saves/{id}` bundle |
-| [XPSemu](https://github.com/ZiZc3/XPSemu) (Xbox) | `PPSA97358` | nothing yet: saves live inside its emulated hard disk (`/data/xemu/xbox_hdd.qcow2`); catalog installs only | — |
+| [XPSemu](https://github.com/ZiZc3/XPSemu) (Xbox) | `PPSA97358` | `E:\UDATA\<title id>` read out of its emulated hard disk (`xemu.toml`'s `hdd_path`, default `/data/xemu/xbox_hdd.qcow2`) as the Xbox client's 3DSS bundle. A download writes the folder back into the image (`src/xbox_hdd.c`), after copying it to `xbox_hdd.qcow2.bak` once per run - **quit XPSemu first** | — |
 | [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) (Switch) | `PPSA99008` | the active profile's saves `user/nand/user/save/0000000000000000/<USER>/<TITLEID>/` as `NSW_<TITLEID>` | `/saves/{id}` bundle |
 
 Saves share slots with every other GameSync client: a RetroArch `.srm` lands in
@@ -271,13 +271,37 @@ is synced — the server keeps one folder per serial.
 | GC / Wii | `<porpoise_dir>/games/<file>` (Porpoise) | `.rvz`, `.iso`, `.wbfs`, `.gcm`, `.ciso`, `.gcz`, `.wia`, `.wad`; from a zipped game only the game file comes down (`/roms/{id}/file/<member>`, resumable when the zip stores it) |
 | Wii U | `<cemu_dir>/games/<file>` (PS5CEMU) | `.wua`, `.wud`, `.wux`, `.rpx`, `.wuhb`; a WUP/NUS or loadiine folder goes to `games/<game>/` file by file from `/roms/{id}/manifest` + `/file/{name}` (each resumes; `.gamesync-complete` marks a whole set). PS5CEMU runs such an NUS set as it is (Cemu has the key for `title.tik`), but only lists it after a scan: *Settings > Look for games now* on its Wii U side |
 | 3DS | `<cemu_dir>/azahar/games/<file>` (PS5CEMU) | `.3ds`, `.cci`, `.cxi`, `.3dsx`…; a zipped or encrypted dump comes as the decrypted `.cci` the server makes (`?extract=decrypted_cci`, its `SYNC_ROM_3DS_DECRYPTED_CCI_COMMAND`); a zip with no `.3ds`/`.cci` inside (a `.cia` or homebrew) can't be converted |
-| Xbox | `<xemu_dir>/games/<file>` (XPSemu) | `.iso`/`.xiso` (XISO); a game folder (`.cci` + `default.xbe`): its compressed `.cci` slices are downloaded (resumable, often a fraction of the ISO) and decoded on the PS5 into the XISO they hold (`src/xcci.c`, byte-identical to XGDTool's); a folder with a plain `.iso` gets that file, anything else the server's `?extract=iso` |
+| Xbox | `<xemu_dir>/games/<file>` (XPSemu) | `.iso`/`.xiso` (XISO); a game folder (`.cci` + `default.xbe`) comes as the XISO the server makes (`?extract=iso`, its `SYNC_ROM_XBOX_ISO_COMMAND`); the server caches it, so the download resumes. (`src/xcci.c` decodes a CCI here byte-identically to XGDTool, but the app's write throttling made that crawl; it waits for the helper.) |
 | GameCube, Wii | `<porpoise_dir>/games/<file>` (Porpoise) | `.iso`, `.rvz`, `.gcm`, `.ciso`, `.gcz`, `.wbfs`, `.wia` |
 | Switch | `<eden_dir>/roms/<file>` (ProsperoEden) | `.nsp`, `.xci` (the server doesn't list Switch ROMs yet) |
 | everything RetroArch plays | `<retroarch_dir>/content/<system>/<file>` | as served |
 
 Downloads resume (`.part` + HTTP Range). Multi-file games (zipped `.cue`/`.bin`
 sets, MSU packs) aren't installed by this version.
+
+### Large downloads: the helper payload
+
+The PS5 throttles an app's writes: about 1.3 GB at ~210 MB/s, then ~2 MB/s
+until it has been idle a while (pausing a download let it refill). A disk
+test showed a payload process writing to the same `/data` unaffected,
+~215 MB/s for 4 GB. So the app carries a helper payload
+(`helper/main.c`, built with PS5 Payload SDK v0.44 by `build.sh` and compiled
+into the eboot as `helper_elf.c` - reading it back from `/app0/assets` failed
+on a console), and hands it every catalog download:
+
+- the app sends it to the ELF loader on port 9021 the first time it's needed
+  (as it does the Lapy helper); it listens on `127.0.0.1:9135` only and quits
+  after an hour idle, its log in `/data/gamesync/helper.log`;
+- one connection per download: the request on one line, progress lines
+  back, a result line (`src/helper_client.c` has the protocol); closing the
+  connection - a pause - stops it at once, and a new job for a file still
+  being written waits for the old one;
+- the download itself is the app's own code (`src/fetch.c`: 128 MB Range
+  segments, the real size from `Content-Range`), compiled into both;
+- without a helper (no loader, the PC build) the app downloads itself.
+
+`<data>/bench.request` (made over FTP) makes the app run its disk test at
+start-up (`src/diskbench.c`), results in `gamesync.log`.
 
 ## Build
 
@@ -312,6 +336,10 @@ which is how the UI can be exercised against a local server.
 | `src/saves.c` | finds each emulator's saves |
 | `src/saturn.c` | a Saturn disc's product code from its IP.BIN |
 | `src/xcci.c` | Xbox CCI images to XISO (LZ4 sectors) |
+| `src/fetch.c` | a server path into a file, in Range segments (app and helper) |
+| `src/helper_client.c` | hands downloads to the helper payload, or does them |
+| `src/diskbench.c` | the on-request disk write test |
+| `helper/main.c` | the helper payload (built with the PS5 Payload SDK v0.44) |
 | `src/retroarch.c` | RetroArch games (content folders, playlists) and their save paths |
 | `src/bundle.c` | save folders and the 3DSS bundle format (Wii, Switch) |
 | `src/sync.c` | server comparison, three-way decisions, transfers |

@@ -129,6 +129,12 @@ bool tree_read(const char *dir, const char *skip_top, SaveTree *out)
     return true;
 }
 
+void tree_sort(SaveTree *tree)
+{
+    if (tree->count > 1)
+        qsort(tree->files, (size_t)tree->count, sizeof(TreeFile), by_path);
+}
+
 void tree_free(SaveTree *tree)
 {
     for (int i = 0; i < tree->count; ++i)

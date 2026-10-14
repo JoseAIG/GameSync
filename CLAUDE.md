@@ -360,6 +360,11 @@ the card names its folder after. Server-side, `game_names.lookup_dc_serial()`
 resolves a ROM name through `Sega - Dreamcast.dat`, and slug-form uploads from
 older clients are upgraded at the API boundary by `canonicalize_slug_title_id`;
 `server/migrate_dc_serial_ids.py` re-keys saves already stored under a slug.
+Redump often lists a PAL Sega disc twice under one name, a box code first
+(`950-0019-50`) and the IP.BIN product number second (`T-1401D-50`); no disc
+or save device knows the box code, so `is_dc_box_code()` makes every DAT
+lookup (server rank, shared parser, Kotlin `DreamcastSerial.isBoxCode`) pass
+it over.
 
 Every client resolves the serial the same way, mirroring the Saturn plumbing:
 `shared/rom_id/dreamcast.py` reads IP.BIN out of the disc (GDI/CDI/ISO/BIN —
@@ -416,7 +421,10 @@ ShadowMountPlus), not a payload. Emulator saves only, no PS5 game saves:
 PS5_RetroArch `.srm` (system from the ROM's `content/<system>/` folder or its
 playlist, save id from the server's `/catalog/resolve/batch`; saves sit in
 `savefiles/<core name>/` because this port sorts by core unless
-`sort_savefiles_enable = "false"`, `ps5/src/retroarch.c`), SwanStationPS5 per-game
+`sort_savefiles_enable = "false"`, `ps5/src/retroarch.c`; Dreamcast is Flycast's
+per-game VMU `<game>.A1.bin` - GameSync turns `reicast_per_content_vmus` to
+`VMU A1` in `config/Flycast/Flycast.opt`, as Flycast otherwise shares one
+`system/dc/vmu_save_A1.bin`), SwanStationPS5 per-game
 `saves/<SERIAL>_1.mcd` cards (`/ps1-card`), PS5SX2 game folders, each
 game on its own `memcards/<game file>.ps2` by default (GameSync writes
 `MemoryCards/Slot1_Filename` into PS5SX2's per-game `settings/<game file>.ini`
@@ -428,8 +436,13 @@ checks that against the Python), Porpoise (Dolphin) GameCube `.gci` files as
 `WII_<CODE>` 3DSS bundles, ProsperoEden Switch saves as `NSW_<TITLEID>` bundles,
 PS5CEMU-HAR Wii U (`mlc01/usr/save/00050000/<lo>/user`) and 3DS (Azahar
 `.../title/00040000/<lo>/data/00000001`) folders as the Wii U / 3DS clients'
-16-hex ids. XPSemu (Xbox) is catalog-only: its saves are inside a qcow2 HDD
-image. SwanStationPS5 keeps its data in `/data/SwanStationPS5` (builds before
+16-hex ids. XPSemu (Xbox) saves are read from and written into its
+qcow2 HDD image (refcounted appends, COPIED clusters in place, image backed
+up to `.bak` first; XPSemu must be closed): FATX `E:\UDATA\<8-hex id>` (`src/xbox_hdd.c`), bundled with
+`\` paths like the Xbox client. The server hashes a bundle's files in upload
+order and the Xbox client uploads in FATX directory order, so the PS5 (which
+hashes sorted) fetches an Xbox-client upload once and keeps `<id>.server` =
+"<server hash> <sorted hash>" in its state. SwanStationPS5 keeps its data in `/data/SwanStationPS5` (builds before
 Oct 2026: `/data/PSXS5`, still scanned for games); the auto dir prefers the
 new one. Its card names depend on its *Memory Card 1 Type*
 (`swanstation_MemoryCards_Card1Type` in the active profile's
@@ -455,6 +468,11 @@ order the bundle is written in (`ps5/tests/test_bundle.c` cross-checks with
   server URLs and the `--as-needed` patch in `ps5/build.sh`.
 - Files written for an emulator must be world-writable (`0666`/`0777`): each
   emulator is another sandboxed title.
+- The PS5 throttles an **app's** writes to ~2 MB/s after a ~1.3 GB burst
+  (a payload's not at all), so catalog downloads go through the helper
+  payload `ps5/helper` (SDK v0.44 - v0.40 payloads don't start on current
+  loaders), started via the ELF loader on 9021 and spoken to on
+  127.0.0.1:9135 (`src/helper_client.c`, shared code in `src/fetch.c`).
 - A store install of PS5SX2 (ProsperoStore) has no `/data/PCSX2/resources/`,
   so no `GameIndex.yaml` and no per-game fixes (Star Ocean 3 crashes at boot).
   The client installs it from the server's `GET /emulators/ps5sx2/game-index`

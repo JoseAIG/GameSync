@@ -15,6 +15,7 @@ if _REPO_ROOT not in sys.path:
 from shared.rom_id import (  # noqa: E402
     canonical_dc_serial,
     dc_device_folder_ids,
+    is_dc_box_code,
     make_dc_title_id,
     make_title_id,
     normalize_rom_name,
@@ -28,6 +29,7 @@ __all__ = [
     "ROM_EXTENSIONS",
     "SYSTEM_CODES",
     "canonical_dc_serial",
+    "is_dc_box_code",
     "dc_device_folder_ids",
     "make_dc_title_id",
     "parse_dc_title_id",

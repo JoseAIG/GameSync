@@ -30,6 +30,10 @@ internal object DreamcastSerialDatabase {
     @Volatile
     private var nameToSerial: Map<String, String>? = null
 
+    /** Canonical serial → game name, over *every* serial a game lists. */
+    @Volatile
+    private var serialToName: Map<String, String>? = null
+
     /** Strips `[text]` bracket tags (fan-translation / hack markers). */
     private val bracketTagRe = Regex("""\s*\[[^\]]*\]""")
 
@@ -61,6 +65,17 @@ internal object DreamcastSerialDatabase {
         return null
     }
 
+    /**
+     * The DAT's game name for a disc serial (any spelling: `T-1401D-50`,
+     * `T1401D__50`), or null.  Uses every serial a game carries — the DAT
+     * often lists a Sega Europe box number (`950-0019-50`) before the IP.BIN
+     * product number (`T-1401D-50`) a save device files by.
+     */
+    fun nameForSerial(serial: String): String? {
+        if (serialToName == null) load()
+        return serialToName?.get(DreamcastSerial.canonical(serial))
+    }
+
     // ----------------------------------------------------------------------------------
     // Initialisation
     // ----------------------------------------------------------------------------------
@@ -68,11 +83,15 @@ internal object DreamcastSerialDatabase {
     private fun load(): Map<String, String> {
         // Double-checked: another thread may have initialised while we waited.
         nameToSerial?.let { return it }
-        val parsed = try {
-            SaveSyncApp.instance.assets.open(ASSET_NAME).use { parseDat(it) }
+        val entries = try {
+            SaveSyncApp.instance.assets.open(ASSET_NAME).use { parseDatEntries(it) }
         } catch (_: Exception) {
-            emptyMap()
+            emptyList()
         }
+        val reverse = mutableMapOf<String, String>()
+        for ((name, serial) in entries) reverse.putIfAbsent(DreamcastSerial.canonical(serial), name)
+        serialToName = reverse
+        val parsed = namesToFirstSerial(entries)
         nameToSerial = parsed
         return parsed
     }
@@ -94,10 +113,26 @@ internal object DreamcastSerialDatabase {
      * ```
      * The game-level `serial` field (at the first indent level) is used; the per-rom copy
      * inside `rom ( ... )` is ignored.  When several entries share a name, the first
-     * (usually the primary region) is kept via [putIfAbsent].
+     * (usually the primary region) is kept - unless it is a Sega box code
+     * ([DreamcastSerial.isBoxCode]) and a later entry has the disc's product number.
      */
-    internal fun parseDat(stream: java.io.InputStream): Map<String, String> {
+    internal fun parseDat(stream: java.io.InputStream): Map<String, String> =
+        namesToFirstSerial(parseDatEntries(stream))
+
+    private fun namesToFirstSerial(entries: List<Pair<String, String>>): Map<String, String> {
         val result = mutableMapOf<String, String>()
+        for ((name, serial) in entries) {
+            val key = name.lowercase()
+            val have = result[key]
+            if (have == null || (DreamcastSerial.isBoxCode(have) && !DreamcastSerial.isBoxCode(serial)))
+                result[key] = serial
+        }
+        return result
+    }
+
+    /** Every `(game name, game-level serial)` in DAT order, duplicates kept. */
+    internal fun parseDatEntries(stream: java.io.InputStream): List<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
         var inGame = false
         var curName = ""
         var curSerial = ""
@@ -113,7 +148,7 @@ internal object DreamcastSerialDatabase {
                     }
                     s == ")" && inGame -> {
                         if (curName.isNotEmpty() && curSerial.isNotEmpty()) {
-                            result.putIfAbsent(curName.lowercase(), curSerial)
+                            result += curName to curSerial
                         }
                         inGame = false
                     }
@@ -160,6 +195,15 @@ internal object DreamcastSerial {
     /** "MK-51000" / "51000" / "t-1249m" → "51000" / "51000" / "T1249M". */
     fun canonical(serial: String): String =
         segaPrefixRe.replace(nonAlnumRe.replace(serial, "").uppercase(), "")
+
+    private val boxCodeRe = Regex("""^9\d{2}-?\d{4}-?\d{2}$""")
+
+    /**
+     * A Sega Europe box code (`950-0019-50`): never what IP.BIN says.  Redump lists one
+     * beside the disc's product number for many PAL Sega titles (Soulcalibur: `950-0019-50`
+     * and `T-1401D-50`); the disc, and so every save device, only knows the second.
+     */
+    fun isBoxCode(serial: String): Boolean = boxCodeRe.matches(serial.trim())
 
     /** Canonical `DC_<serial>` title ID, or null when [serial] carries nothing usable. */
     fun titleId(serial: String?): String? {

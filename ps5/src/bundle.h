@@ -26,6 +26,8 @@ typedef struct
  * out (Wii "nocopy"), or NULL. false when dir can't be read. */
 bool tree_read(const char *dir, const char *skip_top, SaveTree *out);
 void tree_free(SaveTree *tree);
+/* Puts files in bundle order (strcmp on path). */
+void tree_sort(SaveTree *tree);
 /* The server's hash of a multi-file save: sha256 over every file's bytes,
  * no paths, in bundle order (server/app/services/storage.py). */
 void tree_hash(const SaveTree *tree, char out[65], uint64_t *total_size);

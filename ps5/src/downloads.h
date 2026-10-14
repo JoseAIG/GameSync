@@ -27,6 +27,7 @@ typedef struct
     DlState state;
     uint64_t done;  /* bytes this attempt */
     uint64_t total;
+    double speed;   /* bytes/s over the last second or two, 0 = not known yet */
     char error[160];
 } DlItem;
 

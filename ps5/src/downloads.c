@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 typedef struct
 {
@@ -47,11 +48,33 @@ static Entry *find(int id)
 typedef struct
 {
     int id;
+    double since;      /* when the speed window opened, 0 = not yet */
+    uint64_t since_done;
 } Progress;
+
+static double now_seconds(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 
 static int on_progress(uint64_t done, uint64_t total, void *user)
 {
     Progress *p = user;
+    double now = now_seconds();
+    double speed = -1; /* -1 = keep the last figure */
+    if (p->since == 0 || done < p->since_done)
+    {
+        p->since = now; /* first report, or a part file started over */
+        p->since_done = done;
+    }
+    else if (now - p->since >= 1.5)
+    {
+        speed = (double)(done - p->since_done) / (now - p->since);
+        p->since = now;
+        p->since_done = done;
+    }
     pthread_mutex_lock(&lock);
     Entry *e = find(p->id);
     bool stop = !e || e->pause_requested;
@@ -60,6 +83,8 @@ static int on_progress(uint64_t done, uint64_t total, void *user)
         e->item.done = done;
         if (total)
             e->item.total = total;
+        if (speed >= 0)
+            e->item.speed = speed;
     }
     pthread_mutex_unlock(&lock);
     return stop ? 1 : 0;
@@ -82,13 +107,14 @@ static void *worker(void *arg)
         }
         e->item.state = DL_RUNNING;
         e->item.done = 0;
+        e->item.speed = 0;
         e->item.error[0] = 0;
         e->pause_requested = false;
         DlItem job = e->item;
         HttpServer srv = server;
         pthread_mutex_unlock(&lock);
 
-        Progress p = {job.id};
+        Progress p = {job.id, 0, 0};
         char error[160] = "";
         bool ok = catalog_download(&srv, &job.rom, &job.plan, on_progress, &p, error,
                                    sizeof(error));

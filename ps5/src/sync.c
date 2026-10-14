@@ -17,6 +17,7 @@
 #include "bundle.h"
 #include "ps2mc.h"
 #include "retroarch.h"
+#include "xbox_hdd.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,7 +26,7 @@
 
 #define PS1_CARD_SIZE 131072u
 /* the id rules ids.txt was made under (bumped when they change) */
-#define ID_RULES "2"
+#define ID_RULES "3"
 
 static void progress(SyncContext *ctx, const char *message, int done, int total)
 {
@@ -238,6 +239,56 @@ static void decide(SyncContext *ctx, SaveEntry *e)
 
 /* ------------------------------------------------------------ server state */
 
+/* The Xbox client uploads a save's files in FATX directory order and the
+ * server hashes them in the order they came, while this client hashes in
+ * bundle (strcmp) order. So an Xbox save this client didn't upload is
+ * fetched once and hashed its way; the pair is kept as "<id>.server". */
+static bool xbox_server_hash(SyncContext *ctx, SaveEntry *e)
+{
+    if (!e->server_hash[0] || strcmp(e->server_hash, e->local_hash) == 0)
+        return true;
+    char key[80];
+    snprintf(key, sizeof(key), "%s.server", e->title_id);
+    const char *alias = kv_get(&ctx->state, key);
+    if (alias && strlen(alias) == 129 && strncmp(alias, e->server_hash, 64) == 0)
+    {
+        util_copy(e->server_hash, sizeof(e->server_hash), alias + 65);
+        return true;
+    }
+    if (e->server_size > XBOX_SAVE_MAX)
+        return true; /* compared as it is */
+    char path[256];
+    snprintf(path, sizeof(path), "/api/v1/saves/%s", e->title_id);
+    HttpBuffer out = {0};
+    int status = http_get(&ctx->server, path, &out, NULL);
+    if (status != 200)
+    {
+        http_buffer_free(&out);
+        e->status = ST_ERROR;
+        snprintf(e->message, sizeof(e->message), "server: %s", http_error_text(status));
+        return false;
+    }
+    SaveTree tree;
+    bool ok = bundle_parse(out.data, out.len, &tree);
+    http_buffer_free(&out);
+    if (!ok)
+    {
+        e->status = ST_ERROR;
+        util_copy(e->message, sizeof(e->message), "the server's save is damaged");
+        return false;
+    }
+    tree_sort(&tree);
+    char content[65];
+    tree_hash(&tree, content, NULL);
+    tree_free(&tree);
+    char value[140];
+    snprintf(value, sizeof(value), "%s %s", e->server_hash, content);
+    kv_set(&ctx->state, key, value);
+    kv_save(&ctx->state);
+    util_copy(e->server_hash, sizeof(e->server_hash), content);
+    return true;
+}
+
 static bool fetch_server_hash(SyncContext *ctx, SaveEntry *e)
 {
     char path[256];
@@ -246,6 +297,8 @@ static bool fetch_server_hash(SyncContext *ctx, SaveEntry *e)
     int status;
     switch (e->kind)
     {
+    case SAVE_XBOX:
+        return xbox_server_hash(ctx, e);
     case SAVE_PS1_CARD:
         snprintf(path, sizeof(path), "/api/v1/saves/%s/ps1-card/meta?slot=0", e->title_id);
         status = http_get(&ctx->server, path, &out, &res);
@@ -362,6 +415,28 @@ static void add_server_only(SyncContext *ctx, const JsonValue *t, const char *ti
         if (!saves_eden_user_dir(&ctx->config, user, sizeof(user)))
             return; /* no ProsperoEden profile yet */
         snprintf(path, sizeof(path), "%s/%s", user, tid + 4);
+    }
+    if (util_ieq(console, "XBOX") && xhdd_is_game_title_id(tid))
+    {
+        /* an Xbox save: E:\UDATA on XPSemu's disk, when XPSemu is here */
+        char image[PATH_LEN];
+        xhdd_image_path(ctx->config.xemu_dir, image, sizeof(image));
+        if (!util_file_exists(image))
+            return;
+        SaveEntry *e = saves_add(&ctx->saves);
+        if (!e)
+            return;
+        e->emu = EMU_XEMU;
+        e->kind = SAVE_XBOX;
+        util_copy(e->system, sizeof(e->system), "XBOX");
+        util_copy(e->title_id, sizeof(e->title_id), tid);
+        util_copy(e->path, sizeof(e->path), image);
+        e->server = true;
+        e->status = ST_SERVER_ONLY;
+        util_copy(e->server_hash, sizeof(e->server_hash), json_get_str(t, "save_hash", ""));
+        e->server_size = (uint64_t)json_get_num(t, "save_size", 0);
+        e->installed = kv_get(&ctx->installed, tid) != NULL;
+        return;
     }
     char cemu_path[PATH_LEN];
     if (saves_cemu_dir(&ctx->config, tid, cemu_path, sizeof(cemu_path)))
@@ -643,7 +718,17 @@ static bool upload_ps2(SyncContext *ctx, SaveEntry *e, char *hash)
 static bool upload_folder(SyncContext *ctx, SaveEntry *e, char *hash)
 {
     SaveTree tree;
-    if (!tree_read(e->path, "nocopy", &tree) || !tree.count)
+    if (e->kind == SAVE_XBOX)
+    {
+        char err[96] = "no files";
+        if (!saves_xbox_tree(e, &tree, err, sizeof(err)) || !tree.count)
+        {
+            tree_free(&tree);
+            snprintf(e->message, sizeof(e->message), "XPSemu disk: %s", err);
+            return false;
+        }
+    }
+    else if (!tree_read(e->path, "nocopy", &tree) || !tree.count)
     {
         tree_free(&tree);
         util_copy(e->message, sizeof(e->message), "can't read the save folder");
@@ -679,7 +764,7 @@ bool sync_upload(SyncContext *ctx, SaveEntry *e)
     bool ok;
     if (e->kind == SAVE_PS2_FOLDER)
         ok = upload_ps2(ctx, e, hash);
-    else if (e->kind == SAVE_FOLDER)
+    else if (e->kind == SAVE_FOLDER || e->kind == SAVE_XBOX)
         ok = upload_folder(ctx, e, hash);
     else
     {
@@ -821,8 +906,85 @@ static bool download_folder(SaveEntry *e, const uint8_t *data, size_t size, char
     return ok;
 }
 
+/* An Xbox save into XPSemu's disk image. The image is copied to
+ * <image>.bak before the first write each time GameSync runs. */
+static bool download_xbox(SyncContext *ctx, SaveEntry *e)
+{
+    static bool backed_up;
+    char path[256];
+    snprintf(path, sizeof(path), "/api/v1/saves/%s", e->title_id);
+    HttpBuffer out = {0};
+    int status = http_get(&ctx->server, path, &out, NULL);
+    if (status != 200)
+    {
+        http_buffer_free(&out);
+        snprintf(e->message, sizeof(e->message), "download: %s", http_error_text(status));
+        return false;
+    }
+    SaveTree tree;
+    bool ok = bundle_parse(out.data, out.len, &tree);
+    http_buffer_free(&out);
+    if (!ok)
+    {
+        util_copy(e->message, sizeof(e->message), "bad bundle from the server");
+        return false;
+    }
+    tree_sort(&tree);
+    char content[65];
+    uint64_t size = 0;
+    tree_hash(&tree, content, &size);
+    char bak[PATH_LEN + 8];
+    snprintf(bak, sizeof(bak), "%s.bak", e->path);
+    if (!backed_up)
+    {
+        app_log("XPSemu: backing up %s", e->path);
+        if (!xhdd_backup(e->path, bak))
+        {
+            tree_free(&tree);
+            util_copy(e->message, sizeof(e->message), "can't back up XPSemu's disk image");
+            return false;
+        }
+        backed_up = true;
+    }
+    char err[96] = "";
+    XboxHdd *hdd = xhdd_open_rw(e->path, err, sizeof(err));
+    ok = hdd && xhdd_write_title(hdd, e->title_id, &tree, err, sizeof(err));
+    xhdd_close(hdd);
+    tree_free(&tree);
+    if (!ok)
+    {
+        snprintf(e->message, sizeof(e->message), "XPSemu disk: %s", err);
+        app_log("download %s failed: %s (the image before it: %s)", e->title_id, err, bak);
+        return false;
+    }
+    app_log("downloaded %s into XPSemu's disk", e->title_id);
+    /* the server's hash is the Xbox client's file order: remember the pair */
+    if (e->server_hash[0] && strcmp(e->server_hash, content) != 0)
+    {
+        char key[80], value[140];
+        snprintf(key, sizeof(key), "%s.server", e->title_id);
+        snprintf(value, sizeof(value), "%s %s", e->server_hash, content);
+        kv_set(&ctx->state, key, value);
+    }
+    record_synced(ctx, e, content);
+    util_copy(e->local_hash, sizeof(e->local_hash), content);
+    util_copy(e->server_hash, sizeof(e->server_hash), content);
+    e->local_size = size;
+    e->local = e->server = true;
+    e->status = ST_SYNCED;
+    return true;
+}
+
 bool sync_download(SyncContext *ctx, SaveEntry *e)
 {
+    if (e->kind == SAVE_XBOX)
+    {
+        e->message[0] = 0;
+        bool ok = download_xbox(ctx, e);
+        if (!ok)
+            e->status = ST_ERROR;
+        return ok;
+    }
     if (!e->path[0])
     {
         util_copy(e->message, sizeof(e->message),

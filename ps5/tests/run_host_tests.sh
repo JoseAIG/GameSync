@@ -32,6 +32,13 @@ mkdir -p "$OUT/tree/nocopy" && printf 'skip' > "$OUT/tree/nocopy/n.bin"
 "$PY" "$HERE/bundle_fixture.py" make "$OUT/server.3dss" > "$OUT/server_hash.txt"
 "$OUT/test_bundle" parse "$OUT/server.3dss" "$(cat "$OUT/server_hash.txt")" "$OUT/written"
 
+$CC $CFLAGS -o "$OUT/test_xbox_hdd" "$HERE/test_xbox_hdd.c" "$SRC/xbox_hdd.c" "$SRC/bundle.c" \
+    "$SRC/util.c" "$SRC/sha256.c" -lz
+"$PY" "$HERE/xbox_hdd_fixture.py" make "$OUT/xbox_hdd.qcow2"
+"$OUT/test_xbox_hdd" "$OUT/xbox_hdd.qcow2" > "$OUT/xbox_hdd.txt"
+"$PY" "$HERE/xbox_hdd_fixture.py" check "$OUT/xbox_hdd.txt"
+"$PY" "$HERE/xbox_hdd_fixture.py" check-image "$OUT/xbox_hdd.qcow2"
+
 $CC $CFLAGS -o "$OUT/test_unzip" "$HERE/test_unzip.c" "$SRC/unzip.c" "$SRC/util.c" "$SRC/sha256.c"
 "$PY" - "$OUT/set.zip" <<'PY'
 import sys, zipfile
@@ -49,7 +56,7 @@ if "$OUT/test_unzip" "$OUT/evil.zip" "$OUT/evil" 2>/dev/null; then echo "travers
 
 $CC $CFLAGS -o "$OUT/test_logic" "$HERE/test_logic.c" "$SRC/json.c" "$SRC/naming.c" \
     "$SRC/http.c" "$SRC/sync.c" "$SRC/saves.c" "$SRC/retroarch.c" "$SRC/bundle.c" \
-    "$SRC/config.c" "$SRC/ps2mc.c" "$SRC/saturn.c" "$SRC/xcci.c" "$SRC/catalog.c" "$SRC/unzip.c" "$SRC/util.c" "$SRC/sha256.c" -lz
+    "$SRC/config.c" "$SRC/ps2mc.c" "$SRC/saturn.c" "$SRC/xbox_hdd.c" "$SRC/xcci.c" "$SRC/fetch.c" "$SRC/helper_client.c" "$SRC/catalog.c" "$SRC/unzip.c" "$SRC/util.c" "$SRC/sha256.c" -lz
 # the GameIndex.yaml download, against a stand-in for the server's route
 head -c 300000 /dev/urandom > "$OUT/GameIndex.yaml"
 "$PY" "$HERE/game_index_fixture.py" "$OUT/port" "$OUT/GameIndex.yaml" &

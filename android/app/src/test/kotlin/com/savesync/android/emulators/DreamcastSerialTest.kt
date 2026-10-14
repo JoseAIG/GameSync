@@ -1,7 +1,9 @@
 package com.savesync.android.emulators
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
@@ -79,6 +81,31 @@ class DreamcastSerialTest {
         assertEquals(2, parsed.size)
         assertEquals("T-1249M", parsed["capcom vs. snk 2 - millionaire fighting 2001 (japan)"])
         assertEquals("51000", parsed["sonic adventure (usa)"])
+    }
+
+    @Test
+    fun `every serial a game lists is kept for the reverse lookup`() {
+        // The DAT lists Soulcalibur (Europe) twice: a box number first, then
+        // the IP.BIN product number a save device files by.
+        val twice = """
+            game (
+                name "Soulcalibur (Europe) (En,Fr,De,Es)"
+                serial "950-0019-50"
+            )
+            game (
+                name "Soulcalibur (Europe) (En,Fr,De,Es)"
+                serial "T-1401D-50"
+            )
+        """.trimIndent()
+        val entries = DreamcastSerialDatabase.parseDatEntries(twice.byteInputStream())
+        assertEquals(listOf("950-0019-50", "T-1401D-50"), entries.map { it.second })
+        // Flycast's VMU name for the disc folds onto the same canonical serial.
+        assertEquals(DreamcastSerial.canonical("T-1401D-50"), DreamcastSerial.canonical("T1401D__50"))
+        // The name lookup takes the disc's product number over the box code.
+        assertEquals("T-1401D-50", DreamcastSerialDatabase.parseDat(twice.byteInputStream())["soulcalibur (europe) (en,fr,de,es)"])
+        assertTrue(DreamcastSerial.isBoxCode("950-0019-50"))
+        assertFalse(DreamcastSerial.isBoxCode("T-1401D-50"))
+        assertFalse(DreamcastSerial.isBoxCode("MK-51064-50"))
     }
 
     // ------------------------------------------------------------------

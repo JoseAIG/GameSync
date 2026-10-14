@@ -6,6 +6,7 @@ from pathlib import Path
 from app.services.rom_id import (
     SYSTEM_CODES,
     canonical_dc_serial,
+    is_dc_box_code,
     make_dc_title_id,
     normalize_rom_name,
     parse_dc_title_id,
@@ -1122,7 +1123,7 @@ def build_dreamcast_slug_index() -> int:
     return len(_dc_by_slug)
 
 
-def _dc_serial_region_rank(code: str, region_hint: str | None) -> tuple[int, str]:
+def _dc_serial_region_rank(code: str, region_hint: str | None) -> tuple[int, bool, str]:
     """Sort key for choosing between a game's regional serials.
 
     Dreamcast product codes carry their region: Sega PAL discs end in ``-50``
@@ -1130,17 +1131,20 @@ def _dc_serial_region_rank(code: str, region_hint: str | None) -> tuple[int, str
     ``M``/``J`` and US ones in ``N``.  With no hint, prefer USA, then Europe,
     then Japan — the same order the rest of the DAT handling uses.
     """
+    # Within a region a Sega Europe box code (950-0019-50) loses: the disc's
+    # IP.BIN says T-1401D-50, and that is what every save device files under.
+    box = is_dc_box_code(code)
     if region_hint == "USA" and code.endswith("N"):
-        return (0, code)
+        return (0, box, code)
     if region_hint == "EUROPE" and code.endswith("50"):
-        return (0, code)
+        return (0, box, code)
     if region_hint == "JAPAN" and code.endswith(("M", "J")):
-        return (0, code)
+        return (0, box, code)
     if code.endswith("50"):
-        return (2, code)
+        return (2, box, code)
     if code.endswith(("M", "J")):
-        return (3, code)
-    return (1, code)
+        return (3, box, code)
+    return (1, box, code)
 
 
 def lookup_dc_serial(name: str) -> str | None:

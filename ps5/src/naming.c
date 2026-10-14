@@ -145,7 +145,7 @@ static const SystemInfo SYSTEMS[] = {
     {"32X", "sega32x", "32X", true},
     {"SEGACD", "segacd", "Sega CD", false},
     {"SAT", "Saturn", "Saturn", true}, /* Beetle Saturn: backup RAM as <game>.srm */
-    {"DC", "dreamcast", "Dreamcast", false},
+    {"DC", "dreamcast", "Dreamcast", true}, /* Flycast: per-game VMU <game>.A1.bin */
     {"PCE", "pcengine", "PC Engine", true},
     {"TG16", "pcengine", "TurboGrafx-16", true},
     {"PCECD", "pcengine", "PC Engine CD", false},

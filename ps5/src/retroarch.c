@@ -160,6 +160,7 @@ static const DefaultCore CORES[] = {
     {"POKEMINI", "pokemini_libretro", "PokeMini"},
     {"JAGUAR", "virtualjaguar_libretro", "Virtual Jaguar"},
     {"SAT", "mednafen_saturn_libretro", "Beetle Saturn"},
+    {"DC", "flycast_libretro", "Flycast"},
     {"PS1", "mednafen_psx_hw_libretro", "Beetle PSX HW"},
 };
 
@@ -523,6 +524,80 @@ static void saturn_fix_format(const char *right)
                 util_basename(right));
 }
 
+/* ------------------------------------------------------------ Flycast */
+
+/* Flycast keeps every game on one shared VMU (system/dc/vmu_save_A1.bin)
+ * unless its "Per-Game VMUs" option (reicast_per_content_vmus) is "VMU A1"
+ * or "All VMUs": then A1 is <save folder>/<game>.A1.bin, the 128 KB raw VMU
+ * the server keeps for DC_ ids (flycast libretro getVmuPath). */
+#define FLYCAST_VMU_KEY "reicast_per_content_vmus"
+
+static void flycast_core(const RaSettings *s, const RaGame *game, char *out, size_t size)
+{
+    core_name(s, game && game->core_lib[0] ? game->core_lib : "flycast_libretro", "DC", out, size);
+    if (!out[0])
+        util_copy(out, size, "Flycast");
+}
+
+static bool flycast_per_game(const RaSettings *s, const RaGame *game)
+{
+    char core[96], v[32];
+    flycast_core(s, game, core, sizeof(core));
+    core_option(s, core, game->path, FLYCAST_VMU_KEY, v, sizeof(v));
+    return util_ieq(v, "VMU A1") || util_ieq(v, "All VMUs");
+}
+
+/* Turns Per-Game VMUs on in Flycast's own options (config/Flycast/Flycast.opt)
+ * when nothing there says so yet; a per-game or folder .opt still wins. */
+static void flycast_enable_per_game(const RaSettings *s)
+{
+    char core[96], path[PATH_LEN], v[32];
+    flycast_core(s, NULL, core, sizeof(core));
+    snprintf(path, sizeof(path), "%s/config/%s/%s.opt", s->root, core, core);
+    size_t len = 0;
+    char *text = (char *)util_read_file(path, &len);
+    if (text)
+    {
+        cfg_value(text, FLYCAST_VMU_KEY, v, sizeof(v));
+        if (util_ieq(v, "VMU A1") || util_ieq(v, "All VMUs"))
+        {
+            free(text);
+            return;
+        }
+    }
+    /* the file without the old line, then ours */
+    size_t cap = len + 64;
+    char *out = malloc(cap);
+    if (!out)
+    {
+        free(text);
+        return;
+    }
+    size_t n = 0;
+    for (const char *line = text; line && *line;)
+    {
+        const char *end = strchr(line, '\n');
+        size_t l = end ? (size_t)(end - line + 1) : strlen(line);
+        if (strncmp(line, FLYCAST_VMU_KEY, strlen(FLYCAST_VMU_KEY)) != 0)
+        {
+            memcpy(out + n, line, l);
+            n += l;
+            if (!end)
+                out[n++] = '\n';
+        }
+        line += l;
+    }
+    n += (size_t)snprintf(out + n, cap - n, FLYCAST_VMU_KEY " = \"VMU A1\"\n");
+    util_mkdirs_parent(path);
+    if (util_write_file_atomic(path, out, n))
+    {
+        chmod(path, 0666);
+        app_log("Flycast: turned Per-Game VMUs on (%s) so each game's VMU syncs", path);
+    }
+    free(out);
+    free(text);
+}
+
 static void save_path(const RaSettings *s, const RaGame *game, char *out, size_t size)
 {
     char stem[256], srm[300];
@@ -539,6 +614,15 @@ static void save_path(const RaSettings *s, const RaGame *game, char *out, size_t
         }
         if (kind == SAT_SAVE_BKR)
             ext = ".bkr";
+    }
+    else if (util_ieq(game->system, "DC"))
+    {
+        if (!flycast_per_game(s, game))
+        {
+            out[0] = 0; /* the shared VMU: nothing to sync per game */
+            return;
+        }
+        ext = ".A1.bin";
     }
     snprintf(srm, sizeof(srm), "%s%s", stem, ext);
     char content_dir[PATH_LEN];
@@ -603,6 +687,12 @@ void retroarch_scan(const Config *config, const KvStore *ids, SaveList *list)
         closedir(d);
     }
     read_playlists(&s, &games);
+    for (int i = 0; i < games.count; ++i)
+        if (util_ieq(games.items[i].system, "DC"))
+        {
+            flycast_enable_per_game(&s);
+            break;
+        }
 
     for (int i = 0; i < games.count; ++i)
     {
@@ -625,10 +715,15 @@ void retroarch_scan(const Config *config, const KvStore *ids, SaveList *list)
         save_path(&s, g, e->path, sizeof(e->path));
         if (!e->path[0])
         {
-            list->count--; /* Beetle Saturn's shared backup memory */
-            snprintf(list->warning, sizeof(list->warning),
-                     "Beetle Saturn shares one backup memory between games (Shared Internal "
-                     "Memory on): Saturn saves aren't synced");
+            list->count--; /* Beetle Saturn's shared backup memory, Flycast's shared VMU */
+            if (util_ieq(g->system, "DC"))
+                snprintf(list->warning, sizeof(list->warning),
+                         "Flycast's Per-Game VMUs are off for %s: its saves go to the shared "
+                         "VMU and aren't synced", e->name);
+            else
+                snprintf(list->warning, sizeof(list->warning),
+                         "Beetle Saturn shares one backup memory between games (Shared "
+                         "Internal Memory on): Saturn saves aren't synced");
             continue;
         }
         if (util_ieq(g->system, "SAT"))

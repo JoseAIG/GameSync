@@ -680,7 +680,12 @@ static void draw_saves(void)
         [ST_NONE] = "No save on either side.",
         [ST_ERROR] = "Triangle to retry by hand.",
     };
-    detail_hint(hint_for[e->status]);
+    if (e->kind == SAVE_XBOX && (e->status == ST_DOWNLOAD || e->status == ST_SERVER_ONLY ||
+                                 e->status == ST_CONFLICT))
+        detail_hint("Quit XPSemu before downloading: it writes into its disk image "
+                    "(backed up first as xbox_hdd.qcow2.bak).");
+    else
+        detail_hint(hint_for[e->status]);
     if (sync_ctx.saves.warning[0])
         set_banner(COL_WARN, "%s", sync_ctx.saves.warning);
     draw_footer(hints, 5);
@@ -968,7 +973,10 @@ static void draw_downloads(void)
             char a[32], b[32];
             util_format_size(a, sizeof(a), d->done);
             util_format_size(b, sizeof(b), d->total);
-            snprintf(sub, sizeof(sub), "%s / %s", a, b);
+            if (d->speed > 0)
+                snprintf(sub, sizeof(sub), "%s / %s  %.1f MB/s", a, b, d->speed / 1e6);
+            else
+                snprintf(sub, sizeof(sub), "%s / %s", a, b);
             int bar_x = MARGIN + 138 + 300, bar_w = LIST_W - 180 - pill - 320;
             gfx_round_rect(bar_x, y + 50, bar_w, 10, 5, COL_BG);
             uint64_t done = d->done > d->total ? d->total : d->done;
@@ -988,6 +996,10 @@ static void draw_downloads(void)
     util_format_size(size, sizeof(size), sel->rom.size);
     detail_row("Status", download_state_text(sel->state), COL_TEXT);
     detail_row("Size", size, COL_TEXT);
+    char speed[32] = "";
+    if (sel->state == DL_RUNNING && sel->speed > 0)
+        snprintf(speed, sizeof(speed), "%.1f MB/s", sel->speed / 1e6);
+    detail_row("Speed", speed, COL_TEXT);
     detail_row("Emulator", emulator_name(sel->plan.emu), COL_TEXT);
     detail_row("Goes to", sel->plan.cue ? sel->plan.unzip_dir : sel->plan.dest, COL_DIM);
     detail_row("Error", sel->error, COL_ERR);

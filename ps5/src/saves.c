@@ -13,6 +13,7 @@
 #include "saves.h"
 
 #include "bundle.h"
+#include "xbox_hdd.h"
 #include "retroarch.h"
 #include "json.h"
 #include "ps2mc.h"
@@ -57,11 +58,39 @@ SaveEntry *saves_find(SaveList *list, const char *title_id)
     return NULL;
 }
 
+bool saves_xbox_tree(const SaveEntry *e, SaveTree *tree, char *err, size_t err_size)
+{
+    memset(tree, 0, sizeof(*tree));
+    XboxHdd *hdd = xhdd_open(e->path, err, err_size);
+    if (!hdd)
+        return false;
+    bool ok = xhdd_read_title(hdd, e->title_id, XBOX_SAVE_MAX, tree, err, err_size);
+    xhdd_close(hdd);
+    return ok;
+}
+
 void saves_hash_local(SaveEntry *e)
 {
     e->local = false;
     e->local_hash[0] = 0;
     e->local_size = 0;
+    if (e->kind == SAVE_XBOX)
+    {
+        SaveTree tree;
+        char err[96];
+        if (!saves_xbox_tree(e, &tree, err, sizeof(err)))
+        {
+            app_log("XPSemu: %s skipped: %s", e->title_id, err);
+            return;
+        }
+        if (tree.count)
+        {
+            tree_hash(&tree, e->local_hash, &e->local_size);
+            e->local = true;
+        }
+        tree_free(&tree);
+        return;
+    }
     if (e->kind == SAVE_FOLDER)
     {
         SaveTree tree;
@@ -1178,6 +1207,54 @@ static void scan_cemu(const Config *config, SaveList *list)
     scan_cemu_root(config, list, root, "00040000", "3DS", "/data/00000001");
 }
 
+/* XPSemu: the game folders in E:\UDATA on its disk image. Read while
+ * XPSemu runs, a save it is writing can come out half-written: the next
+ * scan sees the finished one. */
+static void scan_xemu(const Config *config, SaveList *list)
+{
+    char image[PATH_LEN];
+    xhdd_image_path(config->xemu_dir, image, sizeof(image));
+    if (!util_file_exists(image))
+        return;
+    char err[96];
+    XboxHdd *hdd = xhdd_open(image, err, sizeof(err));
+    if (!hdd)
+    {
+        app_log("XPSemu: %s: %s", image, err);
+        return;
+    }
+    char ids[256][9];
+    int n = xhdd_titles(hdd, ids, 256);
+    for (int i = 0; i < n; ++i)
+    {
+        SaveTree tree;
+        if (!xhdd_read_title(hdd, ids[i], XBOX_SAVE_MAX, &tree, err, sizeof(err)))
+        {
+            app_log("XPSemu: %s skipped: %s", ids[i], err);
+            continue;
+        }
+        if (tree.count)
+        {
+            SaveEntry *e = saves_add(list);
+            if (!e)
+            {
+                tree_free(&tree);
+                break;
+            }
+            e->emu = EMU_XEMU;
+            e->kind = SAVE_XBOX;
+            util_copy(e->system, sizeof(e->system), "XBOX");
+            util_copy(e->title_id, sizeof(e->title_id), ids[i]);
+            util_copy(e->name, sizeof(e->name), ids[i]);
+            util_copy(e->path, sizeof(e->path), image);
+            tree_hash(&tree, e->local_hash, &e->local_size);
+            e->local = true;
+        }
+        tree_free(&tree);
+    }
+    xhdd_close(hdd);
+}
+
 void saves_scan(const Config *config, const KvStore *ids, const KvStore *installed,
                 SaveList *list)
 {
@@ -1189,6 +1266,7 @@ void saves_scan(const Config *config, const KvStore *ids, const KvStore *install
     scan_porpoise_wii(config, list);
     scan_eden(config, list);
     scan_cemu(config, list);
+    scan_xemu(config, list);
     retroarch_scan(config, ids, list);
     for (int i = 0; i < list->count; ++i)
     {

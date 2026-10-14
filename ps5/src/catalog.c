@@ -24,6 +24,7 @@
  */
 #include "catalog.h"
 
+#include "fetch.h"
 #include "json.h"
 #include "unzip.h"
 #include "util.h"
@@ -697,135 +698,6 @@ bool catalog_installed(const InstallPlan *plan)
     return plan->cue ? folder_has_cue(plan->unzip_dir) : util_file_exists(plan->check);
 }
 
-typedef struct
-{
-    FILE *f;
-    double disk;      /* seconds spent writing, for the speed log */
-    uint64_t pending; /* bytes written since the last flush to disk */
-} FileSink;
-
-/* Written data is pushed to the disk every 128 MB: left to pile up in the
- * system's cache, gigabytes of it made every write slower and slower (a
- * download or an Xbox conversion started fast and nearly stopped, and
- * pausing - which closes the file - made it fast again). */
-#define FLUSH_EVERY ((uint64_t)128 << 20)
-
-static void flush_to_disk(FILE *f)
-{
-    fflush(f);
-    fsync(fileno(f));
-}
-
-static double now_sec(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-
-static int file_sink(const void *data, size_t len, void *user)
-{
-    FileSink *s = user;
-    double t = now_sec();
-    bool ok = fwrite(data, 1, len, s->f) == len;
-    s->pending += len;
-    if (ok && s->pending >= FLUSH_EVERY)
-    {
-        flush_to_disk(s->f);
-        s->pending = 0;
-    }
-    s->disk += now_sec() - t;
-    return ok ? 0 : -1;
-}
-
-/* Large downloads come in segments, each on a fresh connection: over Wi-Fi a
- * long-lived connection keeps slowing down (pausing and resuming made it fast
- * again), and a new one starts at full speed. */
-#define SEGMENT ((uint64_t)128 << 20)
-
-typedef struct
-{
-    HttpProgressFn progress;
-    void *user;
-    uint64_t base;  /* bytes of this attempt before the segment */
-    uint64_t total; /* bytes this attempt fetches */
-} SegProgress;
-
-static int seg_progress(uint64_t done, uint64_t total, void *user)
-{
-    (void)total;
-    SegProgress *s = user;
-    return s->progress ? s->progress(s->base + done, s->total, s->user) : 0;
-}
-
-/* GET path into sink->f, bytes [have, total): segment by segment when the
- * size is known, else one request from have. *res is the last response; a
- * server that ignores Range answers 200 with the whole file, which ends it. */
-static int ranged_get(const HttpServer *server, const char *path, FileSink *sink, uint64_t have,
-                      uint64_t total, int timeout, HttpProgressFn progress, void *user,
-                      HttpResult *res, const char *label)
-{
-    HttpRequest req = {0};
-    req.method = "GET";
-    req.path = path;
-    req.timeout_sec = timeout;
-    req.sink = file_sink;
-    req.sink_user = sink;
-    bool discover = total == UINT64_MAX; /* size unknown: learnt from the first reply */
-    if (discover)
-        total = have + SEGMENT;
-    if (!total || total <= have)
-    {
-        req.range_start = have;
-        req.progress = progress;
-        req.progress_user = user;
-        return http_request(server, &req, res);
-    }
-    SegProgress sp = {progress, user, 0, total - have};
-    req.progress = seg_progress;
-    req.progress_user = &sp;
-    uint64_t pos = have, logged = have;
-    double t0 = now_sec(), disk0 = sink->disk;
-    int rc = HTTP_OK;
-    while (pos < total)
-    {
-        uint64_t end = (pos + SEGMENT < total ? pos + SEGMENT : total) - 1;
-        req.range_start = pos;
-        req.range_end = end;
-        sp.base = pos - have;
-        rc = http_request(server, &req, res);
-        if (rc != HTTP_OK || res->status != 206)
-            break; /* an error, or a 200 that carried the whole file */
-        /* the file's real size, from "Content-Range: bytes S-E/TOTAL" */
-        char range[96];
-        const char *slash = http_header(res, "Content-Range", range, sizeof(range))
-                                ? strrchr(range, '/')
-                                : NULL;
-        if (slash && slash[1] >= '0' && slash[1] <= '9')
-        {
-            uint64_t real = strtoull(slash + 1, NULL, 10);
-            if (real > have)
-            {
-                total = real;
-                sp.total = total - have;
-            }
-        }
-        else if (discover)
-            break; /* no size to go on: what came is what there is */
-        pos = end + 1;
-        if (pos - logged >= ((uint64_t)1 << 30) || pos == total)
-        {
-            double t = now_sec(), secs = t - t0 > 0.001 ? t - t0 : 0.001;
-            app_log("download %s: %.2f GB of %.2f, last %.0f MB at %.1f MB/s (disk %.0f%%)", label,
-                    pos / 1e9, total / 1e9, (pos - logged) / 1e6, (pos - logged) / 1e6 / secs,
-                    100.0 * (sink->disk - disk0) / secs);
-            logged = pos;
-            t0 = t;
-            disk0 = sink->disk;
-        }
-    }
-    return rc;
-}
 
 /* Progress over a whole bundle: each file's bytes on top of the ones before. */
 typedef struct
@@ -899,8 +771,7 @@ static JsonValue *fetch_manifest(const HttpServer *server, const char *id, char 
 /* One member of a bundle, /roms/<id>/file/<name>, into dest: resumed from
  * dest.part, kept when it is already there at its size. */
 static bool fetch_member(const HttpServer *server, const char *id, const char *name, uint64_t want,
-                         const char *dest, BundleProgress *bp, char *buffer, char *error,
-                         size_t size)
+                         const char *dest, BundleProgress *bp, char *error, size_t size)
 {
     char member[1024], path[1200], part[PATH_LEN + 8];
     if (!encode_member(member, sizeof(member), name))
@@ -922,37 +793,28 @@ static bool fetch_member(const HttpServer *server, const char *id, const char *n
         snprintf(error, size, "can't create %s", name);
         return false;
     }
-    FileSink sink = {fopen(part, have > 0 ? "ab" : "wb"), 0, 0};
-    if (!sink.f)
-    {
-        snprintf(error, size, "can't write %s", util_basename(part));
-        return false;
-    }
-    if (buffer)
-        setvbuf(sink.f, buffer, _IOFBF, 1024 * 1024);
     snprintf(path, sizeof(path), "/api/v1/roms/%s/file/%s", id, member);
     bp->base += (uint64_t)have;
-    HttpResult res;
-    int rc = ranged_get(server, path, &sink, (uint64_t)have, want, 120, bundle_progress, bp, &res,
+    int status;
+    int rc = fetch_file(server, path, part, (uint64_t)have, want, 120, bundle_progress, bp, &status,
                         util_basename(name));
-    bool closed = fclose(sink.f) == 0;
     bp->base -= (uint64_t)have;
-    if (rc == HTTP_OK && res.status == 200 && have > 0)
+    if (rc == HTTP_OK && status == 200 && have > 0)
     {
         snprintf(error, size, "resume refused, try again");
         remove(part);
         return false;
     }
-    if (rc != HTTP_OK || (res.status != 200 && res.status != 206) || !closed)
+    if (rc != HTTP_OK || (status != 200 && status != 206))
     {
-        if (rc == HTTP_OK && res.status >= 300)
+        if (rc == HTTP_OK && status >= 300)
         {
             remove(part);
-            http_fail(error, size, name, res.status);
+            http_fail(error, size, name, status);
         }
         else
             snprintf(error, size, "%s: %s", util_basename(name),
-                     rc == HTTP_OK ? "write failed" : http_error_text(rc));
+                     rc == HTTP_ERR_SINK ? "write failed" : http_error_text(rc));
         return false;
     }
     if (util_file_size(part) != (int64_t)want)
@@ -1007,11 +869,9 @@ static bool download_zip_member(const HttpServer *server, const RomRow *rom,
     }
     char dest[PATH_LEN + 8];
     snprintf(dest, sizeof(dest), "%s%s", plan->dest, DOLPHIN_EXTS[best]);
-    char *buffer = malloc(1024 * 1024);
     BundleProgress bp = {progress, user, 0, want};
     bool ok = util_mkdirs_parent(dest) &&
-              fetch_member(server, id, pick, want, dest, &bp, buffer, error, size);
-    free(buffer);
+              fetch_member(server, id, pick, want, dest, &bp, error, size);
     json_free(root);
     return ok;
 }
@@ -1035,7 +895,6 @@ static bool download_folder(const HttpServer *server, const RomRow *rom, const I
     BundleProgress bp = {progress, user, 0, (uint64_t)json_get_num(root, "total_size", 0)};
     remove(plan->check);
     bool ok = true;
-    char *buffer = malloc(1024 * 1024);
     for (JsonValue *f = json_get(root, "files")->child; f && ok; f = f->next)
     {
         const char *name = json_get_str(f, "name", "");
@@ -1047,9 +906,8 @@ static bool download_folder(const HttpServer *server, const RomRow *rom, const I
             break;
         }
         ok = fetch_member(server, id, name, (uint64_t)json_get_num(f, "size", 0), dest, &bp,
-                          buffer, error, size);
+                          error, size);
     }
-    free(buffer);
     json_free(root);
     if (ok)
         ok = util_write_file_atomic(plan->check, "complete\n", 9);
@@ -1085,45 +943,34 @@ bool catalog_download(const HttpServer *server, const RomRow *rom, const Install
      * resumes; rom->size is the source's size, not the output's. */
     if (have < 0 || plan->cue || (!plan->extract && rom->size && (uint64_t)have >= rom->size))
         have = 0;
-    FileSink sink = {fopen(part, have > 0 ? "ab" : "wb"), 0, 0};
-    if (!sink.f)
-    {
-        snprintf(error, size, "can't write %s", util_basename(part));
-        return false;
-    }
-    char *buffer = malloc(1024 * 1024);
-    if (buffer)
-        setvbuf(sink.f, buffer, _IOFBF, 1024 * 1024);
     char id[256], path[320];
     util_url_encode(id, sizeof(id), rom->rom_id);
     snprintf(path, sizeof(path), "/api/v1/roms/%s%s%s", id,
              plan->cue ? "?extract=cue" : plan->extract ? "?extract=" : "",
              plan->extract && !plan->cue ? plan->extract : "");
-    HttpResult res;
+    int status;
     /* CUE/BIN: one request. A conversion: segments once its size is known. */
-    int rc = ranged_get(server, path, &sink, (uint64_t)have,
-                        plan->cue ? 0 : plan->extract ? UINT64_MAX : rom->size,
+    int rc = fetch_file(server, path, part, (uint64_t)have,
+                        plan->cue ? 0 : plan->extract ? FETCH_SIZE_UNKNOWN : rom->size,
                         20 * 60, /* a server-side conversion can take a while to start */
-                        progress, user, &res, rom->name);
-    bool closed = fclose(sink.f) == 0;
-    free(buffer);
-    if (rc == HTTP_OK && res.status == 200 && have > 0)
+                        progress, user, &status, rom->name);
+    if (rc == HTTP_OK && status == 200 && have > 0)
     {
         /* the server ignored the Range: what we appended is a full copy */
         snprintf(error, size, "resume refused, try again");
         remove(part);
         return false;
     }
-    if (rc != HTTP_OK || (res.status != 200 && res.status != 206) || !closed)
+    if (rc != HTTP_OK || (status != 200 && status != 206))
     {
-        if (rc == HTTP_OK && res.status >= 300)
+        if (rc == HTTP_OK && status >= 300)
         {
             remove(part); /* an error page, not game data */
-            http_fail(error, size, "download", res.status);
+            http_fail(error, size, "download", status);
         }
         else
             snprintf(error, size, "download: %s",
-                     rc == HTTP_OK ? "write failed" : http_error_text(rc));
+                     rc == HTTP_ERR_SINK ? "write failed" : http_error_text(rc));
         return false;
     }
     remove(plan->dest);

@@ -17,7 +17,7 @@ Sync save files between consoles, handhelds, and emulators through a self-hosted
 | `vita/` | PS Vita homebrew client |
 | `ps2/` | PlayStation 2 homebrew client — ⚠️ work in progress, not functional yet |
 | `ps3/` | PS3 homebrew client |
-| `ps5/` | PS5 homebrew client (jailbroken console) — RetroArch, SwanStationPS5, PS5SX2, Porpoise (GameCube/Wii), ProsperoEden (Switch) and PS5CEMU-HAR (Wii U/3DS) emulator saves, plus XPSemu (Xbox) game installs; game catalog installs into those emulators. PS5 game saves are not synced yet |
+| `ps5/` | PS5 homebrew client (jailbroken console) — RetroArch, SwanStationPS5, PS5SX2, Porpoise (GameCube/Wii), ProsperoEden (Switch) and PS5CEMU-HAR (Wii U/3DS) emulator saves, plus XPSemu (Xbox) saves and game installs; game catalog installs into those emulators. PS5 game saves are not synced yet |
 | `android/` | Android app |
 | `steamdeck/` | Steam Deck / Linux desktop client |
 | `desktop/` | Windows/macOS desktop client (PyQt6) |
@@ -121,6 +121,7 @@ No code was copied from these; they documented the binary formats this project
 reads and writes.
 
 - **PS1 memory card filesystem** (`server/app/services/ps1mc.py`) — [PSXSPX / no$psx docs](https://problemkaputt.de/psx-spx.htm) by **Martin Korth**.
+- **qcow2 disk images and the Xbox FATX filesystem** (`ps5/src/xbox_hdd.c`) — the qcow2 layout from QEMU's [qcow2 format description](https://gitlab.com/qemu-project/qemu/-/blob/master/docs/interop/qcow2.txt) (**the QEMU project**), and FATX from [xboxdevwiki](https://xboxdevwiki.net/FATX) and the **Xbox-Linux project**. No code copied.
 - **Xbox CCI images** (`ps5/src/xcci.c`) — the CCI layout from analysis of [XboxToolkit](https://github.com/Team-Resurgent/XboxToolkit) by **Team Resurgent** (`CCIContainerReader.cs`, `CCISectorDecoder.cs`, GPL-3.0), and an LZ4 block decoder written from the [LZ4 block format description](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md) by **Yann Collet**. No code copied.
 - **PS2 memory card filesystem** (`server/app/services/ps2mc.py`, and its C port `ps5/src/ps2mc.c`) — [ps2savetools.com](http://www.ps2savetools.com/) documentation and [mymc](http://www.csclub.uwaterloo.ca:11068/mymc/) by **Ross Ridge**; also [mymc+](https://git.sr.ht/~thestr4ng3r/mymcplus) by **Florian Märkl** and [mymc++](https://pypi.org/project/mymcplusplus/) used as a cross-check reference.
 - **GameCube memory card filesystem** (`server/app/services/gc_cards.py`, `gc/source/vmcfs.c`) — layout as documented by the **Dolphin** project and mymc.

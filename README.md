@@ -1,5 +1,7 @@
 # GameSync
 
+![GameSync](assets/brand/gamesync-banner.png)
+
 Sync save files between consoles, handhelds, and emulators through a self-hosted local server.
 
 ## Repository Structure
@@ -7,13 +9,15 @@ Sync save files between consoles, handhelds, and emulators through a self-hosted
 | Folder | Description |
 |---|---|
 | `server/` | FastAPI server — stores saves and history |
-| `3ds/` | Nintendo 3DS homebrew client |
+| `3ds/` | Nintendo 3DS homebrew client — 3DS and DS saves; game catalog installs 3DS games as CIA and DS games as `.nds` |
 | `ds/` | Nintendo DS / DSi homebrew client |
+| `gc/` | GameCube homebrew client — memory card / card image saves, MemCard Pro GC GameID, game catalog to SD |
 | `wiiu/` | Wii U homebrew client (Aroma) — GameCube/Nintendont, vWii and Wii U saves; GC/Wii/Wii U game catalog to SD or FAT32 USB |
 | `psp/` | PSP homebrew client |
 | `vita/` | PS Vita homebrew client |
 | `ps2/` | PlayStation 2 homebrew client — ⚠️ work in progress, not functional yet |
 | `ps3/` | PS3 homebrew client |
+| `ps5/` | PS5 homebrew client (jailbroken console) — RetroArch, SwanStationPS5, PS5SX2, Porpoise (GameCube/Wii), ProsperoEden (Switch) and PS5CEMU-HAR (Wii U/3DS) emulator saves, plus XPSemu (Xbox) saves and game installs; game catalog installs into those emulators. PS5 game saves are not synced yet |
 | `android/` | Android app |
 | `steamdeck/` | Steam Deck / Linux desktop client |
 | `desktop/` | Windows/macOS desktop client (PyQt6) |
@@ -84,18 +88,22 @@ preservation communities. Thanks to everyone below.
 |---|---|---|
 | [devkitPro](https://devkitpro.org/) — devkitARM / devkitPPC, `libctru`, `libnds`, `libogc`, `wut`, portlibs | `3ds/`, `ds/`, `gc/`, `wiiu/` | WinterMute and the devkitPro contributors |
 | [libctru](https://github.com/devkitPro/libctru) | `3ds/` | Smealum, fincs, devkitPro contributors |
+| [citro2d](https://github.com/devkitPro/citro2d) / [citro3d](https://github.com/devkitPro/citro3d) (zlib) | `3ds/` (GUI) | fincs and devkitPro contributors |
 | [libnds](https://github.com/devkitPro/libnds) | `ds/` | Dave Murphy (WinterMute), Dovoto and contributors |
 | [dswifi](https://github.com/devkitPro/libnds) | `ds/` | Stephen Stair (sgstair) |
 | [libfat](https://github.com/devkitPro/libfat) | `ds/`, `gc/` | Michael Chisholm (chishm), Dave Murphy |
-| [libogc](https://github.com/devkitPro/libogc) | `gc/` | Michael Wiedenbauer (shagkur), Dave Murphy |
-| [gxflux](https://github.com/Extrems/) | `gc/` | Extrems |
+| [libogc](https://github.com/devkitPro/libogc) — incl. its 8x16 console font (UI fallback when the IPL ROM font can't be read) | `gc/` | Michael Wiedenbauer (shagkur), Dave Murphy |
 | [wut](https://github.com/devkitPro/wut) | `wiiu/` | James Benton (exjam) and contributors |
 | [libmocha](https://github.com/wiiu-env/libmocha) + [MochaPayload](https://github.com/wiiu-env/MochaPayload) / [EnvironmentLoader](https://github.com/wiiu-env/EnvironmentLoader) | `wiiu/` | Maschell and the wiiu-env contributors (LGPL-3.0) |
 | [pspdev / pspsdk](https://github.com/pspdev/pspdev) | `psp/` | The pspdev contributors |
 | [VitaSDK](https://vitasdk.org/) | `vita/` | The VitaSDK contributors |
 | [PSL1GHT / ps3dev](https://github.com/ps3dev/ps3dev) | `ps3/` | The ps3dev contributors |
 | [PS2SDK / ps2dev](https://github.com/ps2dev/ps2sdk) | `ps2/` | ps2dev.org, Marcus R. Brown and contributors |
+| [gsKit](https://github.com/ps2dev/gsKit) | `ps2/` (UI rendering) | Chris "Neovanglist" Gilbert and the ps2dev contributors (AFL 2.0) |
 | [nxdk](https://github.com/XboxDev/nxdk) | `xbox/` | The XboxDev contributors |
+| [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk) (GPL-3.0) | `ps5/` | **John Törnblom** and the ps5-payload-dev contributors |
+| [ps5-native-app-boilerplate](https://github.com/BlackBearReloaded/ps5-native-app-boilerplate) (GPL-3.0-or-later) — ELF → FSELF converter, `libc.prx` runtime shim, title packaging; fetched at a pinned commit by `ps5/build.sh` | `ps5/` | **BlackBearReloaded** |
+| [PacBrew ports for PS5](https://github.com/ps5-payload-dev/pacbrew-repo) — prebuilt SDL2 sysroot | `ps5/` | The ps5-payload-dev contributors |
 
 ### Bundled and vendored code
 
@@ -104,11 +112,17 @@ preservation communities. Thanks to everyone below.
 | `mcr2vmp` — PS1 `.mcd`/`.mcr` ↔ `SCEVMC*.VMP` converter | `server/third_party/mcr2vmp/` | [vita-mcr2vmp](https://github.com/dots-tb/vita-mcr2vmp) by **@dots_tb**, with help from the CBPS community (**@AnalogMan151**, **@teakhanirons**), packaged via [chrisbrasington/psp_psx_save_sync](https://github.com/chrisbrasington/psp_psx_save_sync). **GPLv3** — see `server/third_party/mcr2vmp/LICENSE`. |
 | [tiny-AES-c](https://github.com/kokke/tiny-AES-c) | `server/third_party/mcr2vmp/aes.c` | **kokke** and contributors (public domain) |
 | SHA-1 | `server/third_party/mcr2vmp/sha1.c` | **Steve Reid** (public domain) |
-| SHA-256 (FIPS 180-4) | `3ds/`, `ds/`, `gc/`, `ps2/`, `psp/`, `vita/`, `wiiu/`, `xbox/` `sha256.c` | Public-domain reference implementation by **Brad Conte** ([B-Con/crypto-algorithms](https://github.com/B-Con/crypto-algorithms)) |
+| SHA-256 (FIPS 180-4) | `3ds/`, `ds/`, `gc/`, `ps2/`, `ps5/`, `psp/`, `vita/`, `wiiu/`, `xbox/` `sha256.c` | Public-domain reference implementation by **Brad Conte** ([B-Con/crypto-algorithms](https://github.com/B-Con/crypto-algorithms)) |
+| [dswifi](https://github.com/devkitPro/dswifi) 2.0.2 (sgIP TCP/IP stack) | `ds/third_party/dswifi/` | **Stephen Stair** (sgIP / DSWifi) and the **devkitPro** team (calico port), MIT — see `ds/third_party/dswifi/dswifi_license.txt`. Linked into the DSi build only, patched for a larger TCP receive window, an MSS option and a faster `recv()` copy (changes marked `GameSync`). |
+| MD5 (RFC 1321) | `ds/source/md5.c`, `ds/include/md5.h` | **L. Peter Deutsch** / Aladdin Enterprises (zlib-style license), taken unmodified from [rcheevos](https://github.com/RetroAchievements/rcheevos) `src/rhash/` |
 | `mmceman.irx` — MMCE (MemCard PRO2 / SD2PSX) IOP driver | `ps2/irx/` | [ps2-mmce/mmceman](https://github.com/ps2-mmce/mmceman) — "MMCE Authors" (MIT). Rebuilt locally with an added gen1 MemCard Pro `0x21` GameID command. |
-| Debug screen font | `vita/source/debugScreenFont.c` | PSPSDK debug font — **Marcus R. Brown**, **James Forshaw**, **John Kelley** (BSD) |
-| `zlib` | `3ds/`, `psp/`, `ps3/`, `wiiu/` | **Jean-loup Gailly** and **Mark Adler** |
+| [stb_truetype](https://github.com/nothings/stb) v1.26 — TrueType rasteriser | `wiiu/third_party/stb/` | **Sean Barrett** / RAD Game Tools and the stb contributors, public domain or MIT (dual-licensed) — see `wiiu/third_party/stb/LICENSE`. Unmodified apart from a provenance comment at the top; draws the Wii U client's UI text with the console's own shared system font (CafeStd, read from memory at runtime — no font file is redistributed). |
+| `zlib` | `3ds/`, `psp/`, `ps3/`, `ps5/`, `wiiu/` | **Jean-loup Gailly** and **Mark Adler** |
 | PolarSSL / mbedTLS (AES-128-CBC, HMAC-SHA1) | `ps3/` (via PSL1GHT) | The PolarSSL / mbed TLS authors |
+| PS5 platform layer — VideoOut presenter (`ps5_video.c`), HEN `/data` unlock request (`ps5_unlock.c`), direct-memory heap (`ps5_heap.c`, `ps5_dlmalloc.c`), symbol shims (`ps5_shims.c`), SDL controller setup (`platform_ps5.c`) | `ps5/src/` | Adapted from [SwanStationPS5 / PSXS5](https://github.com/darkxex/SwanStationPS5) by **darkxex** (GPL-3.0-or-later); each file's header names its origin. |
+| Lapy elevation client (`elevation.cpp`, `elevation.hpp`, `protocol.hpp`) | `ps5/src/` | From [ps5-native-app-boilerplate](https://github.com/BlackBearReloaded/ps5-native-app-boilerplate) `examples/sandbox-elevation` by **BlackBearReloaded** (GPL-3.0-or-later), include paths adjusted. |
+| [PS5-Lapy-JB-Daemon](https://github.com/mpereiraesaa/PS5-Lapy-JB-Daemon) one-shot helper (`lapy.elf`) | built from source at a pinned commit by the boilerplate and shipped in the PS5 title folder | **ArkSama / Team PHU** ([original](https://github.com/ArkSama/PS5-Lapy-JB-Daemon)) and **mpereiraesaa** (exact-title helper fork), MIT — license ships as `licenses/Lapy-MIT.txt` in the title. |
+| [dlmalloc](https://gee.cs.oswego.edu/dl/html/malloc.html) 2.8.6 | fetched by `ps5/build.sh` (SHA-256 pinned), not kept in the repo | **Doug Lea**, public domain (CC0) |
 
 ### Format documentation and reverse-engineering references
 
@@ -116,7 +130,9 @@ No code was copied from these; they documented the binary formats this project
 reads and writes.
 
 - **PS1 memory card filesystem** (`server/app/services/ps1mc.py`) — [PSXSPX / no$psx docs](https://problemkaputt.de/psx-spx.htm) by **Martin Korth**.
-- **PS2 memory card filesystem** (`server/app/services/ps2mc.py`) — [ps2savetools.com](http://www.ps2savetools.com/) documentation and [mymc](http://www.csclub.uwaterloo.ca:11068/mymc/) by **Ross Ridge**; also [mymc+](https://git.sr.ht/~thestr4ng3r/mymcplus) by **Florian Märkl** and [mymc++](https://pypi.org/project/mymcplusplus/) used as a cross-check reference.
+- **qcow2 disk images and the Xbox FATX filesystem** (`ps5/src/xbox_hdd.c`) — the qcow2 layout from QEMU's [qcow2 format description](https://gitlab.com/qemu-project/qemu/-/blob/master/docs/interop/qcow2.txt) (**the QEMU project**), and FATX from [xboxdevwiki](https://xboxdevwiki.net/FATX) and the **Xbox-Linux project**. No code copied.
+- **Xbox CCI images** (`ps5/src/xcci.c`) — the CCI layout from analysis of [XboxToolkit](https://github.com/Team-Resurgent/XboxToolkit) by **Team Resurgent** (`CCIContainerReader.cs`, `CCISectorDecoder.cs`, GPL-3.0), and an LZ4 block decoder written from the [LZ4 block format description](https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md) by **Yann Collet**. No code copied.
+- **PS2 memory card filesystem** (`server/app/services/ps2mc.py`, and its C port `ps5/src/ps2mc.c`) — [ps2savetools.com](http://www.ps2savetools.com/) documentation and [mymc](http://www.csclub.uwaterloo.ca:11068/mymc/) by **Ross Ridge**; also [mymc+](https://git.sr.ht/~thestr4ng3r/mymcplus) by **Florian Märkl** and [mymc++](https://pypi.org/project/mymcplusplus/) used as a cross-check reference.
 - **GameCube memory card filesystem** (`server/app/services/gc_cards.py`, `gc/source/vmcfs.c`) — layout as documented by the **Dolphin** project and mymc.
 - **PS3 `PARAM.PFD` resigning / save decryption** (`ps3/source/pfd.c`, `ps3/source/decrypt.c`) — based on analysis of [Apollo Save Tool](https://github.com/bucanero/apollo-ps3) by **Damián Parrino (bucanero)** and **flatz**'s `pfd_sfo_tools`. `ps3/data/games.conf` is Apollo's per-game key database (Copyright © 2020-2025 Damian Parrino, GPL-3.0-or-later), redistributed verbatim (1818 titles) and shipped inside `ps3sync.pkg` with its notice — thanks also to **SHAkA** and the other key finders credited in that file's header.
 - **MemCard Pro GC GameID over EXI** (`gc/source/saves.c`) — protocol ported from `mmce.c` in **libogc2** by **Extrems**, cross-checked against **Swiss**.
@@ -124,6 +140,7 @@ reads and writes.
 - **Saroo `SS_SAVE.BIN` Saturn saves** (`shared/saturn_format.py`) — [SAROO](https://github.com/tpunix/SAROO) by **tpunix** and [save-file-converter](https://github.com/euan-forrester/save-file-converter) by **Euan Forrester**.
 - **Azahar 3DS save layout** (`android/.../emulators/impl/AzaharEmulator.kt`) — the `sdmc/Nintendo 3DS/<ID0>/<ID1>/title/<high>/<low>/data/00000001` save path, the all-zero ID0/ID1 that Azahar hardcodes and its lowercase `{:08x}` title folders, as defined in [Azahar](https://github.com/azahar-emu/azahar)'s `src/core/hle/service/fs/archive.h` and `src/core/file_sys/archive_source_sd_savedata.cpp` (GPL-2.0-or-later). No code copied.
 - **3DS NCSD/NCCH header layout** (`server/app/services/ctr_rom.py`) — [ninfs / pyctr](https://github.com/ihaveamac/ninfs) and `3dsconv` by **ihaveamac**.
+- **3DS CIA header and TMD layout** (`3ds/source/catalog_data.c`) — section sizes, 64-byte section alignment, TMD signature types and the title id offset, as documented on [3dbrew](https://www.3dbrew.org/wiki/CIA) ([Title metadata](https://www.3dbrew.org/wiki/Title_metadata)). Used to note which title a catalog CIA installed. No code copied.
 - **MSU-1 / MSU-MD / MD+ pack layouts** (`shared/msu.py`, `shared/mister_install.py`) — file naming and per-core placement as documented by the [MiSTer MegaCD core docs](https://mister-devel.github.io/MkDocs_MiSTer/cores/highlights/megacd/) (`cart.rom` for MSU-MD), the [Zeldix MD+ emulator guide](https://www.zeldix.net/t2175-md-32x-emulators-mister-fpga-genesis-plus-gx-picodrive-mame) (WAVE-track MD+ in the MegaDrive core and Genesis Plus GX), and **ArcadeTV**'s [MSU-MD patches wiki](https://arcadetv.github.io/msu-md-patches/); MSU-1 itself is **byuu / Near**'s design. No code copied.
 - **Wii U WUP/NUS installable layout** (`server/app/services/rom_scanner.py`) — `title.tmd`/`title.tik`/`.app`/`.h3` structure and the TMD content flags (`0x0001` encrypted, `0x0002` hashed) as documented by [wiiubrew](https://wiiubrew.org/wiki/Title_metadata).
 - **Wii U MCP title installation** (`wiiu/source/install.c`) — the `MCP_InstallSetTargetDevice` → `MCP_InstallTitleAsync` → `MCP_InstallGetProgress` sequence, and the 0x40-byte heap alignment IOS requires for those structs, based on analysis of [WUP Installer GX2](https://github.com/Willyanto/wup-installer-gx2) by **Dimok**, **Maschell** and contributors (GPL-2.0-or-later). No code copied.
@@ -135,11 +152,13 @@ reads and writes.
 - **ISO9660 directory records** (`desktop/openmenu_image.py`) — extent/size both-endian fields and file identifiers per ECMA-119 §9.1, used to rewrite the game list inside a menu image without rebuilding it.
 - **openMenu Serial VMU layout** (`desktop/sync_engine.py`, `desktop/dreamcast.py`) — the `OPENMENU/SAVES/<GameID>/SLOT1.VMU` + `TITLE.TXT` per-game virtual VMU structure, as documented by the [openMenu Virtual Folder Bundle](https://github.com/DerekPascarella/openMenu-Virtual-Folder-Bundle) by **Derek Pascarella**, building on **openMenu** by **mrneo240**.
 - **MemCard PRO DC virtual VMU layout** (`desktop/sync_engine.py`, `desktop/dreamcast.py`, `shared/rom_id/dreamcast.py`) — the `Dreamcast/<GameID>/<GameID>-<channel>.vmu` 128 KB card layout and GameID naming (IP.BIN product number, separators stripped), as documented by the [8BitMods wiki](https://www.8bitmods.wiki/importing-saves).
-- **RetroAchievements game hashes** (`shared/ra_hash.py`) — the per-system MD5 rules (iNES/FDS, SNES copier, PC Engine, A78 and LNX header stripping, N64 byte-order normalisation, DS header + ARM9/ARM7 + icon block, arcade romset-name hashing with FBNeo sub-system folders) ported from [rcheevos](https://github.com/RetroAchievements/rcheevos) `src/rhash/hash.c` and `hash_rom.c` by the **RetroAchievements** team (MIT). `shared/ra_api.py` looks those hashes up through RA's public `dorequest.php` `hashlibrary` / `gameslist` endpoints (the same ones RAIntegration uses), or through the [RetroAchievements Web API](https://api-docs.retroachievements.org/) `API_GetGameList` when a key is configured — that one also carries each game's achievement count. Used by the desktop RetroAchievements tab and by the server's catalog indexer (`server/app/services/ra_index.py`), which is what puts the RA badge on the MiSTer, Steam Deck and Android ROM lists. No code copied.
+- **RetroAchievements game hashes** (`shared/ra_hash.py`) — the per-system MD5 rules (iNES/FDS, SNES copier, PC Engine, A78 and LNX header stripping, N64 byte-order normalisation, DS header + ARM9/ARM7 + icon block, arcade romset-name hashing with FBNeo sub-system folders) ported from [rcheevos](https://github.com/RetroAchievements/rcheevos) `src/rhash/hash.c` and `hash_rom.c` by the **RetroAchievements** team (MIT). `shared/ra_api.py` looks those hashes up through RA's public `dorequest.php` `hashlibrary` / `gameslist` endpoints (the same ones RAIntegration uses), or through the [RetroAchievements Web API](https://api-docs.retroachievements.org/) `API_GetGameList` when a key is configured — that one also carries each game's achievement count. Used by the desktop RetroAchievements tab and by the server's catalog indexer (`server/app/services/ra_index.py`), which is what puts the RA badge on the MiSTer, Steam Deck and Android ROM lists. No code copied. The DS client's C version of the DS rule (`ds/source/ra_hash.c`) is a port of rcheevos' `rc_hash_nintendo_ds`.
 - **CHD (Compressed Hunks of Data) v5** (`shared/chd.py`) — header layout, the entropy-coded hunk map (RLE code-length table, canonical Huffman, bit-packed lengths and offsets) and the CD hunk structure (ECC bitmap, separately compressed sector and subcode streams), as implemented by [libchdr](https://github.com/rtissera/libchdr) by **Romain Tisserand** (BSD-3-Clause) and MAME's `chd.c`, which it derives from. Structure and field offsets only — an independent Python implementation, no code copied. Only the hunks a caller asks for are decompressed, which is what makes reading a boot executable out of a 700 MB image cost a tenth of a second.
 - **FLAC frames inside CHD hunks** (`shared/chd_flac.py`) — CONSTANT/VERBATIM/FIXED/LPC subframes, Rice-coded residuals and stereo decorrelation, written from the [FLAC format specification](https://xiph.org/flac/format.html) (IETF RFC 9639). chdman keeps whichever codec is smallest per hunk and FLAC wins on zero padding, so ordinary data reads land in FLAC hunks. No code copied.
 - **RetroAchievements disc hashes** (`shared/ra_disc.py`) — the PlayStation, PS2 (`SYSTEM.CNF` → `BOOT2=`), PSP (`PARAM.SFO` + `EBOOT.BIN`), Sega CD / Saturn (512-byte volume and ROM header), PC Engine CD (title + boot program from the first data track's header sector) and NEC PC-FX (`PC-FX:Hu_CD-ROM` marker, 128-byte program header + program from the largest data track, else track 2) rules, with CHD track offsets laid out as chdman pads them; for PlayStation: (`SYSTEM.CNF` → `BOOT=` → the boot executable, hashed as its name followed by the `PS-X EXE` header and payload) and the ISO9660 walk beneath it, ported from [rcheevos](https://github.com/RetroAchievements/rcheevos) `src/rhash/hash_disc.c` by the **RetroAchievements** team (MIT). Rewritten in Python from reading that implementation; no code copied.
-- **OSScreen geometry** (`wiiu/source/ui.c`) — the 16x24 font cell, framebuffer sizes and colour format as documented by [Cemu](https://github.com/cemu-project/Cemu)'s coreinit OSScreen implementation (MPL-2.0).
+- **PS5 emulator save layouts** (`ps5/src/saves.c`, `ps5/src/retroarch.c`, `ps5/src/catalog.c`) — RetroArch's `content/<system>/`, playlists and its `savefiles/<core>/` placement rules under `/data/homebrew/PPSA99169` from [PS5_RetroArch](https://github.com/mihawk-99/PS5_RetroArch) by **mihawk-99** (`src/frontend_ps5.cpp`, `src/ps5_library.c`, `src/webui_ps5.cpp`); Porpoise's `/data/porpoise` Dolphin user folder from [Porpoise](https://github.com/elripalda/Porpoise-Dolphin-Emulator-for-PS5) by **elripalda** (`src/porpoise_paths.hpp`, `src/ui_memcard.cpp`); ProsperoEden's `/data/prosperoeden` layout and active-profile choice from [ProsperoEden](https://github.com/blackbearreloaded/ProsperoEden) by **BlackBearReloaded** (`headless/storage_paths.h`, `metadata_bridge.cpp`); PS5CEMU-HAR's `/data/ps5cemu` Cemu mlc and Azahar sdmc folders from [PS5CEMU-HAR](https://github.com/premohq/PS5CEMU-HAR) by **premohq** (`port/app/paths.h`, `port/azahar/azahar.h`); XPSemu's `/data/xemu` folders from [XPSemu](https://github.com/ZiZc3/XPSemu) by **ZiZc3** (`ui/xemu-os-utils-ps5.c`); SwanStationPS5's `serial.txt` card naming from its `src/library.c` and `src/core/host.c`; SwanStationPS5's per-game `<serial>_1.mcd` cards and `games/<game>/` folders from [SwanStationPS5](https://github.com/darkxex/SwanStationPS5) by **darkxex** (`src/core/host.c`, `src/disc.c`); PS5SX2's `/data/PCSX2/memcards` and `games/` from [PS5SX2](https://github.com/Swordpdf/PS5SX2) by **Swordpdf** (`ps5/coreorbis/`). No code copied from these.
+- **Calendar dates from Unix time** (`xbox/source/main.c`) — the `civil_from_days` algorithm from **Howard Hinnant**'s [chrono-compatible low-level date algorithms](https://howardhinnant.github.io/date_algorithms.html) (public domain), reimplemented in C to show save timestamps without a C library time zone database.
+- **OSScreen framebuffers** (`wiiu/source/gfx.c`, `wiiu/source/ui.c`) — the double-buffered framebuffer sizes, `0xRRGGBBAA` pixel format and the bitmap font's fixed character cell (used only as a fallback when the shared system font is unavailable), as documented by [Cemu](https://github.com/cemu-project/Cemu)'s and [decaf-emu](https://github.com/decaf-emu/decaf-emu)'s coreinit OSScreen implementations (MPL-2.0 / GPL-3.0). No code copied; the work-buffer address and row pitch are probed at runtime.
 
 ### Game databases
 
@@ -152,6 +171,7 @@ reads and writes.
 - **[3dsdb.com](https://3dsdb.com/)** and **[ds-scene.net](https://www.ds-scene.net/)** — 3DS / DS release lists (`server/data/3dsdb.txt`, `3dstdb.txt`).
 - **[dbox.tools](https://dbox.tools/)** — original Xbox title-id database (`server/data/xbox_titleids.json`).
 - **[Serial Station](https://serialstation.com/)** — PlayStation serial lookups (`server/app/services/serialstation.py`).
+- **PCSX2 game database** (`GameIndex.yaml`, [PCSX2](https://github.com/PCSX2/pcsx2) team, GPL-3.0) as shipped by [PS5SX2](https://github.com/Swordpdf/PS5SX2) — fetched by the server from PS5SX2's latest release (`server/app/routes/emulators.py`, cached in `<save_dir>/.emulator_cache/`) and installed by the PS5 client when PS5SX2 lacks it. Not kept in this repository.
 
 ### Trusted root certificates
 
@@ -174,13 +194,28 @@ The 3DS client embeds these public root CA certificates, unmodified, so it can v
 
 ### Libraries and frameworks
 
-- **Server**: [FastAPI](https://fastapi.tiangolo.com/) and [Pydantic](https://docs.pydantic.dev/) (Sebastián Ramírez, Samuel Colvin and contributors), [Uvicorn](https://www.uvicorn.org/) (Encode), [httpx](https://www.python-httpx.org/), [Pillow](https://python-pillow.org/), [pytest](https://pytest.org/), [uv](https://docs.astral.sh/uv/) (Astral).
+- **Server**: [FastAPI](https://fastapi.tiangolo.com/) and [Pydantic](https://docs.pydantic.dev/) (Sebastián Ramírez, Samuel Colvin and contributors), [Uvicorn](https://www.uvicorn.org/) (Encode), [httpx](https://www.python-httpx.org/), [Pillow](https://python-pillow.org/), [pytest](https://pytest.org/), [uv](https://docs.astral.sh/uv/) (Astral), [python-zstandard](https://github.com/indygreg/python-zstandard) (Gregory Szorc, BSD-3-Clause; serves zstd-compressed zip members).
 - **Desktop / Steam Deck**: [PyQt6](https://www.riverbankcomputing.com/software/pyqt/) (Riverbank Computing) and Qt, [requests](https://requests.readthedocs.io/), [paramiko](https://www.paramiko.org/), [py7zr](https://github.com/miurahr/py7zr), [pygame](https://www.pygame.org/).
+- **PS5**: [SDL2](https://www.libsdl.org/) (Sam Lantinga, zlib) for controllers, with [GNU libiconv](https://www.gnu.org/software/libiconv/) (LGPL-2.1-or-later) and [libsamplerate](https://github.com/libsndfile/libsamplerate) (Erik de Castro Lopo, BSD-2-Clause) that it pulls in — all statically linked from the PacBrew ports.
+- **PS Vita**: [libvita2d](https://github.com/xerpi/libvita2d) by Sergi Granell (xerpi) and contributors (MIT), linked from the VitaSDK for the GUI; text uses the console's own PGF/PVF system fonts at runtime (nothing bundled).
+- **PS3 client**: the PSL1GHT port of [SDL](https://www.libsdl.org/) (Sam Lantinga, zlib), [SDL_gfx](https://www.ferzkopp.net/wordpress/2016/01/02/sdl_gfx-sdlgfx/) 2.0.22 (**Andreas Schiffler**, LGPL-2.1) for shapes and the fallback 8x8 font, [SDL_ttf](https://github.com/libsdl-org/SDL_ttf) 2.0.10 (**Sam Lantinga**, LGPL-2.1) and [FreeType](https://freetype.org/) 2.4.3 for text — portions of this software are copyright © 2010 The FreeType Project (www.freetype.org). All rights reserved. All four come from the ps3dev portlibs.
 - **Android**: [AndroidX / Jetpack Compose](https://developer.android.com/jetpack/compose), Room, WorkManager and DataStore (Google), [Retrofit](https://square.github.io/retrofit/) and [OkHttp](https://square.github.io/okhttp/) (Square), [Kotlin](https://kotlinlang.org/) and kotlinx.coroutines (JetBrains), [Accompanist](https://github.com/google/accompanist) (Google).
 
 ### Assets
 
 - `xbox/assets/font.ttf` — the **Vegur** typeface by **Sora Sagano** (public domain).
+- `ds/source/font_data.c` (DS UI fonts, generated by `ds/tools/make_font.py` from `ds/third_party/fonts/`):
+  - **Pixel Operator** and **Pixel Operator Bold** by **Jayvee Enaguas** ([dafont](https://www.dafont.com/pixel-operator.font)), CC0 1.0 — see `ds/third_party/fonts/PixelOperator-LICENSE.txt`.
+  - **Spleen 5x8** by **Frederic Cambus** ([fcambus/spleen](https://github.com/fcambus/spleen)), BSD 2-Clause — see `ds/third_party/fonts/spleen-LICENSE.txt`.
+- DS UI icons (`ds/source/theme.c`) — drawn for this project.
+- The 3DS client draws its text with the console's own shared system font, loaded
+  from the system at run time; no font is bundled.
+- `psp/source/font_data.c` (PSP UI glyph atlas, generated by `psp/tools/make_font.py` from `xbox/assets/font.ttf`) — the same **Vegur** typeface by **Sora Sagano** (public domain).
+- PSP UI chrome (`psp/source/gui.c`: panels, PlayStation button glyphs, icons) — drawn for this project with sceGu primitives.
+  The PS2 client bakes the same font into a glyph atlas (`ps2/source/font_data.c`,
+  generated by `ps2/tools/gen_font.py`).
+- `ps5/src/font_data.c` (PS5 UI glyph atlas, generated by `ps5/tools/gen_font.py` from `xbox/assets/font.ttf`) — **Vegur** by **Sora Sagano** (public domain). The GameSync logo, and every client's icon, banner and background drawn from it (`assets/brand/`, `3ds/icon.png`, `ds/icon.bmp`, `psp/ICON0.PNG`, `vita/sce_sys/`, `ps3/assets/`, `ps5/sce_sys/`, `wiiu/meta/`, the Android launcher icon, the desktop / Steam Deck window icons and the server favicon), are drawn by `tools/brand_art.py` with the same font; the PS5 backgrounds are converted to BC7 DDS with Microsoft's [DirectXTex `texconv`](https://github.com/microsoft/DirectXTex) (MIT), run by hand and not redistributed.
+- The PS3 client draws its text with the console's own **Rodin** system font (Sony), read at runtime from `/dev_flash/data/font/`. No font file is shipped; if it can't be read, SDL_gfx's built-in 8x8 font is used.
 
 ### Interoperability targets
 
@@ -192,7 +227,9 @@ RetroArch and the libretro cores, Dolphin, DuckStation, PCSX2, AetherSX2, PPSSPP
 Cemu, melonDS, DraStic, mGBA, Azahar/Citra, RPCS3, Mednafen, yabasanshiro, xemu,
 EmuDeck, Adrenaline, POPStarter, Nintendont, Swiss, the Aroma environment,
 MiSTer FPGA, Analogue Pocket, EverDrive, SAROO, Super SD System 3, GDEMU,
-openMenu, Flycast, MemCard PRO / PRO2 / PRO DC and SD2PSX.
+openMenu, Flycast, TWiLight Menu++, GodMode9, MemCard PRO / PRO2 / PRO DC, SD2PSX,
+the PS5 ports PS5_RetroArch, SwanStationPS5, PS5SX2, Porpoise, ProsperoEden, PS5CEMU-HAR and XPSemu, and the PS5 homebrew
+environment (etaHEN, LegacyJB, ShadowMountPlus).
 
 If your work is used here and is missing or mis-credited, please open an issue.
 
@@ -216,10 +253,10 @@ versions of them, the licensor grants you additional permission to convey the
 resulting work:
 
 > devkitARM, devkitPPC, `libctru`, `libnds`, `dswifi`, `libfat`, `libogc`,
-> `gxflux`, `wut`, PSPSDK / pspdev, VitaSDK, PSL1GHT / ps3dev, PS2SDK / ps2dev,
-> and nxdk — together with the vendor runtime libraries those SDKs link against.
+> `gxflux`, `wut`, PSPSDK / pspdev, VitaSDK, PSL1GHT / ps3dev, PS2SDK / ps2dev, gsKit,
+> nxdk, and the PS5 Payload SDK — together with the vendor runtime libraries those SDKs link against.
 
-This exists because PS2SDK is under the Academic Free License 2.0, which the FSF
+This exists because PS2SDK and gsKit are under the Academic Free License 2.0, which the FSF
 considers GPL-incompatible despite being permissive. The exception removes any
 doubt for every console target at once. If you modify the GameSync sources
 themselves, the GPL still applies to those modifications.
@@ -227,12 +264,18 @@ themselves, the GPL still applies to those modifications.
 ### Third-party components
 
 Bundled or linked third-party code is documented in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The three copyleft
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The copyleft
 dependencies are all compatible with this license:
 
 - `server/third_party/mcr2vmp/` — GPL-3.0, same license as this project.
 - `libmocha` — LGPL-3.0, linked into the Wii U client
   ([`licenses/LGPL-3.0.txt`](licenses/LGPL-3.0.txt)).
+- `SDL_gfx` and `SDL_ttf` — LGPL-2.1, linked into the PS3 client
+  ([`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt)).
+- GNU `libiconv` — LGPL-2.1-or-later, statically linked into the PS5 client
+  through SDL2 ([`licenses/LGPL-2.1.txt`](licenses/LGPL-2.1.txt)).
+- `ps5/src/ps5_*.c` and `platform_ps5.c` — adapted from SwanStationPS5,
+  GPL-3.0-or-later, same license as this project.
 - **PyQt6** — used under Riverbank's GPL-3.0 option by the desktop and Steam
   Deck clients. This is the main reason GameSync is GPL rather than permissive.
 
@@ -250,3 +293,6 @@ original terms:
 | `ps2/irx/mmceman.irx` | ps2-mmce/mmceman (MIT) |
 | `tools/apktool.jar` | Apktool (Apache-2.0) |
 | `xbox/assets/font.ttf` | Vegur (public domain) |
+| `psp/source/font_data.c` | Vegur (public domain), rasterised by `psp/tools/make_font.py` |
+| `ps2/source/font_data.c` | Glyphs rasterised from Vegur (public domain) |
+| `ps5/src/font_data.c` | Glyphs rasterised from Vegur (public domain) |

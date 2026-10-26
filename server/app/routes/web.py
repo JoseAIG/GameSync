@@ -8,7 +8,7 @@ GET  /   — Serves the library web interface (no auth required).
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from app.config import settings
 from app.middleware.auth import trusted_remote_user
@@ -16,6 +16,13 @@ from app.middleware.auth import trusted_remote_user
 router = APIRouter()
 
 _TEMPLATE = Path(__file__).parent.parent / "templates" / "index.html"
+_FAVICON = Path(__file__).parent.parent / "templates" / "favicon.png"
+
+
+@router.get("/favicon.png", include_in_schema=False)
+async def favicon():
+    """The GameSync logo for the browser tab (tools/brand_art.py)."""
+    return FileResponse(_FAVICON, media_type="image/png")
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)

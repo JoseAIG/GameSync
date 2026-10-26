@@ -17,7 +17,6 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QMenu,
     QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -32,6 +31,7 @@ from config import (
     get_base_url,
 )
 from systems import MEGA_EVERDRIVE_CD_SYSTEMS
+from table_sorting import SortableItem, make_sortable, sorting_suspended
 
 
 _PS_TITLE_ID_RE = re.compile(r"^[A-Z]{4}\d{5}$")
@@ -437,6 +437,7 @@ class SyncTab(QWidget):
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
+        make_sortable(self.table)
         layout.addWidget(self.table)
 
         self.status_label = QLabel("Select a profile and click Scan to begin.")
@@ -684,18 +685,25 @@ class SyncTab(QWidget):
         self.system_filter_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.system_filter_combo.blockSignals(False)
 
+        with sorting_suspended(self.table):
+            self._fill_table(sorted_statuses)
+
+        self._apply_filter()
+        self._start_catalog_load(sorted_statuses)
+
+    def _fill_table(self, sorted_statuses: list):
         self.table.setRowCount(0)
         for i, st in sorted_statuses:
             save = st.save
             row = self.table.rowCount()
             self.table.insertRow(row)
-            self.table.setItem(row, 0, QTableWidgetItem(save.system))
+            self.table.setItem(row, 0, SortableItem(save.system))
             self.table.setItem(
                 row,
                 1,
-                QTableWidgetItem(format_display_game_name(save.game_name, save.system)),
+                SortableItem(format_display_game_name(save.game_name, save.system)),
             )
-            title_item = QTableWidgetItem(save.title_id)
+            title_item = SortableItem(save.title_id)
             details = []
             if (
                 getattr(save, "legacy_title_id", "")
@@ -733,7 +741,7 @@ class SyncTab(QWidget):
                         unique_paths.append(path)
                 local_tooltip = "\n".join(str(path) for path in unique_paths)
                 local_color = None
-            local_item = QTableWidgetItem(local_name)
+            local_item = SortableItem(local_name)
             if local_color:
                 local_item.setForeground(local_color)
             if local_tooltip:
@@ -741,7 +749,7 @@ class SyncTab(QWidget):
             self.table.setItem(row, 3, local_item)
 
             status_label = STATUS_LABELS.get(st.status, st.status)
-            status_item = QTableWidgetItem(status_label)
+            status_item = SortableItem(status_label)
             color = STATUS_COLORS.get(st.status)
             if color:
                 status_item.setForeground(color)
@@ -793,9 +801,6 @@ class SyncTab(QWidget):
                 self.table.setCellWidget(row, 5, action_widget)
 
             self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, i)
-
-        self._apply_filter()
-        self._start_catalog_load(sorted_statuses)
 
     # ── Install Game column ────────────────────────────────────────────
     #
@@ -1198,7 +1203,15 @@ class SyncTab(QWidget):
                     synced += 1
                 elif st.status == "server_only":
                     dest_path = self._resolve_download_path(st)
-                    if dest_path and self._local_changed_since_scan(st, dest_path):
+                    # A SAROO profile without a mednafen folder parks the .bkr
+                    # beside SS_SAVE.BIN purely as a staging copy — an earlier
+                    # download's leftover is not a save to protect.
+                    saroo_staging = is_saroo and not profile.get("save_folder")
+                    if (
+                        dest_path
+                        and not saroo_staging
+                        and self._local_changed_since_scan(st, dest_path)
+                    ):
                         # Scan attributed nothing to this title, yet the
                         # destination is occupied — never blind-write it.
                         stale += 1
@@ -1282,33 +1295,35 @@ class SyncTab(QWidget):
         if target_row is None:
             return
 
-        # Update status column
-        status_label = STATUS_LABELS.get(new_status, new_status)
-        status_item = QTableWidgetItem(status_label)
-        color = STATUS_COLORS.get(new_status)
-        if color:
-            status_item.setForeground(color)
-        self.table.setItem(target_row, 4, status_item)
+        # Several cells change; keep the row put until they're all written.
+        with sorting_suspended(self.table):
+            # Update status column
+            status_label = STATUS_LABELS.get(new_status, new_status)
+            status_item = SortableItem(status_label)
+            color = STATUS_COLORS.get(new_status)
+            if color:
+                status_item.setForeground(color)
+            self.table.setItem(target_row, 4, status_item)
 
-        # Update local file column
-        save = st.save
-        save_exists = getattr(save, "save_exists", True)
-        if save.path is None:
-            local_name = "(server only)"
-            local_color = QColor(140, 140, 140)
-        elif not save_exists:
-            local_name = "(no local save)"
-            local_color = QColor(160, 120, 40)
-        else:
-            local_name = save.path.name
-            local_color = None
-        local_item = QTableWidgetItem(local_name)
-        if local_color:
-            local_item.setForeground(local_color)
-        self.table.setItem(target_row, 3, local_item)
+            # Update local file column
+            save = st.save
+            save_exists = getattr(save, "save_exists", True)
+            if save.path is None:
+                local_name = "(server only)"
+                local_color = QColor(140, 140, 140)
+            elif not save_exists:
+                local_name = "(no local save)"
+                local_color = QColor(160, 120, 40)
+            else:
+                local_name = save.path.name
+                local_color = None
+            local_item = SortableItem(local_name)
+            if local_color:
+                local_item.setForeground(local_color)
+            self.table.setItem(target_row, 3, local_item)
 
-        # Clear action buttons — row is now up_to_date (no actions needed)
-        self.table.setCellWidget(target_row, 5, None)
+            # Clear action buttons — row is now up_to_date (no actions needed)
+            self.table.setCellWidget(target_row, 5, None)
 
     def _download_to_paths(
         self,
@@ -1404,46 +1419,14 @@ class SyncTab(QWidget):
         """Inject the downloaded mednafen .bkr bytes back into SS_SAVE.BIN.
 
         After `_download_to_paths` writes the server's mednafen-format bytes to
-        `bkr_path`, this method converts them to a Saroo slot and patches the
-        correct slot inside SS_SAVE.BIN on the SD card.
-
-        If SS_SAVE.BIN does not exist (e.g. the user only has a mednafen folder
-        configured), this step is silently skipped.
+        `bkr_path`, this writes them into the game's slot in SS_SAVE.BIN on the
+        SD card, creating the slot when the Saroo has never saved this game.
+        Raises when the save cannot be placed, so the caller never reports a
+        download the Saroo won't see.
         """
-        from saroo_format import mednafen_to_saroo_slot
+        from sync_engine import inject_saroo_download
 
-        saroo_root_str = profile.get("path", "")
-        if not saroo_root_str:
-            return
-        ss_save = Path(saroo_root_str) / "SS_SAVE.BIN"
-        if not ss_save.exists():
-            return
-
-        from sync_engine import _SAROO_META
-
-        meta = _SAROO_META.get(title_id)
-        if not meta:
-            # Slot position unknown — can't inject safely; leave .bkr only
-            return
-
-        game_id: str = meta["game_id"]
-        slot_offset: int = meta["slot_index"]  # byte offset of the slot in SS_SAVE.BIN
-
-        if not bkr_path or not bkr_path.exists():
-            return
-        mednafen_bytes = bkr_path.read_bytes()
-
-        # Convert mednafen 32KB → Saroo 64KB slot
-        saroo_slot = mednafen_to_saroo_slot(mednafen_bytes, game_id)
-
-        # Patch SS_SAVE.BIN in-place at the known slot offset
-        ss_data = bytearray(ss_save.read_bytes())
-        end = slot_offset + len(saroo_slot)
-        if end > len(ss_data):
-            # File too short — extend it
-            ss_data.extend(b"\x00" * (end - len(ss_data)))
-        ss_data[slot_offset:end] = saroo_slot
-        ss_save.write_bytes(bytes(ss_data))
+        inject_saroo_download(title_id, bkr_path, profile.get("path", ""))
 
     def _find_rom_file(self, rom_folder: Path, game_name: str) -> Path | None:
         """Search rom_folder recursively for a ROM whose normalized stem matches game_name.

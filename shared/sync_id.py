@@ -36,6 +36,7 @@ from typing import Optional
 
 from shared.rom_id import make_title_id, normalize_rom_name, parse_title_id
 from shared.rom_id.dreamcast import canonical_dc_serial
+from shared.rom_id.saturn import _safe_saturn_id, _strip_disc_index
 from shared.systems import SYNC_ID_RULES, SYSTEM_ALIASES, normalize_system_code
 
 
@@ -54,10 +55,19 @@ _HEX_TITLE_ID_RE = re.compile(r"^[0-9A-F]{16}$")
 # import emit ``GC_GRSE`` while the Dolphin scanners emit ``GC_grse``.
 _CODE_FORM_SYSTEMS = frozenset({"GC", "WII"})
 
+def canonical_saturn_serial(serial: str) -> str:
+    """``"T-4507G-1"`` -> ``"T-4507G"``: the form every Saturn save is stored
+    under (``SAT_T-4507G``) - hyphen kept, uppercase, the ``-N`` disc index of
+    later discs dropped so every disc of a game shares the slot. Same rule as
+    ``shared.rom_id.saturn`` (IP.BIN and DAT lookups)."""
+    return _safe_saturn_id(_strip_disc_index(serial or "")) or ""
+
+
 # Systems whose serials need more than punctuation stripping to converge on one
-# spelling.  Dreamcast is the only one: Sega's own discs say "MK-51000" while
-# the Redump DAT records "51000" for the same game.
-_SERIAL_CANONICALISERS = {"DC": canonical_dc_serial}
+# spelling.  Dreamcast: Sega's own discs say "MK-51000" while the Redump DAT
+# records "51000" for the same game.  Saturn keeps its hyphen ("T-4507G"), the
+# form Saroo, Android and the server's catalog all use.
+_SERIAL_CANONICALISERS = {"DC": canonical_dc_serial, "SAT": canonical_saturn_serial}
 _CODE_FORM_TITLE_ID_RE = re.compile(r"^([A-Za-z0-9]{2,8})_([A-Za-z0-9]{4})$")
 
 

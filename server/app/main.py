@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from app.config import settings
 from app.middleware.auth import APIKeyMiddleware
 from app.middleware.body_limit import BodySizeLimitMiddleware
-from app.routes import catalog, normalize, roms, saves, status, sync, titles, update, web
+from app.routes import catalog, emulators, normalize, ra, roms, saves, status, sync, titles, update, web
 from app.services import dat_normalizer, db, game_names, rom_scanner, saturn_archives
 
 import asyncio
@@ -94,6 +94,11 @@ async def lifespan(app: FastAPI):
         f"{count_dc_slugs} Dreamcast slug mappings, {count_sat_archives} Saturn archive mappings)"
     )
 
+    # Once per DB: bring PS3 rows to the current hash scheme, so /titles and
+    # /sync can stop re-hashing every PS3 save per request. In a worker
+    # thread; until it finishes, those requests still re-hash as before.
+    ps3_hash_task = asyncio.create_task(_migrate_ps3_hashes())
+
     # Load No-Intro / Redump DAT files for ROM normalization
     dats_dir.mkdir(exist_ok=True)
     dat_normalizer.init(dats_dir)
@@ -130,11 +135,10 @@ async def lifespan(app: FastAPI):
         if settings.rom_scan_interval > 0:
             rom_scan_task = asyncio.create_task(_periodic_rom_scan())
         rom_cleanup_task = asyncio.create_task(_periodic_rom_cleanup())
-        if settings.ra_enabled:
-            # Index after the catalog is up, never during the scan: this
-            # reads every cartridge ROM once and would otherwise hold up
-            # startup for minutes on a large library.
-            ra_index_task = asyncio.create_task(_ra_index_pass(rom_catalog))
+        # Housekeeping after the catalog is up, never during the scan: the
+        # RA pass reads every cartridge ROM once and would otherwise hold up
+        # startup for minutes on a large library.
+        ra_index_task = asyncio.create_task(library_maintenance(rom_catalog))
 
     yield
 
@@ -152,6 +156,12 @@ async def lifespan(app: FastAPI):
             await rom_cleanup_task
         except asyncio.CancelledError:
             pass
+    try:
+        # Short: it is DB rows and small files, and a half-done pass is
+        # finished by the next start (the flag is only set at the end).
+        await asyncio.wait_for(asyncio.shield(ps3_hash_task), timeout=5)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
     if ra_index_task:
         # Not cancelled: the pass runs in a worker thread and checks
         # ``_ra_stop`` between ROMs, so it exits on its own with a
@@ -163,6 +173,47 @@ async def lifespan(app: FastAPI):
 
 
 _ra_stop = asyncio.Event()
+_maintenance_lock = asyncio.Lock()
+
+
+async def _migrate_ps3_hashes() -> None:
+    from app.services import storage
+
+    try:
+        changed = await asyncio.to_thread(storage.migrate_ps3_hashes)
+        if changed:
+            logger.info("[storage] PS3 hash scheme: updated %d row(s)", changed)
+    except Exception:
+        logger.exception("[storage] PS3 hash migration failed; will retry next start")
+
+
+async def library_maintenance(catalog) -> None:
+    """After a scan: fix zstd CHDs, then refresh the RetroAchievements index.
+
+    Serialised - a scan that lands while a pass is running waits for it
+    rather than starting a second one over the same files.
+    """
+    if catalog is None:
+        return
+    async with _maintenance_lock:
+        if settings.chd_recompress_zstd:
+            from app.services import chd_normalize
+
+            try:
+                counts = await asyncio.to_thread(
+                    chd_normalize.normalize,
+                    chd_normalize.catalog_chds(catalog.list_all(), settings.rom_dir),
+                    _ra_stop.is_set,
+                )
+                if counts["recompressed"]:
+                    logger.info("[chd_normalize] re-compressed %d zstd CHD(s)", counts["recompressed"])
+                    # Sizes changed on disk; let the catalog catch up
+                    # before the RA pass reads it.
+                    catalog = await asyncio.to_thread(rom_scanner.rescan) or catalog
+            except Exception:
+                logger.exception("[chd_normalize] pass failed")
+        if settings.ra_enabled:
+            await _ra_index_pass(catalog)
 
 
 async def _ra_index_pass(catalog) -> None:
@@ -217,8 +268,7 @@ async def _periodic_rom_scan():
                     logger.info(
                         "[rom_scanner] Periodic scan: %d ROMs", len(catalog.entries)
                     )
-                    if settings.ra_enabled:
-                        await _ra_index_pass(catalog)
+                    await library_maintenance(catalog)
             except Exception:
                 logger.exception("[rom_scanner] Periodic scan failed")
     except asyncio.CancelledError:
@@ -275,6 +325,8 @@ def create_app() -> FastAPI:
     app.include_router(normalize.router, prefix="/api/v1")
     app.include_router(roms.router, prefix="/api/v1")
     app.include_router(catalog.router, prefix="/api/v1")
+    app.include_router(ra.router, prefix="/api/v1")
+    app.include_router(emulators.router, prefix="/api/v1")
 
     return app
 

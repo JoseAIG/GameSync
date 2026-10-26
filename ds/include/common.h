@@ -15,6 +15,15 @@
 #define HASH_SIZE 32
 #define CONFIG_SIZE 256
 
+// Colours for printf output. stdout goes to the activity log on the task
+// screens (ui_log.c), which understands these SGR escapes; reset with
+// CON_RESET or everything printed afterwards on the line keeps the colour.
+#define CON_RED    "\x1b[31m"
+#define CON_GREEN  "\x1b[32m"
+#define CON_YELLOW "\x1b[33m"
+#define CON_CYAN   "\x1b[36m"
+#define CON_RESET  "\x1b[39m"
+
 // Sync action
 typedef enum {
     SYNC_UP_TO_DATE,
@@ -49,6 +58,7 @@ typedef struct {
     char custom_save_dir[256];  // Optional custom save directory
     char wifi_ssid[33];          // WiFi SSID (max 32 chars + null)
     char wifi_wep_key[14];       // WEP key (13 chars + null for 104-bit WEP)
+    int tcp_window;              // DSi build: TCP receive window in bytes, 0 = default
     uint32_t console_id;
     int num_titles;
     Title titles[MAX_TITLES];

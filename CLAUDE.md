@@ -12,13 +12,14 @@ self-hosted local server. One Python FastAPI server plus these clients:
 | `server/` | Python 3.11+, FastAPI, uv | — |
 | `3ds/` | C, devkitARM + libctru | `3dssync.3dsx`, `.cia` |
 | `ds/` | C, devkitARM + libnds/dswifi/libfat | `ndssync.nds` |
-| `gc/` | C, devkitPPC + libogc/libfat/gxflux/libbba | `gcsync.dol` |
+| `gc/` | C, devkitPPC + libogc/libfat/libbba (GX UI) | `gcsync.dol` |
 | `wiiu/` | C, devkitPPC + wut + libmocha | `wiiusync.rpx`, `.wuhb` |
 | `ps2/` | C, PS2SDK (WSL) | `ps2sync.elf` |
 | `ps3/` | C, PSL1GHT/ps3dev (WSL) | `ps3sync.pkg` |
 | `psp/` | C, pspdev/PSPSDK (WSL) | `EBOOT.PBP` |
 | `vita/` | C, VitaSDK (WSL) | `vitasync.vpk` |
 | `xbox/` | C, nxdk + SDL2/SDL_ttf (WSL) | `default.xbe`, `.iso` |
+| `ps5/` | C, PS5 Payload SDK via ps5-native-app-boilerplate (WSL) | `ps5sync.zip` (`PPSA90543`) |
 | `android/` | Kotlin, Compose, Room, Retrofit | `gamesync.apk` |
 | `desktop/` | Python, PyQt6 | — |
 | `steamdeck/` | Python, PyQt6 + pygame | — |
@@ -40,7 +41,7 @@ build_all.bat ps2 ps3 psp        :: specific targets
 ```
 
 Targets: `3ds`, `nds`, `gc`, `wiiu`, `android`, `ps2`, `ps3`, `psp`, `vita`,
-`xbox`, `all`. A failing target does not abort the run; failures are summarized
+`xbox`, `ps5`, `all`. A failing target does not abort the run; failures are summarized
 at the end and the exit code is non-zero. Artifacts land in `build_output/`.
 
 Individual builds, if you need them:
@@ -56,6 +57,7 @@ Individual builds, if you need them:
 # WSL targets — see build_all.bat for the full env var incantations
 wsl bash /mnt/e/projects/3dssync/ps2/tools/build-wsl.sh
 wsl bash /mnt/e/projects/3dssync/xbox/build.sh
+wsl bash /mnt/e/projects/3dssync/ps5/build.sh     # fetches the boilerplate into ~/.cache/gamesync-ps5
 
 # Android
 cd android && ./gradlew.bat --no-daemon :app:assembleDebug
@@ -69,6 +71,7 @@ cd server && uv run pytest tests/test_sync.py -v
 cd server && uv run pytest tests/test_api.py::TestUploadEndpoint::test_upload_success -v
 cd steamdeck && python -m pytest tests/ -q
 cd desktop  && python -m pytest tests/ -q
+wsl bash ps5/tests/run_host_tests.sh             # needs a Python that imports server/app
 python -m pytest shared/tests/ -q
 ```
 
@@ -127,6 +130,18 @@ in metadata is informational and does not affect the storage path.
 Slug rules live in `shared/rom_id/normalizer.py`. Server and clients must agree
 here or the same save lands under two different keys — change this module with
 care and run `shared/tests/test_sync_id.py`.
+
+**Square-bracket tags are not identity.** `normalize_rom_name` drops every
+`[...]` group — fan translations (`[T-En by X v1.1]`), hacks (`[Hack by Y]`),
+GoodTools flags (`[!]`) — so every version of a translation, a hack and the
+unpatched ROM share one save slot (Android's `toTitleId` always did this).
+Regions in `(...)` still keep releases apart. `normalize_rom_name(name,
+keep_tags=True)` keeps them for the callers that need a key for one *file*
+(is this exact ROM installed? the RA-variant pickers in MiSTer and Steam
+Deck). `server/migrate_tagged_slug_ids.py` re-keys saves stored under a
+tagged id. Saturn's rule is `{"strategy": "serial", "prefix": "SAT_"}` with
+`canonical_saturn_serial` (hyphen kept, `-N` disc index dropped), so
+`/catalog/resolve` returns `SAT_T-4507G` like the catalog and every client.
 
 ### Sync protocol — three-way hash
 
@@ -193,6 +208,7 @@ server/app/
   middleware/auth.py   X-API-Key on everything except GET /status
   models/save.py       SaveBundle, SaveMetadata, SyncPlan, ConflictInfo
   routes/              saves sync titles roms catalog normalize status update web
+                       emulators (support files, e.g. PS5SX2 GameIndex.yaml)
   services/            bundle storage db game_names rom_scanner rom_db
                        ps1mc ps2mc gc_cards ps1_cards ps2_cards mcr2vmp_tool
                        ctr_rom dat_normalizer saturn_archives serialstation share_token
@@ -252,8 +268,9 @@ with the single wrapping folder stripped and every client hoists it on
 extract (`msu.plan_extraction`). Identity: a pack must share the save slot of
 the ROM it patched, but its name keeps the MSU author's `[Hack by …]` (which
 no plain ROM carries) while a translated baseline keeps *its* tags
-(`[T-En …] [FastROM …] [n]`) — so neither "keep brackets" nor "strip
-brackets" works. `msu.identity_candidates` yields name → name minus `[Hack
+(`[T-En …] [FastROM …] [n]`) in its display name. (The save id drops every
+bracket tag anyway; `identity_candidates` predates that and still picks which
+catalog name a pack is filed under.) `msu.identity_candidates` yields name → name minus `[Hack
 by …]` → cart member → cart minus hack tags; `rom_scanner._resolve_msu_identities`
 runs after the whole scan and takes the first candidate that is a plain ROM
 in the catalog, else the first DAT hit, else the hack-stripped name. Display
@@ -343,6 +360,11 @@ the card names its folder after. Server-side, `game_names.lookup_dc_serial()`
 resolves a ROM name through `Sega - Dreamcast.dat`, and slug-form uploads from
 older clients are upgraded at the API boundary by `canonicalize_slug_title_id`;
 `server/migrate_dc_serial_ids.py` re-keys saves already stored under a slug.
+Redump often lists a PAL Sega disc twice under one name, a box code first
+(`950-0019-50`) and the IP.BIN product number second (`T-1401D-50`); no disc
+or save device knows the box code, so `is_dc_box_code()` makes every DAT
+lookup (server rank, shared parser, Kotlin `DreamcastSerial.isBoxCode`) pass
+it over.
 
 Every client resolves the serial the same way, mirroring the Saturn plumbing:
 `shared/rom_id/dreamcast.py` reads IP.BIN out of the disc (GDI/CDI/ISO/BIN —
@@ -393,6 +415,68 @@ DAT has never seen). A card scan only ever walks a real `Dreamcast/` or
 `OPENMENU/SAVES/` folder — never a bare drive root, since a reader's drive
 letter can point anywhere. `MemoryCard1` (the shared card) and `openmenu` (the
 menu's own VMU) are skipped.
+
+**PS5** — a native title (`PPSA90543`, loaded from `/data/homebrew/` by
+ShadowMountPlus), not a payload. Emulator saves only, no PS5 game saves:
+PS5_RetroArch `.srm` (system from the ROM's `content/<system>/` folder or its
+playlist, save id from the server's `/catalog/resolve/batch`; saves sit in
+`savefiles/<core name>/` because this port sorts by core unless
+`sort_savefiles_enable = "false"`, `ps5/src/retroarch.c`; Dreamcast is Flycast's
+per-game VMU `<game>.A1.bin` - GameSync turns `reicast_per_content_vmus` to
+`VMU A1` in `config/Flycast/Flycast.opt`, as Flycast otherwise shares one
+`system/dc/vmu_save_A1.bin`), SwanStationPS5 per-game
+`saves/<SERIAL>_1.mcd` cards (`/ps1-card`), PS5SX2 game folders, each
+game on its own `memcards/<game file>.ps2` by default (GameSync writes
+`MemoryCards/Slot1_Filename` into PS5SX2's per-game `settings/<game file>.ini`
+and copies the save off the shared `Mcd001.ps2`; `ps2_cards=shared` keeps one
+card for all) (`/ps2-files`; `src/ps2mc.c` ports `ps2mc.py` — the P2FD
+it builds must hash identically to the server's, `ps5/tests/test_ps2mc.c`
+checks that against the Python), Porpoise (Dolphin) GameCube `.gci` files as
+`GC_<CODE>` via `/gc-card?format=gci` and Wii `title/00010000/<hex>/data/` as
+`WII_<CODE>` 3DSS bundles, ProsperoEden Switch saves as `NSW_<TITLEID>` bundles,
+PS5CEMU-HAR Wii U (`mlc01/usr/save/00050000/<lo>/user`) and 3DS (Azahar
+`.../title/00040000/<lo>/data/00000001`) folders as the Wii U / 3DS clients'
+16-hex ids. XPSemu (Xbox) saves are read from and written into its
+qcow2 HDD image (refcounted appends, COPIED clusters in place, image backed
+up to `.bak` first; XPSemu must be closed): FATX `E:\UDATA\<8-hex id>` (`src/xbox_hdd.c`), bundled with
+`\` paths like the Xbox client. The server hashes a bundle's files in upload
+order and the Xbox client uploads in FATX directory order, so the PS5 (which
+hashes sorted) fetches an Xbox-client upload once and keeps `<id>.server` =
+"<server hash> <sorted hash>" in its state. SwanStationPS5 keeps its data in `/data/SwanStationPS5` (builds before
+Oct 2026: `/data/PSXS5`, still scanned for games); the auto dir prefers the
+new one. Its card names depend on its *Memory Card 1 Type*
+(`swanstation_MemoryCards_Card1Type` in the active profile's
+`SwanStationPS5.ini`/`psxs5.ini`, per-game `game-settings/<serial>.ini`;
+profiles under `profiles/<name>/`): Libretro → `<SERIAL>_1.mcd` or, for a
+`.chd`, `<game file>_1.mcd` unless a `serial.txt` sits beside the game (GameSync
+writes it); PerGame → serial; PerGameTitle → `<title>_1.mcd`.
+`saves_swanstation_info()` reads all of it and `saves_swanstation_fix()` moves a
+card filed under the other name (rename, or `.bak` when it's a copy of the card
+in use or of the server's save; two genuinely different cards are left alone).
+**`NSW_<16 hex>` is the Switch save-id scheme** — the PS5 client is the first
+to sync Switch; a bare `0100…` id would validate as a 3DS title. Folder saves
+hash like the server: sha256 of file contents in `strcmp` path order, the
+order the bundle is written in (`ps5/tests/test_bundle.c` cross-checks with
+`bundle.py`). Gotchas:
+- A sandboxed title can open files in `/data` but not list folders; the app
+  asks the HEN for access first thing in `main()` (`ps5_unlock.c`).
+- The title's own C heap can't hand out a few MB: `malloc` is `--wrap`ped onto
+  dlmalloc over direct memory (`ps5_heap.c`).
+- Never let the link import `libScePosixForWebKit` (`getaddrinfo`,
+  `strcasestr` live only there and crash a game process) or
+  `libSceKeyboard`/`libSceImeDialog` (the title won't launch). Hence IP-only
+  server URLs and the `--as-needed` patch in `ps5/build.sh`.
+- Files written for an emulator must be world-writable (`0666`/`0777`): each
+  emulator is another sandboxed title.
+- The PS5 throttles an **app's** writes to ~2 MB/s after a ~1.3 GB burst
+  (a payload's not at all), so catalog downloads go through the helper
+  payload `ps5/helper` (SDK v0.44 - v0.40 payloads don't start on current
+  loaders), started via the ELF loader on 9021 and spoken to on
+  127.0.0.1:9135 (`src/helper_client.c`, shared code in `src/fetch.c`).
+- A store install of PS5SX2 (ProsperoStore) has no `/data/PCSX2/resources/`,
+  so no `GameIndex.yaml` and no per-game fixes (Star Ocean 3 crashes at boot).
+  The client installs it from the server's `GET /emulators/ps5sx2/game-index`
+  (`server/app/routes/emulators.py` proxies PS5SX2's latest release) when missing.
 
 **Android / Steam Deck** — emulator save locations live in per-emulator scanners
 (`android/.../emulators/impl/`, `steamdeck/scanner/`), kept deliberately parallel

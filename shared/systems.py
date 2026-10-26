@@ -353,6 +353,7 @@ ROM_EXTENSIONS: frozenset[str] = frozenset(
         # Super Nintendo
         ".sfc",
         ".smc",
+        ".bs",     # Satellaview (BS-X) broadcast game
         ".sgb",    # Super Game Boy cartridge
         # Nintendo 64
         ".n64",
@@ -832,7 +833,7 @@ SYNC_ID_RULES: dict[str, dict[str, str]] = {
     "PSP":  {"strategy": "serial"},
     "VITA": {"strategy": "serial"},
     # Sega Saturn — "T-NNNNNG" product codes match Saroo and emulators
-    "SAT":  {"strategy": "serial"},
+    "SAT":  {"strategy": "serial", "prefix": "SAT_"},
     # Sega Dreamcast — the IP.BIN product number ("T-1249M", "MK-51000").  It is
     # what MemCard PRO DC and openMenu's Serial VMU name their per-game folders
     # after, so keying by it puts a card save and an emulator save in one slot.

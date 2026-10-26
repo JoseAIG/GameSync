@@ -1,4 +1,6 @@
 #include "config.h"
+#include "ui.h"
+#include "views.h"
 #include <stdio.h>
 #include <string.h>
 #include <fat.h>
@@ -17,6 +19,14 @@ static const char *config_paths[] = {
     "sdmc:/dssync/config.txt",
     NULL
 };
+
+// Folder of the config file in use, e.g. "sd:/dssync" (the catalog cache
+// lives beside it)
+static char loaded_dir[64] = "";
+
+const char *config_dir(void) {
+    return loaded_dir[0] ? loaded_dir : "sd:/dssync";
+}
 
 // Create default config file
 static bool create_default_config(const char *path) {
@@ -98,6 +108,7 @@ bool config_load(SyncState *state, char *error, size_t error_size) {
     state->custom_save_dir[0] = '\0';
     state->wifi_ssid[0] = '\0';
     state->wifi_wep_key[0] = '\0';
+    state->tcp_window = 0;
     
     while (fgets(line, sizeof(line), f)) {
         // Remove trailing newline and carriage return
@@ -142,10 +153,17 @@ bool config_load(SyncState *state, char *error, size_t error_size) {
             strncpy(state->wifi_ssid, value, sizeof(state->wifi_ssid) - 1);
         } else if (strcmp(key, "wifi_wep_key") == 0) {
             strncpy(state->wifi_wep_key, value, sizeof(state->wifi_wep_key) - 1);
+        } else if (strcmp(key, "tcp_window") == 0) {
+            state->tcp_window = atoi(value);
         }
     }
     
     fclose(f);
+
+    snprintf(loaded_dir, sizeof(loaded_dir), "%s", loaded_path);
+    char *dir_end = strrchr(loaded_dir, '/');
+    if (dir_end && dir_end > loaded_dir) *dir_end = '\0';
+    else loaded_dir[0] = '\0';
     
     if (!has_url || !has_key) {
         snprintf(error, error_size, "Config missing server_url or api_key");
@@ -206,13 +224,15 @@ bool config_save(const SyncState *state) {
         fprintf(f, "save_dir=%s\n", state->custom_save_dir);
     fprintf(f, "wifi_ssid=%s\n", state->wifi_ssid);
     fprintf(f, "wifi_wep_key=%s\n", state->wifi_wep_key);
+    if (state->tcp_window > 0)
+        fprintf(f, "tcp_window=%d\n", state->tcp_window);
 
     fclose(f);
     return true;
 }
 
 // Characters available in the D-pad text editor
-static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789.:/-_ABCDEFGHIJKLMNOPQRSTUVWXYZ@?=&#%+!";
+static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789.:/-_ABCDEFGHIJKLMNOPQRSTUVWXYZ@?=&#%+! ";
 static const int charset_len = sizeof(charset) - 1;
 
 // Find character index in charset, or 0 if not found
@@ -235,32 +255,16 @@ bool config_edit_field(const char *hint, char *buffer, int max_len) {
 
     while (running && pmMainLoop()) {
         // Draw editor screen
-        consoleClear();
-        iprintf("--- Edit Field ---\n\n");
-        iprintf("%s\n\n", hint);
-
-        iprintf(" ");
-        for (int i = 0; i < len; i++) {
-            if (i == cursor)
-                iprintf("\x1b[7m%c\x1b[0m", temp[i]);
-            else
-                iprintf("%c", temp[i]);
-        }
-        if (cursor == len)
-            iprintf("\x1b[7m \x1b[0m");
-        iprintf("\n\n");
-
-        iprintf("D-Pad L/R: move cursor\n");
-        iprintf("D-Pad U/D: change character\n");
-        iprintf("A: insert | B: delete\n");
-        iprintf("Y: confirm | X: cancel\n");
+        view_editor(&ui_bottom, hint, temp, len, cursor, charset, charset_len);
+        ui_present(&ui_bottom);
 
         // Wait for input
         while (pmMainLoop()) {
             swiWaitForVBlank();
             scanKeys();
-            int kDown = keysDown();
-            
+            // D-pad and Delete repeat while held
+            int kDown = keysDown() | (keysDownRepeat() & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_X));
+
             if (!kDown) continue;
 
             if (kDown & KEY_LEFT) {
@@ -293,7 +297,8 @@ bool config_edit_field(const char *hint, char *buffer, int max_len) {
                 }
                 break;
             }
-            if (kDown & KEY_A) {
+            // Y inserts a letter at the cursor, X deletes the one before it
+            if (kDown & KEY_Y) {
                 if (len < max_len - 1) {
                     memmove(&temp[cursor + 1], &temp[cursor], len - cursor + 1);
                     temp[cursor] = 'a';
@@ -302,7 +307,7 @@ bool config_edit_field(const char *hint, char *buffer, int max_len) {
                 }
                 break;
             }
-            if (kDown & KEY_B) {
+            if (kDown & KEY_X) {
                 if (cursor > 0) {
                     memmove(&temp[cursor - 1], &temp[cursor], len - cursor + 1);
                     cursor--;
@@ -310,12 +315,13 @@ bool config_edit_field(const char *hint, char *buffer, int max_len) {
                 }
                 break;
             }
-            if (kDown & KEY_Y) {
+            // A saves, B cancels
+            if (kDown & KEY_A) {
                 confirmed = true;
                 running = false;
                 break;
             }
-            if (kDown & KEY_X) {
+            if (kDown & KEY_B) {
                 running = false;
                 break;
             }

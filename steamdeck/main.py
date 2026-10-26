@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SaveSync — entry point.
+GameSync (Steam Deck client) — entry point.
 
 Works on Steam Deck (full-screen) and PC (windowed).
 
@@ -44,8 +44,11 @@ def _is_steam_deck() -> bool:
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("SaveSync")
-    app.setApplicationDisplayName("SaveSync")
+    app.setApplicationDisplayName("GameSync")
     app.setStyle("Fusion")
+    # window/taskbar icon (tools/brand_art.py)
+    from PyQt6.QtGui import QIcon
+    app.setWindowIcon(QIcon(os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "gamesync.png")))
 
     window = MainWindow()
 

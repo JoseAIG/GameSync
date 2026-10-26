@@ -48,6 +48,12 @@ _REV_RE = re.compile(
 )
 _DISC_RE = re.compile(r"\s*\((?:Disc|Disk|CD)\s*\d+\)", re.IGNORECASE)
 _EXTRA_RE = re.compile(r"\s*\([^)]+\)")
+# Square-bracket tags: fan translations ("[T-En by X v1.1]"), hacks
+# ("[Hack by Y]"), GoodTools flags ("[!]", "[b1]", "[h1C]"). A translation or
+# hack plays the save of the game it patches, and its version changes with
+# every release, so none of it is part of a game's identity: every version and
+# the unpatched ROM share one slot (as the Android client has always done).
+_BRACKET_RE = re.compile(r"\s*\[[^\]]*\]")
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 _MULTI_UNDERSCORE_RE = re.compile(r"_+")
@@ -60,7 +66,7 @@ _SLUG_MEMO: dict = {}
 _SLUG_MEMO_LIMIT = 50000
 
 
-def normalize_rom_name(filename: str) -> str:
+def normalize_rom_name(filename: str, keep_tags: bool = False) -> str:
     """Strip extension and revision/disc tags; append region to the slug.
 
     Region tags are moved to the end so that different regional releases of
@@ -74,13 +80,21 @@ def normalize_rom_name(filename: str) -> str:
     ``"Sonic the Hedgehog (USA, Europe).md"``         → ``"sonic_the_hedgehog_usa_europe"``
     ``"Final Fantasy VII (Rev 1) (USA).bin"``         → ``"final_fantasy_vii_usa"``
     ``"Legend of Zelda, The - Minish Cap (USA).gba"`` → ``"legend_of_zelda_the_minish_cap_usa"``
+    ``"Chrono Trigger (Japan) [T-En by X v1.1].sfc"``  → ``"chrono_trigger_japan"``
     ``"Homebrew Game.sfc"``                           → ``"homebrew_game"``
+
+    keep_tags keeps the square-bracket tags in: a key for one *file* (is this
+    exact ROM installed? is it the translation or the retail release?) rather
+    than for the game whose save it plays.
     """
-    cached = _SLUG_MEMO.get(filename)
+    memo_key = (filename, keep_tags)
+    cached = _SLUG_MEMO.get(memo_key)
     if cached is not None:
         return cached
 
     name = _strip_extension(filename)
+    if not keep_tags:
+        name = _BRACKET_RE.sub("", name)
 
     # Extract region before stripping all parenthetical tags.
     region_match = _REGION_RE.search(name)
@@ -104,7 +118,7 @@ def normalize_rom_name(filename: str) -> str:
     result = name or "unknown"
     if len(_SLUG_MEMO) >= _SLUG_MEMO_LIMIT:
         _SLUG_MEMO.clear()
-    _SLUG_MEMO[filename] = result
+    _SLUG_MEMO[memo_key] = result
     return result
 
 

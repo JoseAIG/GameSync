@@ -310,11 +310,20 @@ def _system_for_folder(folder_name: str) -> str | None:
     return SYSTEM_ALIASES.get(code, code)
 
 
+def _tagged_disc_serial(system: str, stem: str) -> str | None:
+    """A disc serial tagged by hand in the filename (PS1 only), checked
+    before the normalizer gets a chance to strip the brackets."""
+    if system.upper() in ("PS1", "PSX"):
+        return game_names.tagged_psx_serial(stem)
+    return None
+
+
 def _identify_rom_slug(
     system: str, file_path: Path, norm: Optional[object]
 ) -> tuple[str, str, str]:
     filename = _lookup_filename(file_path)
     stem = Path(filename).stem
+    tagged = _tagged_disc_serial(system, stem)
 
     if norm is not None:
         info = norm.normalize(system, filename)
@@ -322,7 +331,7 @@ def _identify_rom_slug(
         source = info["source"]
 
         slug = normalize_rom_name(canonical)
-        serial = game_names.lookup_disc_serial(system, canonical)
+        serial = tagged or game_names.lookup_disc_serial(system, canonical)
         if serial:
             return serial, canonical, source
         return f"{system}_{slug}", canonical, source
@@ -345,6 +354,7 @@ def _identify_rom_crc32(
         return title_id, canonical_name, source, ""
 
     crc32 = _compute_crc32(file_path)
+    tagged = _tagged_disc_serial(system, Path(filename).stem)
 
     if norm is not None:
         info = norm.normalize(system, filename, crc32)
@@ -352,7 +362,7 @@ def _identify_rom_crc32(
         source = info["source"]
 
         slug = normalize_rom_name(canonical)
-        serial = game_names.lookup_disc_serial(system, canonical)
+        serial = tagged or game_names.lookup_disc_serial(system, canonical)
         if serial:
             return serial, canonical, source, crc32
         return f"{system}_{slug}", canonical, source, crc32

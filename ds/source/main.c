@@ -7,15 +7,19 @@
 #include "network.h"
 #include "sync.h"
 #include "ui.h"
+#include "views.h"
 #include "update.h"
+#include "ra.h"
+#include "catalog.h"
 
-#define LIST_VISIBLE 20  // Visible titles on screen
+#define LIST_VISIBLE SAVE_ROWS  // Visible titles on screen
 
 static SyncState state;
 static int selected = 0;
 static int scroll_offset = 0;
-static int config_selected = 0;
-static bool focus_on_config = false;  // false = saves list, true = config menu
+static int settings_selected = 0;
+static int tab = TAB_SAVES;           // L/R cycle Saves | Catalog | Settings
+static bool has_wifi = false;
 
 static void update_scroll(void) {
     if (selected < scroll_offset)
@@ -24,533 +28,333 @@ static void update_scroll(void) {
         scroll_offset = selected - LIST_VISIBLE + 1;
 }
 
+static void splash(const char *status) {
+    view_splash(&ui_top, status);
+    ui_present(&ui_top);
+}
+
+static void scan_progress(int done, int total, const char *name) {
+    char detail[24];
+    snprintf(detail, sizeof(detail), "%d / %d", done + 1, total);
+    ui_task_progress("Checking saves", detail, (uint32_t)done, (uint32_t)total);
+}
+
+static void check_updates(void) {
+    ui_task_begin("Updates", "Checking for updates");
+
+    UpdateInfo update_info;
+    if (!update_check(&state, &update_info)) {
+        ui_task_end(KIND_ERROR, "Update check failed", "", HINTS_ANY, 0);
+        return;
+    }
+
+    char detail[48];
+    if (!update_info.available) {
+        snprintf(detail, sizeof(detail), "You have the latest version (%s)", APP_VERSION);
+        ui_task_end(KIND_OK, "Up to date", detail, HINTS_ANY, 0);
+        return;
+    }
+
+    char size[24];
+    snprintf(size, sizeof(size), "%zu KB", update_info.file_size / 1024);
+    SummaryRow rows[] = {
+        { "Current", APP_VERSION, C_TEXT_DIM },
+        { "Latest", update_info.latest_version, C_OK },
+        { "Size", size, C_TEXT_DIM },
+    };
+    static const Hint hints[] = { { "A", "Download & install" }, { "B", "Cancel" }, { NULL, NULL } };
+    view_summary(&ui_bottom, "Updates", "Update available!", KIND_OK, rows, 3, NULL, hints);
+    ui_present(&ui_bottom);
+    if (!(ui_wait(KEY_A | KEY_B) & KEY_A)) return;
+
+    ui_task_begin("Updates", "Downloading update");
+    if (!update_download(&state, update_info.download_url, NULL))
+        ui_task_end(KIND_ERROR, "Download failed", "", HINTS_ANY, 0);
+    else
+        ui_task_end(KIND_OK, "Update ready!", "Restart to apply", HINTS_ANY, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Saves tab
+// ---------------------------------------------------------------------------
+
+static void smart_sync(void) {
+    Title *title = &state.titles[selected];
+
+    ui_task_begin("Smart Sync", "Analyzing sync");
+
+    // Force fresh hash calculation
+    title->hash_calculated = false;
+
+    SyncDecision decision;
+    if (sync_decide(&state, selected, &decision) != 0) {
+        ui_task_end(KIND_ERROR, "Failed to check sync!", title->game_name, HINTS_BACK_B, KEY_B);
+        return;
+    }
+    title->on_server = decision.server_hash[0] != '\0';
+
+    // Show decision and get user confirmation (A suggested action, X/Y the
+    // other direction where it makes sense, B cancel)
+    SyncAction chosen = ui_confirm_smart_sync(title, &decision);
+
+    if (chosen == SYNC_UPLOAD || chosen == SYNC_DOWNLOAD) {
+        bool up = (chosen == SYNC_UPLOAD);
+        ui_task_begin(up ? "Upload" : "Download", up ? "Uploading..." : "Downloading...");
+
+        int result = sync_execute(&state, selected, chosen);
+        if (result == 0) {
+            // Clear red highlight after successful sync
+            title->scanned = true;
+            title->scan_result = SYNC_UP_TO_DATE;
+            title->on_server = true;
+            ui_task_end(KIND_OK, up ? "Upload successful!" : "Download successful!",
+                        title->game_name, HINTS_BACK_B, KEY_B);
+        } else {
+            ui_task_end(KIND_ERROR, up ? "Upload failed!" : "Download failed!",
+                        title->game_name, HINTS_BACK_B, KEY_B);
+        }
+    } else if (chosen == SYNC_UP_TO_DATE && decision.action == SYNC_UP_TO_DATE) {
+        // Write state file if missing for up-to-date saves
+        if (!decision.has_last_synced && title->hash_calculated) {
+            sync_execute(&state, selected, SYNC_UP_TO_DATE);
+        }
+    }
+}
+
+static void scan_all(void) {
+    ui_task_begin("Scan all", "Checking saves");
+
+    SyncSummary summary;
+    sync_scan_all(&state, &summary, scan_progress);
+
+    char n[5][12];
+    snprintf(n[0], sizeof(n[0]), "%d", summary.up_to_date);
+    snprintf(n[1], sizeof(n[1]), "%d", summary.uploaded);
+    snprintf(n[2], sizeof(n[2]), "%d", summary.downloaded);
+    snprintf(n[3], sizeof(n[3]), "%d", summary.conflicts);
+    snprintf(n[4], sizeof(n[4]), "%d", summary.failed);
+    SummaryRow rows[] = {
+        { "Up to date", n[0], C_OK },
+        { "Need upload", n[1], C_WARN },
+        { "Need download", n[2], C_INFO },
+        { "Conflicts", n[3], C_ERR },
+        { "Failed", n[4], summary.failed ? C_ERR : C_TEXT_FAINT },
+    };
+    static const Hint ok[] = { { "A", "OK" }, { NULL, NULL } };
+    view_summary(&ui_bottom, "Scan all", "Scan complete", KIND_OK, rows, 5,
+                 "Out-of-sync saves are marked in the list: amber = upload, "
+                 "blue = download, red = conflict.", ok);
+    ui_present(&ui_bottom);
+    ui_wait(0);
+}
+
+static void saves_input(int down, int rep) {
+    int n = state.num_titles;
+    if (n > 0) {
+        if (rep & KEY_DOWN) selected = (selected + 1) % n;
+        if (rep & KEY_UP) selected = (selected - 1 + n) % n;
+        if (rep & KEY_RIGHT) {
+            selected += LIST_VISIBLE;
+            if (selected >= n) selected = n - 1;
+        }
+        if (rep & KEY_LEFT) {
+            selected -= LIST_VISIBLE;
+            if (selected < 0) selected = 0;
+        }
+        update_scroll();
+    }
+    if (n == 0) return;
+
+    if (down & KEY_A) {
+        if (has_wifi) smart_sync();
+        else ui_message("Smart Sync", "WiFi required", "Use Connect WiFi in Settings first.", KIND_ERROR,
+                        HINTS_ANY, 0);
+    } else if (down & KEY_X) {
+        if (has_wifi) scan_all();
+        else ui_message("Scan all", "WiFi required", "Use Connect WiFi in Settings first.", KIND_ERROR,
+                        HINTS_ANY, 0);
+    } else if (down & KEY_Y) {
+        Title *title = &state.titles[selected];
+        ui_task_begin("Save details", "Loading details");
+        // Ensure hash is calculated
+        if (saves_ensure_hash(title) == 0) {
+            ui_show_save_details(title);
+        } else {
+            ui_task_end(KIND_ERROR, "Failed to calculate hash!", title->game_name, HINTS_ANY, 0);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Settings tab
+// ---------------------------------------------------------------------------
+
+static void edit_setting(const char *hint, char *field, int size) {
+    if (config_edit_field(hint, field, size)) config_save(&state);
+}
+
+static void settings_input(int down, int rep) {
+    if (rep & KEY_DOWN) settings_selected = (settings_selected + 1) % MENU_ITEMS;
+    if (rep & KEY_UP) settings_selected = (settings_selected - 1 + MENU_ITEMS) % MENU_ITEMS;
+    // The whole list is one page
+    if (rep & KEY_RIGHT) settings_selected = MENU_ITEMS - 1;
+    if (rep & KEY_LEFT) settings_selected = 0;
+    if (!(down & KEY_A)) return;
+
+    switch (settings_selected) {
+        case SET_SERVER_URL:
+            edit_setting("Server URL (e.g. http://192.168.1.100:8000)", state.server_url, sizeof(state.server_url));
+            break;
+        case SET_API_KEY:
+            edit_setting("API key", state.api_key, sizeof(state.api_key));
+            break;
+        case SET_WIFI_SSID:
+            edit_setting("WiFi SSID", state.wifi_ssid, sizeof(state.wifi_ssid));
+            break;
+        case SET_WEP_KEY:
+            edit_setting("WiFi WEP key (5, 13 or 16 characters)", state.wifi_wep_key, sizeof(state.wifi_wep_key));
+            break;
+        case SET_RESCAN:
+            ui_task_begin("Rescan saves", "Scanning saves");
+            saves_scan(&state);
+            selected = 0;
+            scroll_offset = 0;
+            break;
+        case SET_WIFI:
+            ui_task_begin("Connect WiFi", "Connecting WiFi");
+            has_wifi = (network_init(&state) == 0);
+            theme_wifi = has_wifi;
+            if (!has_wifi) ui_task_end(KIND_ERROR, "WiFi connection failed", "", HINTS_ANY, 0);
+            break;
+        case SET_UPDATES:
+            if (!has_wifi) {
+                ui_message("Updates", "WiFi required", "Use Connect WiFi first.", KIND_ERROR, HINTS_ANY, 0);
+            } else {
+                check_updates();
+            }
+            break;
+        case SET_RA:
+            ra_update_sets_ui(&state, has_wifi);
+            break;
+        case SET_CATALOG:
+            catalog_refresh(&state, has_wifi);
+            break;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+
+static void draw_tab(void) {
+    if (tab == TAB_CATALOG) {
+        catalog_tab_draw();
+        return;
+    }
+    if (tab == TAB_SETTINGS) {
+        SettingsInfo info = { ra_sd_root(), catalog_status(), catalog_cache_dir() };
+        view_settings_top(&ui_top, &state, settings_selected, has_wifi, &info);
+        view_settings_list(&ui_bottom, &state, settings_selected, has_wifi, &info);
+    } else {
+        view_saves_top(&ui_top, &state, selected, has_wifi);
+        view_save_list(&ui_bottom, &state, selected, scroll_offset, has_wifi);
+    }
+    ui_present(&ui_top);
+    ui_present(&ui_bottom);
+}
+
+// L/R: previous/next tab, wrapping
+static void switch_tab(int dir) {
+    int next = (tab + dir + TAB_COUNT) % TAB_COUNT;
+    if (next == TAB_CATALOG && !catalog_tab_enter(&state, has_wifi))
+        next = (next + dir + TAB_COUNT) % TAB_COUNT;  // out of memory: skip it
+    tab = next;
+}
+
 int main(int argc, char *argv[]) {
     // argv[0] is the executable path (provided by homebrew loader)
     const char *self_path = (argc > 0 && argv && argv[0]) ? argv[0] : NULL;
+
+    ui_init();
+    splash("Starting up...");
+
     // Initialize FAT first
     if (!fatInitDefault()) {
-        consoleDemoInit();
-        iprintf("FAT init failed!\n");
-        iprintf("Make sure SD/flashcard\nis inserted.\n\n");
-        iprintf("Press START to exit\n");
-        
-        while(pmMainLoop()) {
-            swiWaitForVBlank();
-            scanKeys();
-            if(keysDown() & KEY_START) break;
-        }
+        ui_message("Starting up", "Storage not found",
+                   "FAT init failed! Make sure the SD card / flashcard is inserted.",
+                   KIND_ERROR, HINTS_EXIT, KEY_START);
         return 0;
     }
-    
-    consoleDemoInit();
-    
+
     // Initialize config
     memset(&state, 0, sizeof(SyncState));
-    
+
     // Load config from same path as 3DS client
     char config_error[256];
     if (!config_load(&state, config_error, sizeof(config_error))) {
-        consoleClear();
-        iprintf("=== Config Setup ===\n\n");
-        iprintf("%s\n\n", config_error);
-        iprintf("Press START to exit\n");
-        
-        while(pmMainLoop()) {
-            swiWaitForVBlank();
-            scanKeys();
-            if(keysDown() & KEY_START) break;
-        }
+        ui_message("Config setup", "Setup needed", config_error, KIND_WARN, HINTS_EXIT, KEY_START);
         return 0;
     }
-    
+
     // Initialize network (optional - continue if fails)
-    iprintf("Initializing network...\n");
-    bool has_wifi = (network_init(&state) == 0);
+    splash("Connecting WiFi...");
+    ui_task_begin("Starting up", "Connecting WiFi");
+    has_wifi = (network_init(&state) == 0);
+    theme_wifi = has_wifi;
     if (!has_wifi) {
-        iprintf("\nWiFi unavailable\n");
-        iprintf("Upload/download disabled\n\n");
-        iprintf("Press A to continue\n");
-        
-        while(pmMainLoop()) {
-            swiWaitForVBlank();
-            scanKeys();
-            if(keysDown() & KEY_A) break;
-        }
+        static const Hint hints[] = { { "A", "Continue" }, { NULL, NULL } };
+        ui_task_end(KIND_WARN, "WiFi unavailable", "Upload/download disabled", hints, KEY_A);
+        ui_task_begin("Starting up", "Checking for a pending update");
     }
-    
+
     // Check for pending update before continuing
     if (update_apply_pending(self_path)) {
-        iprintf("\nPress START to exit\n");
-        while(pmMainLoop()) {
-            swiWaitForVBlank();
-            scanKeys();
-            if(keysDown() & KEY_START) break;
-        }
+        ui_task_end(KIND_OK, "Update applied", "Restart GameSync to finish", HINTS_EXIT, KEY_START);
         return 0;
     }
-    
+
     // Scan for saves
-    consoleClear();
-    iprintf("Scanning saves...\n\n");
+    splash("Scanning saves...");
+    ui_task_status("Scanning saves", "");
     saves_scan(&state);
-    
-    iprintf("\nFound %d saves!\n", state.num_titles);
-    iprintf("\nPress A to continue\n");
-    
-    while(pmMainLoop()) {
+
+    char found[32];
+    snprintf(found, sizeof(found), "Found %d saves!", state.num_titles);
+    static const Hint cont[] = { { "A", "Continue" }, { NULL, NULL } };
+    ui_task_end(KIND_OK, found, "", cont, KEY_A);
+
+    // No saves is fine: the Catalog tab can still install games
+
+    // D-pad repeat on every list: first repeat after 20 frames, then every 4
+    keysSetRepeat(20, 4);
+    draw_tab();
+
+    while (pmMainLoop()) {
         swiWaitForVBlank();
         scanKeys();
-        if(keysDown() & KEY_A) break;
+        int down = keysDown();
+        int rep = keysDownRepeat() & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT);
+        if (!down && !rep) continue;
+
+        if (down & KEY_START) {
+            if (ui_confirm_exit()) break;
+        } else if (down & (KEY_L | KEY_R)) {
+            switch_tab((down & KEY_R) ? 1 : -1);
+        } else if (tab == TAB_SAVES) {
+            saves_input(down, rep);
+        } else if (tab == TAB_CATALOG) {
+            catalog_tab_input(down, rep, has_wifi);
+        } else {
+            settings_input(down, rep);
+        }
+        draw_tab();
     }
-    
-    // Set up dual screen mode
-    videoSetMode(MODE_0_2D);
-    videoSetModeSub(MODE_0_2D);
-    
-    vramSetBankA(VRAM_A_MAIN_BG);
-    vramSetBankC(VRAM_C_SUB_BG);
-    
-    PrintConsole topScreen;
-    PrintConsole bottomScreen;
-    
-    consoleInit(&topScreen, 3, BgType_Text4bpp, BgSize_T_256x256, 31, 0, true, true);
-    consoleInit(&bottomScreen, 3, BgType_Text4bpp, BgSize_T_256x256, 31, 0, false, true);
-    
-    if (state.num_titles == 0) {
-        consoleSelect(&bottomScreen);
-        iprintf("No saves found!\n\n");
-        iprintf("Press START to exit\n");
-        
-        while(pmMainLoop()) {
-            swiWaitForVBlank();
-            scanKeys();
-            if(keysDown() & KEY_START) break;
-        }
-        return 0;
-    }
-    
-    // Main loop
-    bool redraw = true;
-    
-    while(pmMainLoop()) {
-        swiWaitForVBlank();
-        scanKeys();
-        int pressed = keysDown();
-        
-        if (pressed & KEY_START)
-            break;
 
-        // L button - toggle focus
-        if (pressed & KEY_L) {
-            focus_on_config = !focus_on_config;
-            redraw = true;
-        }
-        
-        if (pressed & KEY_DOWN) {
-            if (focus_on_config) {
-                config_selected = (config_selected + 1) % 7;
-                redraw = true;
-            } else if (state.num_titles > 0) {
-                selected = (selected + 1) % state.num_titles;
-                update_scroll();
-                redraw = true;
-            }
-        }
-        
-        if (pressed & KEY_UP) {
-            if (focus_on_config) {
-                config_selected = (config_selected - 1 + 7) % 7;
-                redraw = true;
-            } else if (state.num_titles > 0) {
-                selected = (selected - 1 + state.num_titles) % state.num_titles;
-                update_scroll();
-                redraw = true;
-            }
-        }
-        
-        // Page down with RIGHT (only for saves list)
-        if (pressed & KEY_RIGHT && !focus_on_config && state.num_titles > 0) {
-            selected += LIST_VISIBLE;
-            if (selected >= state.num_titles) selected = state.num_titles - 1;
-            update_scroll();
-            redraw = true;
-        }
-        
-        // Page up with LEFT (only for saves list)
-        if (pressed & KEY_LEFT && !focus_on_config && state.num_titles > 0) {
-            selected -= LIST_VISIBLE;
-            if (selected < 0) selected = 0;
-            update_scroll();
-            redraw = true;
-        }
-        
-        // A button - handle config actions or save operations
-        if (pressed & KEY_A) {
-            if (focus_on_config) {
-                // Handle config menu actions
-                if (config_selected == 0) {
-                    // Edit Server URL
-                    if (config_edit_field("http://192.168.1.100:8000", state.server_url, sizeof(state.server_url))) {
-                        config_save(&state);
-                    }
-                    redraw = true;
-                } else if (config_selected == 1) {
-                    // Edit API Key
-                    if (config_edit_field("your-api-key", state.api_key, sizeof(state.api_key))) {
-                        config_save(&state);
-                    }
-                    redraw = true;
-                } else if (config_selected == 2) {
-                    // Edit WiFi SSID
-                    if (config_edit_field("wifi-ssid", state.wifi_ssid, sizeof(state.wifi_ssid))) {
-                        config_save(&state);
-                    }
-                    redraw = true;
-                } else if (config_selected == 3) {
-                    // Edit WiFi WEP Key
-                    if (config_edit_field("wifi-key", state.wifi_wep_key, sizeof(state.wifi_wep_key))) {
-                        config_save(&state);
-                    }
-                    redraw = true;
-                } else if (config_selected == 4) {
-                    // Rescan Saves
-                    consoleSelect(&bottomScreen);
-                    consoleClear();
-                    iprintf("Rescanning saves...\n\n");
-                    saves_scan(&state);
-                    selected = 0;
-                    scroll_offset = 0;
-                    redraw = true;
-                } else if (config_selected == 5) {
-                    // Connect WiFi
-                    consoleSelect(&bottomScreen);
-                    consoleClear();
-                    iprintf("Connecting WiFi...\n\n");
-                    has_wifi = (network_init(&state) == 0);
-                    if (!has_wifi) {
-                        iprintf("WiFi connection failed\n");
-                        iprintf("Press any button\n");
-                        while(pmMainLoop()) {
-                            swiWaitForVBlank();
-                            scanKeys();
-                            if(keysDown()) break;
-                        }
-                    }
-                    redraw = true;
-                } else if (config_selected == 6) {
-                    // Check for updates
-                    if (!has_wifi) {
-                        consoleSelect(&bottomScreen);
-                        consoleClear();
-                        iprintf("WiFi required for updates\n");
-                        iprintf("Press any button\n");
-                        while(pmMainLoop()) {
-                            swiWaitForVBlank();
-                            scanKeys();
-                            if(keysDown()) break;
-                        }
-                        redraw = true;
-                        continue;
-                    }
-                    
-                    consoleSelect(&bottomScreen);
-                    consoleClear();
-                    iprintf("Checking for updates...\n\n");
-                    
-                    UpdateInfo update_info;
-                    if (!update_check(&state, &update_info)) {
-                        iprintf("Update check failed\n");
-                        iprintf("Press any button\n");
-                        while(pmMainLoop()) {
-                            swiWaitForVBlank();
-                            scanKeys();
-                            if(keysDown()) break;
-                        }
-                        redraw = true;
-                        continue;
-                    }
-                    
-                    if (!update_info.available) {
-                        iprintf("You have the latest\n");
-                        iprintf("version (%s)\n\n", APP_VERSION);
-                        iprintf("Press any button\n");
-                        while(pmMainLoop()) {
-                            swiWaitForVBlank();
-                            scanKeys();
-                            if(keysDown()) break;
-                        }
-                        redraw = true;
-                        continue;
-                    }
-                    
-                    // Show update available
-                    consoleClear();
-                    iprintf("Update available!\n\n");
-                    iprintf("Current: %s\n", APP_VERSION);
-                    iprintf("Latest:  %s\n\n", update_info.latest_version);
-                    iprintf("Size: %zu KB\n\n", update_info.file_size / 1024);
-                    iprintf("A: Download & Install\n");
-                    iprintf("B: Cancel\n");
-                    
-                    bool do_update = false;
-                    while(pmMainLoop()) {
-                        swiWaitForVBlank();
-                        scanKeys();
-                        int k = keysDown();
-                        if (k & KEY_A) { do_update = true; break; }
-                        if (k & KEY_B) break;
-                    }
-                    
-                    if (do_update) {
-                        consoleClear();
-                        iprintf("Downloading...\n\n");
-                        
-                        if (!update_download(&state, update_info.download_url, NULL)) {
-                            iprintf("\nDownload failed\n");
-                        } else {
-                            iprintf("\nUpdate ready!\n");
-                            iprintf("Restart to apply\n");
-                        }
-                        
-                        iprintf("\nPress any button\n");
-                        while(pmMainLoop()) {
-                            swiWaitForVBlank();
-                            scanKeys();
-                            if(keysDown()) break;
-                        }
-                    }
-                    redraw = true;
-                }
-                continue;
-            }
-        }
-        
-        // Y button - show save details (only when focused on saves)
-        if (pressed & KEY_Y && !focus_on_config && state.num_titles > 0) {
-            consoleSelect(&bottomScreen);
-            Title *title = &state.titles[selected];
-            
-            consoleClear();
-            iprintf("Loading details...\n");
-            
-            // Ensure hash is calculated
-            if (saves_ensure_hash(title) == 0) {
-                ui_show_save_details(title);
-            } else {
-                iprintf("Failed to calculate hash!\n");
-                iprintf("\nPress any button\n");
-                
-                while(pmMainLoop()) {
-                    swiWaitForVBlank();
-                    scanKeys();
-                    if(keysDown()) break;
-                }
-            }
-            
-            redraw = true;
-        }
-        
-        // A button - smart sync (only when focused on saves)
-        if (pressed & KEY_A && !focus_on_config && state.num_titles > 0 && has_wifi) {
-            consoleSelect(&bottomScreen);
-            Title *title = &state.titles[selected];
-
-            consoleClear();
-            iprintf("Analyzing sync...\n");
-
-            // Force fresh hash calculation
-            title->hash_calculated = false;
-
-            SyncDecision decision;
-            if (sync_decide(&state, selected, &decision) != 0) {
-                iprintf("\nFailed to check sync!\n");
-                iprintf("Press B to go back\n");
-                while(pmMainLoop()) {
-                    swiWaitForVBlank();
-                    scanKeys();
-                    if(keysDown() & KEY_B) break;
-                }
-                redraw = true;
-                continue;
-            }
-
-            // Show decision and get user confirmation
-            SyncAction chosen = ui_confirm_smart_sync(title, &decision);
-
-            if (chosen == SYNC_UPLOAD || chosen == SYNC_DOWNLOAD) {
-                consoleClear();
-                iprintf("%s...\n\n", chosen == SYNC_UPLOAD ? "Uploading" : "Downloading");
-
-                int result = sync_execute(&state, selected, chosen);
-                if (result == 0) {
-                    iprintf("\nSuccess!\n");
-                    // Clear red highlight after successful sync
-                    title->scanned = true;
-                    title->scan_result = SYNC_UP_TO_DATE;
-                } else {
-                    iprintf("\nFailed!\n");
-                }
-
-                iprintf("Press B to go back\n");
-                while(pmMainLoop()) {
-                    swiWaitForVBlank();
-                    scanKeys();
-                    if(keysDown() & KEY_B) break;
-                }
-            } else if (chosen == SYNC_UP_TO_DATE && decision.action == SYNC_UP_TO_DATE) {
-                // Write state file if missing for up-to-date saves
-                if (!decision.has_last_synced && title->hash_calculated) {
-                    sync_execute(&state, selected, SYNC_UP_TO_DATE);
-                }
-            }
-
-            redraw = true;
-        }
-
-        // R button - manual upload (only when focused on saves)
-        if (pressed & KEY_R && !focus_on_config && state.num_titles > 0 && has_wifi) {
-            consoleSelect(&bottomScreen);
-            Title *title = &state.titles[selected];
-
-            consoleClear();
-            iprintf("Checking server...\n");
-
-            char title_id_hex[17];
-            snprintf(title_id_hex, sizeof(title_id_hex), "%02X%02X%02X%02X%02X%02X%02X%02X",
-                title->title_id[0], title->title_id[1], title->title_id[2], title->title_id[3],
-                title->title_id[4], title->title_id[5], title->title_id[6], title->title_id[7]);
-
-            title->hash_calculated = false;
-
-            char server_hash[65] = "";
-            size_t server_size = 0;
-            network_get_save_info(&state, title_id_hex, server_hash, &server_size);
-
-            if (ui_confirm_sync(title, server_hash, server_size, true)) {
-                consoleClear();
-                iprintf("Uploading...\n\n");
-
-                int result = network_upload(&state, selected);
-                if (result == 0) {
-                    iprintf("\nUpload successful!\n");
-                    // Clear red highlight after successful upload
-                    title->scanned = true;
-                    title->scan_result = SYNC_UP_TO_DATE;
-                    // Save state after manual upload
-                    if (title->hash_calculated) {
-                        char hash_hex[65];
-                        for (int i = 0; i < 32; i++)
-                            sprintf(&hash_hex[i*2], "%02x", title->hash[i]);
-                        hash_hex[64] = '\0';
-                        sync_save_last_hash(title_id_hex, hash_hex);
-                    }
-                } else {
-                    iprintf("\nUpload failed!\n");
-                }
-
-                iprintf("Press B to go back\n");
-            } else {
-                consoleClear();
-                iprintf("Upload cancelled\n");
-                iprintf("Press B to go back\n");
-            }
-
-            while(pmMainLoop()) {
-                swiWaitForVBlank();
-                scanKeys();
-                if(keysDown() & KEY_B) break;
-            }
-
-            redraw = true;
-        }
-
-        // X button - scan all saves (check sync status only)
-        if (pressed & KEY_X && !focus_on_config && state.num_titles > 0 && has_wifi) {
-            consoleSelect(&bottomScreen);
-            consoleClear();
-            iprintf("=== Scan All ===\n\n");
-            iprintf("Scanning %d saves...\n\n", state.num_titles);
-
-            SyncSummary summary;
-            sync_scan_all(&state, &summary);
-
-            consoleClear();
-            iprintf("=== Scan Complete ===\n\n");
-            iprintf("Up to date:    %d\n", summary.up_to_date);
-            iprintf("Need upload:   %d\n", summary.uploaded);
-            iprintf("Need download: %d\n", summary.downloaded);
-            iprintf("Conflicts:     %d\n", summary.conflicts);
-            iprintf("Failed:        %d\n", summary.failed);
-            iprintf("\nOut-of-sync saves are\n");
-            iprintf("highlighted in red.\n");
-            iprintf("\nPress any button\n");
-
-            while(pmMainLoop()) {
-                swiWaitForVBlank();
-                scanKeys();
-                if(keysDown()) break;
-            }
-
-            redraw = true;
-        }
-        
-        if (redraw) {
-            // Reinit consoles to reset color state (consoleClear doesn't reset colors)
-            consoleInit(&topScreen, 3, BgType_Text4bpp, BgSize_T_256x256, 31, 0, true, true);
-            consoleInit(&bottomScreen, 3, BgType_Text4bpp, BgSize_T_256x256, 31, 0, false, true);
-
-            // Draw config on top screen
-            consoleSelect(&topScreen);
-            ui_draw_config(&state, config_selected, focus_on_config, has_wifi);
-            
-            // Draw saves list on bottom screen
-            consoleSelect(&bottomScreen);
-            iprintf("=== NDS Save Sync v%s ===\n", APP_VERSION);
-            iprintf("Found %d saves\n\n", state.num_titles);
-            
-            // Display visible titles
-            int start = scroll_offset;
-            int end = (scroll_offset + LIST_VISIBLE < state.num_titles) ? 
-                      scroll_offset + LIST_VISIBLE : state.num_titles;
-            
-            for (int i = start; i < end; i++) {
-                // Apply color based on scan status
-                if (state.titles[i].scanned) {
-                    if (state.titles[i].scan_result != SYNC_UP_TO_DATE) {
-                        iprintf("\x1b[31m");  // Red for out-of-sync
-                    }
-                }
-
-                if (i == selected) {
-                    iprintf("> ");
-                } else {
-                    iprintf("  ");
-                }
-
-                // Truncate long names
-                char name[25];
-                strncpy(name, state.titles[i].game_name, 24);
-                name[24] = '\0';
-
-                // Show server status indicator
-                char status = state.titles[i].on_server ? 'S' : ' ';
-                iprintf("%-24s [%c]", name, status);
-
-                // Reset color
-                if (state.titles[i].scanned) {
-                    iprintf("\x1b[0m");
-                }
-                iprintf("\n");
-            }
-            
-            
-            redraw = false;
-        }
-    }
+    catalog_shutdown();
 
     // Disconnect WiFi before exit to allow other games to initialize it cleanly
     // This may help avoid the nds-bootstrap issue where games won't load after WiFi apps
     network_cleanup();
-    
+
     return 0;
 }

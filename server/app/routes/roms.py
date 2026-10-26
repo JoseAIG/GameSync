@@ -1,6 +1,7 @@
 """ROM catalog endpoints.
 
-GET  /api/v1/roms              — List all ROMs in catalog (with optional filters)
+GET  /api/v1/roms              — List all ROMs in catalog (with optional filters:
+                                  system, search, has_save, has_ra, limit/offset)
 GET  /api/v1/roms/{title_id}   — Download a ROM file (with HTTP Range support)
                                   ?extract=cue  — CHD → CUE/BIN ZIP (PS1, Saturn, etc.)
                                   ?extract=psio — PS1 CHD/CUE → PSIO BIN/CU2 ZIP
@@ -12,6 +13,9 @@ GET  /api/v1/roms/{title_id}   — Download a ROM file (with HTTP Range support)
                                                  (installable on CFW 3DS AND usable in emulators)
                                   ?extract=decrypted_cci
                                                  3DS cart image → decrypted CCI for emulators
+                                  ?extract=nds  — DS ROM zipped as a single .nds → the raw
+                                                 .nds, inflated on the fly (DS homebrew
+                                                 client; a loose .nds streams as-is)
                                   PS3 .iso files: streamed raw (RPCS3 mounts ISO directly).
                                   PS3 bundle (subfolder containing .pkg files): streamed as
                                   ZIP_STORED archive of every file in the subfolder.  Loose
@@ -35,6 +39,7 @@ GET  /api/v1/roms/systems      — List systems with ROMs and counts
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import shlex
@@ -254,10 +259,11 @@ def _save_dir_to_cache(temp_dir: Path, source_path: Path, fmt: str) -> Path:
 # never holds more than this much in RAM at a time, so 4GB ROMs over slow
 # WAN links cost ~1MB of process memory regardless of file size.
 _STREAM_CHUNK = 1 << 20
-from app.services import ctr_rom, ra_index, rom_scanner
+from app.services import ctr_rom, game_names, ra_index, rom_scanner
 from shared import wiiu_meta
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # ── System classification ────────────────────────────────────────────────────
 
@@ -308,6 +314,12 @@ _XBOX_DISC_EXTENSIONS = frozenset({'.cci', '.iso'})
 # 3DS cartridge images can be converted to CIA variants
 _3DS_SYSTEMS = frozenset({'3DS'})
 _3DS_CART_EXTENSIONS = frozenset({'.3ds', '.cci'})
+
+# Nintendo DS: libraries keep carts zipped (No-Intro style, one .nds per zip).
+# The DS itself has no room or CPU to spare for unzipping a 100+ MB ROM, so
+# ``?extract=nds`` inflates the single ROM member while streaming it.
+_NDS_SYSTEMS = frozenset({'NDS', 'DSI'})
+_NDS_ROM_EXTENSIONS = frozenset({'.nds', '.dsi', '.srl'})
 # Output filenames preserve the original ROM stem — only the extension changes.
 # Two formats only: a decrypted CIA (which is also installable on CFW 3DS
 # hardware, so one button covers both use-cases) and a decrypted CCI for
@@ -452,12 +464,20 @@ async def list_roms(
     system: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     has_save: Optional[bool] = Query(None),
+    has_ra: Optional[bool] = Query(
+        None,
+        description=(
+            "true: only ROMs with a RetroAchievements set (at least one "
+            "achievement, hash or title match); false: only the others"
+        ),
+    ),
     limit: Optional[int] = Query(None, ge=1, le=20000),
     offset: int = Query(0, ge=0),
 ):
     catalog = rom_scanner.get()
     if not catalog:
-        return {"roms": [], "total": 0, "offset": 0, "limit": limit, "has_more": False}
+        return {"roms": [], "total": 0, "offset": 0, "limit": limit,
+                "has_more": False, "has_ra": has_ra}
 
     entries = catalog.list_all()
 
@@ -474,6 +494,12 @@ async def list_roms(
             entries = [e for e in entries if storage.title_exists(e.title_id)]
         else:
             entries = [e for e in entries if not storage.title_exists(e.title_id)]
+
+    if has_ra is not None:
+        # Filtered here rather than by the client so a small device can page
+        # through only the games it asked for.
+        with_set = _paths_with_achievements(entries)
+        entries = [e for e in entries if (e.path in with_set) == has_ra]
 
     # `total` is always the full filtered count — essential for the client to
     # know whether to page further or show a "showing X of Y" hint.
@@ -519,6 +545,27 @@ async def list_roms(
         "offset": offset,
         "limit": limit,
         "has_more": has_more,
+        # Echoed so a client can tell the filter was applied (older servers
+        # ignore the parameter and omit this key).
+        "has_ra": has_ra,
+    }
+
+
+def _paths_with_achievements(entries) -> set[str]:
+    """Catalog paths whose RetroAchievements set has at least one achievement.
+
+    Same rule as the clients' RA badge: a registered hash with no set (0)
+    or an unreadable count (-1) earns nothing.  Title-only matches count,
+    like the MiSTer's RA-only view, since that is all disc systems get.
+    """
+    try:
+        found = ra_index.lookup([e.path for e in entries if e.path])
+    except Exception:  # noqa: BLE001 - a broken index must not break /roms
+        logger.exception("[roms] RA lookup for has_ra failed")
+        return set()
+    return {
+        path for path, data in found.items()
+        if (data.get("ra_achievements") or 0) > 0
     }
 
 
@@ -691,6 +738,12 @@ async def trigger_scan(request: Request, use_crc32: bool = Query(False)):
     catalog = rom_scanner.rescan(use_crc32=use_crc32)
     if not catalog:
         return {"status": "no_rom_dir", "count": 0}
+    # Same housekeeping as the periodic scan (zstd CHDs, RA index), in the
+    # background so the response doesn't wait for it.
+    import asyncio
+
+    from app.main import library_maintenance
+    asyncio.create_task(library_maintenance(catalog))
     return {"status": "ok", "count": len(catalog.entries)}
 
 
@@ -738,13 +791,36 @@ def _bundle_zip_for(entry, rom_dir: Path) -> Path | None:
     return zip_path
 
 
-def _serve_zip_member(zip_path: Path, rel_path: str) -> Response:
-    """Stream one member out of a zipped pack.
+# Zip compression methods a member can be served from: stored (0), deflate
+# (8, Python's zipfile) and zstd (93, the zstandard package - zipfile has no
+# zstd before Python 3.14, and Wii RVZ sets are often zipped with it).
+_ZIP_STORED, _ZIP_DEFLATED, _ZIP_ZSTD = 0, 8, 93
 
-    Members are addressed the way the manifest lists them — without the
-    single wrapping folder the pack may have been zipped with — so both
-    spellings are tried.  Deflated members stream through the decompressor;
-    no Range, since a compressed offset can't be seeked to.
+
+def _zip_member_data_offset(zip_path: Path, info: zipfile.ZipInfo) -> int:
+    """Where a member's (compressed) bytes start: past its local header."""
+    with open(zip_path, 'rb') as f:
+        f.seek(info.header_offset)
+        header = f.read(30)
+    if len(header) != 30 or header[:4] != b'PK\x03\x04':
+        raise zipfile.BadZipFile("bad local header")
+    name_len = int.from_bytes(header[26:28], 'little')
+    extra_len = int.from_bytes(header[28:30], 'little')
+    return info.header_offset + 30 + name_len + extra_len
+
+
+def _serve_zip_member(
+    zip_path: Path, rel_path: str, range_header: Optional[str] = None
+) -> Response:
+    """Stream one member out of a zip: a zipped pack's file, or the game in a
+    zipped ROM.
+
+    Members are addressed the way the manifest lists them - without the
+    single wrapping folder the pack may have been zipped with - so both
+    spellings are tried.  A stored member is a plain slice of the zip, so it
+    honours Range (resumable, segmented downloads); a deflated or zstd one
+    streams through its decompressor, without Range, since a compressed
+    offset can't be seeked to.
     """
     try:
         zf = zipfile.ZipFile(zip_path)
@@ -762,31 +838,77 @@ def _serve_zip_member(zip_path: Path, rel_path: str) -> Response:
             break
         except KeyError:
             continue
+    zf.close()
     if info is None or info.is_dir():
-        zf.close()
         return Response(status_code=404,
                         content=f"Bundle file not found: {rel_path}")
+    name = Path(info.filename).name
+    media_type = _content_type(info.filename)
+    disposition = {'Content-Disposition': f'attachment; filename="{name}"'}
+    try:
+        offset = _zip_member_data_offset(zip_path, info)
+    except (OSError, zipfile.BadZipFile) as exc:
+        return Response(status_code=422, content=f"Can't read {info.filename}: {exc}")
 
-    def _iter():
-        try:
-            with zf.open(info) as fh:
+    if info.compress_type == _ZIP_STORED:
+        size = info.file_size
+        start, end = 0, size - 1
+        status = 200
+        headers = dict(disposition, **{'Accept-Ranges': 'bytes'})
+        if range_header:
+            start, end = _parse_range(range_header, size)
+            if start is None:
+                return Response(status_code=416, headers={'Content-Range': f'bytes */{size}'})
+            status = 206
+            headers['Content-Range'] = f'bytes {start}-{end}/{size}'
+        length = end - start + 1 if size else 0
+        headers['Content-Length'] = str(length)
+
+        def _slice():
+            with open(zip_path, 'rb') as f:
+                f.seek(offset + start)
+                remaining = length
+                while remaining > 0:
+                    buf = f.read(min(_STREAM_CHUNK, remaining))
+                    if not buf:
+                        break
+                    remaining -= len(buf)
+                    yield buf
+
+        return StreamingResponse(_slice(), status_code=status, media_type=media_type,
+                                 headers=headers)
+
+    if info.compress_type == _ZIP_DEFLATED:
+        def _inflate():
+            with zipfile.ZipFile(zip_path) as z, z.open(info) as fh:
                 while True:
                     buf = fh.read(_STREAM_CHUNK)
                     if not buf:
                         break
                     yield buf
-        finally:
-            zf.close()
+        body = _inflate()
+    elif info.compress_type == _ZIP_ZSTD:
+        import zstandard
 
-    return StreamingResponse(
-        _iter(),
-        media_type=_content_type(info.filename),
-        headers={
-            'Content-Length': str(info.file_size),
-            'Content-Disposition':
-                f'attachment; filename="{Path(info.filename).name}"',
-        },
-    )
+        def _unzstd():
+            with open(zip_path, 'rb') as f:
+                f.seek(offset)
+                reader = zstandard.ZstdDecompressor().stream_reader(
+                    f, read_across_frames=True, closefd=False)
+                remaining = info.file_size
+                while remaining > 0:
+                    buf = reader.read(min(_STREAM_CHUNK, remaining))
+                    if not buf:
+                        break
+                    remaining -= len(buf)
+                    yield buf
+        body = _unzstd()
+    else:
+        return Response(status_code=422,
+                        content=f"Can't extract {info.filename}: "
+                                f"unsupported zip compression {info.compress_type}")
+    return StreamingResponse(body, media_type=media_type,
+                             headers=dict(disposition, **{'Content-Length': str(info.file_size)}))
 
 
 def _bundle_manifest_files(entry) -> list[dict]:
@@ -999,7 +1121,7 @@ async def rom_manifest(rom_key: str):
     if not file_path.is_file():
         return JSONResponse(status_code=404,
                             content={"detail": "ROM file missing on disk"})
-    return {
+    manifest = {
         "rom_id": entry.rom_id,
         "is_bundle": False,
         "name": entry.name,
@@ -1007,6 +1129,18 @@ async def rom_manifest(rom_key: str):
         "total_size": file_path.stat().st_size,
         "files": [{"name": entry.filename, "size": file_path.stat().st_size}],
     }
+    if file_path.suffix.lower() == '.zip':
+        # what is inside, for a client that wants one member via /file/<name>
+        try:
+            with zipfile.ZipFile(file_path) as zf:
+                manifest["members"] = [
+                    {"name": i.filename, "size": i.file_size,
+                     "compression": i.compress_type}
+                    for i in zf.infolist() if not i.is_dir()
+                ]
+        except (OSError, zipfile.BadZipFile):
+            pass
+    return manifest
 
 
 @router.api_route("/roms/{rom_key}/file/{rel_path:path}",
@@ -1035,13 +1169,18 @@ async def download_bundle_file(
                 break
     if not entry:
         return Response(status_code=404, content=f"ROM not found: {rom_key}")
-    if not getattr(entry, 'is_bundle', False):
-        return Response(status_code=400,
-                        content="ROM is not a bundle; use /roms/<rom_id>")
-
     rom_dir = settings.rom_dir
     if rom_dir is None:
         return Response(status_code=404, content="ROM directory not configured")
+    if not getattr(entry, 'is_bundle', False):
+        # a zipped single-file ROM: its members, e.g. the .rvz in a Wii zip
+        zip_path = rom_dir / entry.path
+        if zip_path.suffix.lower() != '.zip' or not zip_path.is_file():
+            return Response(status_code=400,
+                            content="ROM is not a bundle; use /roms/<rom_id>")
+        if rel_path.startswith("/") or ".." in Path(rel_path).parts:
+            return Response(status_code=400, content="Bad bundle file path")
+        return _serve_zip_member(zip_path, rel_path, range_header)
 
     bundle_dir = _bundle_dir_for(entry, rom_dir)
     if bundle_dir is None:
@@ -1049,7 +1188,7 @@ async def download_bundle_file(
         if zip_path is not None:
             if rel_path.startswith("/") or ".." in Path(rel_path).parts:
                 return Response(status_code=400, content="Bad bundle file path")
-            return _serve_zip_member(zip_path, rel_path)
+            return _serve_zip_member(zip_path, rel_path, range_header)
         return Response(status_code=404,
                         content="Bundle directory missing on disk")
 
@@ -1274,6 +1413,9 @@ async def download_rom(
 
     if extract:
         fmt = extract.lower()
+        if fmt == 'nds' and sys_up in _NDS_SYSTEMS:
+            return _serve_nds_rom(file_path, range_header,
+                                  head_only=request.method == 'HEAD')
         if sys_up in _XBOX_SYSTEMS and fmt in _XBOX_EXTRACT_SPECS:
             # Xbox CCI/ISO conversions go through the templated command
             # runner or a no-op direct stream when the source already
@@ -1312,6 +1454,91 @@ async def download_rom(
     if range_header:
         return _serve_range(file_path, file_size, content_type, range_header)
     return _serve_full(file_path, file_size, content_type)
+
+
+# ── Nintendo DS: the .nds out of a single-ROM zip ───────────────────────────
+
+def _attachment_header(name: str) -> str:
+    """Content-Disposition for ``name``; header values must be latin-1."""
+    ascii_name = name.encode('ascii', 'replace').decode('ascii').replace('"', "'")
+    if ascii_name == name:
+        return f'attachment; filename="{name}"'
+    from urllib.parse import quote
+    return (f'attachment; filename="{ascii_name}"; '
+            f"filename*=UTF-8''{quote(name)}")
+
+
+def _serve_nds_rom(file_path: Path, range_header: Optional[str],
+                   head_only: bool = False) -> Response:
+    """Serve a playable .nds for ``?extract=nds``.
+
+    A loose .nds/.dsi goes out as-is (Range included).  A zip must hold
+    exactly one DS ROM, which is inflated while it streams, so the server
+    never writes a temp copy and the client gets the exact ROM size up
+    front.  No Range on that path: a deflated offset can't be seeked to.
+    """
+    suffix = file_path.suffix.lower()
+    if suffix in _NDS_ROM_EXTENSIONS:
+        file_size = file_path.stat().st_size
+        if range_header:
+            return _serve_range(file_path, file_size,
+                                'application/octet-stream', range_header)
+        return _serve_full(file_path, file_size, 'application/octet-stream')
+    if suffix != '.zip':
+        return Response(
+            status_code=415,
+            content=f"Can't extract a DS ROM from a {suffix or 'extensionless'} "
+                    "file; only .zip is supported",
+        )
+
+    try:
+        zf = zipfile.ZipFile(file_path)
+    except (OSError, zipfile.BadZipFile):
+        return Response(status_code=422, content="ZIP archive unreadable")
+    members = [
+        info for info in zf.infolist()
+        if not info.is_dir()
+        and Path(info.filename).suffix.lower() in _NDS_ROM_EXTENSIONS
+        and not Path(info.filename).name.startswith('._')
+    ]
+    if len(members) != 1:
+        zf.close()
+        return Response(
+            status_code=422,
+            content=f"ZIP archive must contain exactly one .nds ROM "
+                    f"(found {len(members)})",
+        )
+    info = members[0]
+    headers = {
+        'Content-Length': str(info.file_size),
+        'Content-Disposition': _attachment_header(Path(info.filename).name),
+    }
+    if head_only:
+        zf.close()
+        return Response(status_code=200, headers=headers,
+                        media_type='application/octet-stream')
+    try:
+        # Opened here so an encrypted member or an unsupported compression
+        # method is a clean error instead of a truncated 200.
+        fh = zf.open(info)
+    except (NotImplementedError, RuntimeError, zipfile.BadZipFile) as exc:
+        zf.close()
+        return Response(status_code=422,
+                        content=f"Can't extract {info.filename}: {exc}")
+
+    def _iter():
+        try:
+            while True:
+                buf = fh.read(_STREAM_CHUNK)
+                if not buf:
+                    break
+                yield buf
+        finally:
+            fh.close()
+            zf.close()
+
+    return StreamingResponse(_iter(), media_type='application/octet-stream',
+                             headers=headers)
 
 
 # ── Extract helpers — common cleanup + streaming ────────────────────────────
@@ -1962,6 +2189,35 @@ def _ps1_normalize_gamecode(value: str | None) -> str:
     return re.sub(r'[^A-Za-z0-9]', '', value).upper()
 
 
+_PS1_GAMECODE_RE = re.compile(r'^[A-Z]{4}\d{5}$')
+# Stand-in for ``{gamecode}`` when the disc has no known product code;
+# ``_ps1_drop_unknown_gamecode`` removes it from the argv again.
+_PS1_GAMECODE_UNKNOWN = '\x00gamecode\x00'
+
+
+def _ps1_drop_unknown_gamecode(cmd: list[str]) -> list[str]:
+    """Remove the game-id option from an expanded converter argv.
+
+    Handles both ``--game_id {gamecode}`` and ``--game_id={gamecode}``.
+    A positional ``{gamecode}`` with no option in front of it can't be
+    dropped, so it gets the generic ``SLUS00000`` placeholder instead.
+    """
+    out: list[str] = []
+    for part in cmd:
+        if part == _PS1_GAMECODE_UNKNOWN:
+            if out and out[-1].startswith('-'):
+                out.pop()
+            else:
+                out.append('SLUS00000')
+            continue
+        if _PS1_GAMECODE_UNKNOWN in part:
+            if part.startswith('-'):
+                continue
+            part = part.replace(_PS1_GAMECODE_UNKNOWN, 'SLUS00000')
+        out.append(part)
+    return out
+
+
 def _ps1_disc_siblings(entry) -> list:
     """Return all PS1 catalog entries sharing ``entry.title_id`` (i.e. the
     full multi-disc set), sorted by disc number derived from filename.
@@ -2081,10 +2337,23 @@ async def _extract_ps1_eboot(source_path: Path, system: str, entry) -> Response:
     tmpdir = tempfile.mkdtemp(prefix='ps1_eboot_', dir=_conversion_tmp_dir())
 
     title = entry.name or _ps1_clean_title(disc_paths[0].name)
-    gamecode = (
-        _ps1_normalize_gamecode(entry.title_id)
-        or _ps1_normalize_gamecode(_extract_ps1_serial_from_filename(disc_paths[0].name))
-        or 'SLUS00000'  # last-resort placeholder; pop-fe still emits a PBP
+    # A hand-tagged serial (``Game [SLUS-00748]``) is identity, not title.
+    title = game_names.strip_tagged_psx_serial(title) or title
+    # Only a real product code may reach the converter.  A hack or fan
+    # edition with no DAT match is catalogued under a slug title_id
+    # (``PS1_resident_evil_2_ultimate_edition``); pop-fe indexes its
+    # gamelist with whatever --game_id says and dies with a KeyError on
+    # anything it doesn't know.  Without --game_id it reads the serial off
+    # the disc itself, so an unknown code drops the option entirely.
+    gamecode = next(
+        (
+            code for code in (
+                _ps1_normalize_gamecode(entry.title_id),
+                _ps1_normalize_gamecode(_extract_ps1_serial_from_filename(disc_paths[0].name)),
+            )
+            if _PS1_GAMECODE_RE.match(code)
+        ),
+        '',
     )
     primary = disc_paths[0]
 
@@ -2101,9 +2370,11 @@ async def _extract_ps1_eboot(source_path: Path, system: str, entry) -> Response:
             output_dir=str(stage),
             stem=primary.stem,
             title=title,
-            gamecode=gamecode,
+            gamecode=gamecode or _PS1_GAMECODE_UNKNOWN,
             compression='9',
         )
+        if not gamecode:
+            cmd = _ps1_drop_unknown_gamecode(cmd)
         # pop-fe + ATRAC3 encoding + asset fetching can take 5-15 min
         # per disc on a Pi — give multi-disc runs a full hour.  Run with
         # ``cwd`` set to the configured pop-fe source tree so its
@@ -3219,6 +3490,10 @@ def _extract_formats_for_entry(entry) -> tuple[str | None, list[str]]:
         return '3ds', list(_3DS_EXTRACT_FORMATS)
     elif sys_up in _XBOX_SYSTEMS and suffix in _XBOX_DISC_EXTENSIONS:
         return 'xbox', list(_XBOX_EXTRACT_FORMATS)
+    elif sys_up in _NDS_SYSTEMS and suffix == '.zip':
+        # Only listed, never preferred: every other client unzips DS ROMs
+        # itself and must keep getting the zip by default.
+        return None, ['nds']
 
     return None, []
 

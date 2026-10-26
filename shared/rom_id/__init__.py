@@ -25,6 +25,7 @@ from shared.rom_id.dreamcast import (
     DC_TITLE_ID_PREFIX,
     canonical_dc_serial,
     dc_device_folder_ids,
+    is_dc_box_code,
     make_dc_title_id,
     parse_dc_title_id,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "DC_TITLE_ID_PREFIX",
     "canonical_dc_serial",
     "dc_device_folder_ids",
+    "is_dc_box_code",
     "make_dc_title_id",
     "make_title_id",
     "normalize_rom_name",

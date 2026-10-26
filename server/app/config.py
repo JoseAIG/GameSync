@@ -158,6 +158,15 @@ class Settings(BaseSettings):
     ra_enabled: bool = True
     ra_api_key: str = ""
     ra_username: str = ""
+    # Connect token for the DS real-hardware achievements (routes/ra.py):
+    # the set routes need it, the catalog badges above don't.  Get it
+    # with ``uv run python ra_login.py``.
+    ra_token: str = ""
+    # Rewrite zstd-compressed CHDs in the ROM library to chdman's standard
+    # codecs after each scan (lossless, verified; see
+    # services/chd_normalize.py).  The server's own CHD reader cannot decode
+    # zstd, so such discs would otherwise never get an exact RA badge.
+    chd_recompress_zstd: bool = True
     site_title: str = "GameSync"
     # Comma-separated list of nginx Basic Auth usernames that get admin access.
     # Everyone else can download but cannot trigger rescans or change settings.

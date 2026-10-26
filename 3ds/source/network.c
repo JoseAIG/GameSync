@@ -161,6 +161,17 @@ static void setup_tls(const AppConfig *config, httpcContext *context) {
     logged = true;
 }
 
+// Whether the server answered the last request: -1 unknown, 0 no, 1 yes
+static int server_state = -1;
+
+static void note_server(bool answered) {
+    server_state = answered ? 1 : 0;
+}
+
+int network_server_state(void) {
+    return server_state;
+}
+
 // Brief delay between requests to let httpc clean up
 static void request_delay(void) {
     svcSleepThread(50000000LL); // 50ms
@@ -270,17 +281,19 @@ static bool open_request(const AppConfig *config, httpcContext *context,
 // Send the request, wait for the status code and read the body.
 // Always closes the context. Returns NULL (with the error recorded) on failure.
 static u8 *finish_request(httpcContext *context, const char *url,
-                          u32 *out_size, u32 *out_status) {
+                          u32 *out_size, u32 *out_status, u64 response_timeout) {
     // The TLS handshake (and certificate check) happens here for https://
     Result res = httpcBeginRequest(context);
     if (R_FAILED(res)) {
+        note_server(false);
         request_failed(url, is_https(url), "connect", res);
         httpcCancelConnection(context);
         httpcCloseContext(context);
         return NULL;
     }
 
-    res = httpcGetResponseStatusCodeTimeout(context, out_status, TIMEOUT_RESPONSE);
+    res = httpcGetResponseStatusCodeTimeout(context, out_status, response_timeout);
+    note_server(R_SUCCEEDED(res));
     if (R_FAILED(res)) {
         request_failed(url, is_https(url), "response", res);
         httpcCancelConnection(context);
@@ -297,6 +310,12 @@ static u8 *finish_request(httpcContext *context, const char *url,
 
 u8 *network_get(const AppConfig *config, const char *path,
                 u32 *out_size, u32 *out_status) {
+    return network_get_timeout(config, path, out_size, out_status, 0);
+}
+
+u8 *network_get_timeout(const AppConfig *config, const char *path,
+                        u32 *out_size, u32 *out_status, u32 response_timeout_s) {
+    u64 response_timeout = response_timeout_s ? response_timeout_s * 1000000000ULL : TIMEOUT_RESPONSE;
     request_delay(); // Let previous request fully clean up
     last_error[0] = '\0';
 
@@ -305,7 +324,7 @@ u8 *network_get(const AppConfig *config, const char *path,
 
     httpcContext context;
     if (!open_request(config, &context, HTTPC_METHOD_GET, url)) return NULL;
-    return finish_request(&context, url, out_size, out_status);
+    return finish_request(&context, url, out_size, out_status, response_timeout);
 }
 
 // POST a body with the given content type
@@ -327,7 +346,7 @@ static u8 *post_data(const AppConfig *config, const char *path,
         return NULL;
     }
 
-    return finish_request(&context, url, out_size, out_status);
+    return finish_request(&context, url, out_size, out_status, TIMEOUT_RESPONSE);
 }
 
 u8 *network_post(const AppConfig *config, const char *path,
@@ -382,4 +401,116 @@ bool network_select_server(AppConfig *config) {
     config->use_alt_url = false;  // neither answered: keep the primary
     log_line("no server answered (primary=%s alt=%s)", config->server_url, config->server_url_alt);
     return false;
+}
+
+// ---------------------------------------------------------------------------
+// Streaming download
+// ---------------------------------------------------------------------------
+
+static void close_context(httpcContext *context) {
+    httpcCancelConnection(context);
+    httpcCloseContext(context);
+}
+
+NetDlResult network_download(const AppConfig *config, const char *path,
+                             u32 max_wait_s, NetWaitCb wait, NetSinkCb sink,
+                             void *user, NetDlInfo *info) {
+    memset(info, 0, sizeof(*info));
+    request_delay();
+    last_error[0] = '\0';
+
+    char url[MAX_URL_LEN + 1024];
+    build_url(config, path, url, sizeof(url));
+
+    // Same TLS setup (tls_verify) and headers as every other request
+    httpcContext context;
+    if (!open_request(config, &context, HTTPC_METHOD_GET, url))
+        return NET_DL_CONNECT;
+
+    // The TLS handshake (and certificate check) happens here for https://
+    Result begin = httpcBeginRequest(&context);
+    if (R_FAILED(begin)) {
+        note_server(false);
+        request_failed(url, is_https(url), "connect", begin);
+        close_context(&context);
+        return NET_DL_CONNECT;
+    }
+
+    // The server only answers once a conversion (?extract=cia) is done, so
+    // wait in one-second slices and let the caller show progress / cancel.
+    u32 status = 0;
+    u32 waited = 0;
+    while (1) {
+        Result res = httpcGetResponseStatusCodeTimeout(&context, &status, 1000000000ULL);
+        if (R_SUCCEEDED(res)) break;
+        if (res != (Result)HTTPC_RESULTCODE_TIMEDOUT) {
+            note_server(false);
+            request_failed(url, is_https(url), "response", res);
+            close_context(&context);
+            return NET_DL_CONNECT;
+        }
+        waited++;
+        if (wait && wait(waited, user)) {
+            close_context(&context);
+            return NET_DL_CANCELLED;
+        }
+        if (waited >= max_wait_s) {
+            close_context(&context);
+            return NET_DL_TIMEOUT;
+        }
+    }
+    info->status = status;
+    note_server(true);
+
+    u8 *buf = (u8 *)malloc(NET_DL_CHUNK);
+    if (!buf) {
+        close_context(&context);
+        return NET_DL_SINK;
+    }
+
+    if (status != 200) {
+        // Keep the start of the error text (FastAPI sends plain text/JSON)
+        u32 got = 0;
+        download_data_timeout(&context, buf, sizeof(info->error) - 1, &got, TIMEOUT_RESPONSE);
+        if (got > sizeof(info->error) - 1) got = sizeof(info->error) - 1;
+        memcpy(info->error, buf, got);
+        info->error[got] = '\0';
+        free(buf);
+        close_context(&context);
+        return NET_DL_STATUS;
+    }
+
+    u32 pos = 0, content = 0;
+    httpcGetDownloadSizeState(&context, &pos, &content);
+    info->total = content;
+
+    NetDlResult result = NET_DL_OK;
+    Result res;
+    do {
+        u32 got = 0;
+        res = download_data_timeout(&context, buf, NET_DL_CHUNK, &got, TIMEOUT_TRANSFER);
+        if (got > 0) {
+            info->received += got;
+            int s = sink(buf, got, info->received, info->total, user);
+            if (s != 0) {
+                result = (s > 0) ? NET_DL_CANCELLED : NET_DL_SINK;
+                break;
+            }
+        }
+        if (res == (Result)HTTPC_RESULTCODE_TIMEDOUT) {
+            result = NET_DL_SHORT;
+            break;
+        }
+    } while (res == (Result)HTTPC_RESULTCODE_DOWNLOADPENDING);
+
+    if (result == NET_DL_OK) {
+        if (R_FAILED(res) && res != (Result)HTTPC_RESULTCODE_DOWNLOADPENDING)
+            result = NET_DL_SHORT;
+        else if (info->total && info->received < info->total)
+            result = NET_DL_SHORT;
+    }
+
+    free(buf);
+    close_context(&context);
+    return result;
 }

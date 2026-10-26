@@ -24,7 +24,7 @@ CXXFLAGS    := $(CFLAGS)
 ASFLAGS     := $(CFLAGS)
 LDFLAGS     += -L$(PSL1GHT)/portlibs/ppu/lib
 LD          := ppu-gcc
-LIBS        := -lSDL_gfx -lSDL -lrsx -lgcm_sys -laudio -lsysutil -lio -lnet -lnetctl -lsysmodule -lrt -llv2 -lsysfs -lpolarssl -lz -lm
+LIBS        := -lSDL_ttf -lfreetype -lSDL_gfx -lSDL -lrsx -lgcm_sys -laudio -lsysutil -lio -lnet -lnetctl -lsysmodule -lrt -llv2 -lsysfs -lpolarssl -lz -lm
 
 CPPFILES    :=
 CFILES      := $(foreach dir,$(SOURCES),$(notdir $(wildcard $(dir)/*.c)))
@@ -41,7 +41,12 @@ all: $(TARGET).pkg
 # Copy games.conf into the package so it's installed alongside EBOOT.BIN.
 # games.conf comes from the Apollo Save Tool and is GPL-3.0, so its licence
 # notice ships with it — do not drop games.conf.LICENSE from the package.
-$(TARGET).pkg: $(BUILD)/pkg/USRDIR/games.conf $(BUILD)/pkg/USRDIR/games.conf.LICENSE
+$(TARGET).pkg: $(BUILD)/pkg/USRDIR/games.conf $(BUILD)/pkg/USRDIR/games.conf.LICENSE $(BUILD)/pkg/PIC1.PNG
+
+# The XMB background while GameSync is selected (tools/brand_art.py).
+$(BUILD)/pkg/PIC1.PNG: assets/PIC1.PNG | $(BUILD)
+	@mkdir -p $(BUILD)/pkg
+	cp assets/PIC1.PNG $(BUILD)/pkg/PIC1.PNG
 
 $(BUILD)/pkg/USRDIR/games.conf: data/games.conf | $(BUILD)
 	@mkdir -p $(BUILD)/pkg/USRDIR

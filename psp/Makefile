@@ -1,8 +1,9 @@
 TARGET = pspsync
 OBJS = source/main.o source/config.o source/saves.o \
        source/network.o source/sync.o source/bundle.o \
-       source/sha256.o source/ui.o \
-       source/roms.o source/downloads.o source/zip_extract.o
+       source/sha256.o source/ui.o source/gui.o source/font_data.o \
+       source/roms.o source/downloads.o source/zip_extract.o \
+       source/catcache.o
 
 INCDIR   := include
 CFLAGS   := -O2 -G0 -Wall -I$(INCDIR)
@@ -17,6 +18,7 @@ PSP_FW_VERSION   := 600
 EXTRA_TARGETS := EBOOT.PBP
 PSP_EBOOT_TITLE := PSP Save Sync
 PSP_EBOOT_ICON := ICON0.PNG
+PSP_EBOOT_PIC1 := PIC1.PNG
 
 # Version from root VERSION file
 APP_VERSION_STR := $(shell cat $(CURDIR)/../VERSION | tr -d '[:space:]')
@@ -28,7 +30,7 @@ CFLAGS += -DAPP_VERSION=\"$(APP_VERSION_STR)\"
 # build.mak already appends -lpspnet -lpspnet_apctl, so omit them here to avoid
 # duplicate stubs that trigger "stubs out of order" in psp-fixup-imports.
 # Add -lpspnet_inet and -lpspnet_resolver which build.mak does NOT include.
-LIBS := -lpspnet_inet -lpspnet_resolver -lpsppower -lpspsdk -lz -lm -lc -lpspuser
+LIBS := -lpspgu -lpspnet_inet -lpspnet_resolver -lpsppower -lpspsdk -lz -lm -lc -lpspuser
 
 ifneq ($(PSPSDK),)
 include $(PSPSDK)/lib/build.mak

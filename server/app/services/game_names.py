@@ -6,6 +6,7 @@ from pathlib import Path
 from app.services.rom_id import (
     SYSTEM_CODES,
     canonical_dc_serial,
+    is_dc_box_code,
     make_dc_title_id,
     normalize_rom_name,
     parse_dc_title_id,
@@ -1122,7 +1123,7 @@ def build_dreamcast_slug_index() -> int:
     return len(_dc_by_slug)
 
 
-def _dc_serial_region_rank(code: str, region_hint: str | None) -> tuple[int, str]:
+def _dc_serial_region_rank(code: str, region_hint: str | None) -> tuple[int, bool, str]:
     """Sort key for choosing between a game's regional serials.
 
     Dreamcast product codes carry their region: Sega PAL discs end in ``-50``
@@ -1130,17 +1131,20 @@ def _dc_serial_region_rank(code: str, region_hint: str | None) -> tuple[int, str
     ``M``/``J`` and US ones in ``N``.  With no hint, prefer USA, then Europe,
     then Japan — the same order the rest of the DAT handling uses.
     """
+    # Within a region a Sega Europe box code (950-0019-50) loses: the disc's
+    # IP.BIN says T-1401D-50, and that is what every save device files under.
+    box = is_dc_box_code(code)
     if region_hint == "USA" and code.endswith("N"):
-        return (0, code)
+        return (0, box, code)
     if region_hint == "EUROPE" and code.endswith("50"):
-        return (0, code)
+        return (0, box, code)
     if region_hint == "JAPAN" and code.endswith(("M", "J")):
-        return (0, code)
+        return (0, box, code)
     if code.endswith("50"):
-        return (2, code)
+        return (2, box, code)
     if code.endswith(("M", "J")):
-        return (3, code)
-    return (1, code)
+        return (3, box, code)
+    return (1, box, code)
 
 
 def lookup_dc_serial(name: str) -> str | None:
@@ -1155,12 +1159,44 @@ def lookup_dc_serial(name: str) -> str | None:
     return min(candidates, key=lambda code: _dc_serial_region_rank(code, region_hint))
 
 
+# A serial written into the filename by hand: ``Game [SLUS-00748].chd``.
+_PSX_TAGGED_SERIAL_RE = re.compile(
+    r'[\[\(]\s*((?:SLUS|SCUS|SLES|SCES|SLPS|SLPM|SCPS|SCPM|SLPN|SCAJ|SLAJ|'
+    r'PAPX|PBPX|SLED|SCED)[-_ ]?\d{3}[._]?\d{2})\s*[\]\)]',
+    re.IGNORECASE,
+)
+
+
+def tagged_psx_serial(name: str) -> str | None:
+    """PS1 product code tagged explicitly in a filename, or ``None``.
+
+    Hacks and fan editions match no DAT entry, and their SYSTEM.CNF often
+    boots a menu rather than a serial-named executable.  Tagging the file
+    (``Resident Evil 2 - Ultimate Edition [SLUS-00748].chd``) is how the
+    operator says which retail disc it stands in for; the tag wins over any
+    name lookup.
+    """
+    m = _PSX_TAGGED_SERIAL_RE.search(name or "")
+    if not m:
+        return None
+    return re.sub(r'[^A-Za-z0-9]', '', m.group(1)).upper()
+
+
+def strip_tagged_psx_serial(name: str) -> str:
+    """``name`` without its hand-tagged serial, for display."""
+    return re.sub(r'\s+', ' ', _PSX_TAGGED_SERIAL_RE.sub('', name or '')).strip()
+
+
 def lookup_psx_serial(name: str) -> str | None:
     """Return the PS1 product code for a game name or ROM filename, or None.
 
     Strips region/disc tags before matching, so both "Final Fantasy VII (USA)"
-    and "Final Fantasy VII [Disc1of3]" resolve to the same serial.
+    and "Final Fantasy VII [Disc1of3]" resolve to the same serial.  A serial
+    tagged in the name itself (``[SLUS-00748]``) is returned as-is.
     """
+    tagged = tagged_psx_serial(name)
+    if tagged:
+        return tagged
     slug = _psx_name_slug(name)
     candidates = _psx_serials_by_slug.get(slug)
     if not candidates:

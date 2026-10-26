@@ -8,7 +8,7 @@ from app.config import settings
 from app.services import share_token
 
 # Paths that never require an API key
-_OPEN_PATHS = {"/", "/docs", "/openapi.json", "/api/v1/status"}
+_OPEN_PATHS = {"/", "/favicon.png", "/docs", "/openapi.json", "/api/v1/status"}
 
 
 def trusted_remote_user(request: Request) -> str:

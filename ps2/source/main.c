@@ -8,17 +8,28 @@
  *        ata_bd                           — internal HDD as BDM mass storage
  *        usbd, usbhdfsd                   — USB mass storage (mass:/)
  *        ps2dev9, netman, smap            — network adapter / ATA bridge
- *   3. Initialise libdebug screen
+ *   3. Boot splash (gsKit) with a live log of every step
  *   4. Load config from mc0:/3DSSYNC/CONFIG.TXT
  *   5. Bring up networking via ps2ip (static IP by default, DHCP optional)
  *   6. Probe storage: APA/HDLoader hdd0: or mass:/ folder installs
  *   7. Run the menu loop (ROMs / Downloads / Config views)
  *
- * Phase 1 only: ROM browser + USB/APA HDD installer.  Save sync (MCP2)
- * is stubbed in the menu - the next phase wires it up.
+ * Views: ROM catalog / installed games / download queue / VMC images /
+ * memory card (SELECT: slot 1 / 2) / server saves (SELECT: sync source) /
+ * settings.  L1 / R1 cycle the views.
+ *
+ * Controls are the GameSync scheme shared by every client:
+ *   D-pad Up/Down     move one row          Left/Right  page up / down
+ *   L1 / R1           previous / next view  SELECT      cycle the sub-tab
+ *   CROSS             primary action (or the row's action menu)
+ *   CIRCLE            cancel / back; pauses a running download
+ *   SQUARE            secondary action (Sync all / Queue / Rescan)
+ *   TRIANGLE          details of the selected row
+ *   START             exit (asks first)
  */
 
 #include "common.h"
+#include "catcache.h"
 #include "config.h"
 #include "downloads.h"
 #include "hdl.h"
@@ -46,7 +57,6 @@
 #include <libpad.h>
 #include <libmc.h>
 #include <libhdd.h>
-#include <debug.h>
 #include <delaythread.h>
 #include <netman.h>
 #include <ps2ip.h>
@@ -88,14 +98,14 @@ static int load_irx(const unsigned char *blob, unsigned int size,
     int id = SifExecModuleBuffer((void *)blob, size, argc,
                                  (char *)argv, &ret);
     if (id < 0) {
-        scr_printf("  IRX %s failed (id=%d ret=%d)\n", label, id, ret);
+        ui_log("  IRX %s failed (id=%d ret=%d)\n", label, id, ret);
         return id;
     }
     if (ret != 0 && ret != 1) {
-        scr_printf("  IRX %s start error (id=%d ret=%d)\n", label, id, ret);
+        ui_log("  IRX %s start error (id=%d ret=%d)\n", label, id, ret);
         return -1;
     }
-    scr_printf("  IRX %s ok (id=%d)\n", label, id);
+    ui_log("  IRX %s ok (id=%d)\n", label, id);
     return 0;
 }
 
@@ -116,7 +126,7 @@ static void boot_iop_modules(void) {
     sbv_patch_enable_lmb();
     sbv_patch_disable_prefix_check();
 
-    scr_printf("Loading IOP modules...\n");
+    ui_log("Loading IOP modules...\n");
 
     /* iomanX + fileXio first. Storage modules are loaded after config
      * so storage=usb/hdd/auto can decide which bridges come up. */
@@ -129,13 +139,13 @@ static void boot_iop_modules(void) {
      * PS2 and use the original Sony RPC numbers libmc expects. */
     int ret;
     ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
-    scr_printf("  rom0:SIO2MAN -> %d\n", ret);
+    ui_log("  rom0:SIO2MAN -> %d\n", ret);
     ret = SifLoadModule("rom0:MCMAN",   0, NULL);
-    scr_printf("  rom0:MCMAN   -> %d\n", ret);
+    ui_log("  rom0:MCMAN   -> %d\n", ret);
     ret = SifLoadModule("rom0:MCSERV",  0, NULL);
-    scr_printf("  rom0:MCSERV  -> %d\n", ret);
+    ui_log("  rom0:MCSERV  -> %d\n", ret);
     ret = SifLoadModule("rom0:PADMAN",  0, NULL);
-    scr_printf("  rom0:PADMAN  -> %d\n", ret);
+    ui_log("  rom0:PADMAN  -> %d\n", ret);
 
     /* mmceman: MMCE protocol for MemCard Pro 2 / SD2PSX GameID switching.
      * Needs iomanX + fileXio (loaded above) and SIO2MAN (rom0, above). */
@@ -146,8 +156,8 @@ static void boot_device_modules(const SyncState *state) {
     bool want_usb = !state || state->storage_pref != STORAGE_PREF_HDD;
     bool want_hdd = !state || state->storage_pref != STORAGE_PREF_USB;
 
-    scr_printf("Loading device modules (storage=%s)...\n",
-               state ? config_storage_pref_to_str(state->storage_pref) : "auto");
+    ui_log("Loading device modules (storage=%s)...\n",
+           state ? config_storage_pref_to_str(state->storage_pref) : "auto");
 
     /* DEV9 backs both the PS2 fat network adapter and internal ATA HDD. */
     if (load_irx(ps2dev9_irx, ps2dev9_irx_size, "ps2dev9", 0, NULL) == 0) {
@@ -181,11 +191,11 @@ static void boot_device_modules(const SyncState *state) {
     int bdmfs_rc      = load_irx(bdmfs_fatfs_irx, bdmfs_fatfs_irx_size, "bdmfs_fatfs", 0, NULL);
 
     if (want_usb && (bdm_rc != 0 || usbmass_rc != 0 || bdmfs_rc != 0)) {
-        scr_printf("  bdm stack failed - falling back to usbhdfsd\n");
+        ui_log("  bdm stack failed - falling back to usbhdfsd\n");
         load_irx(usbhdfsd_irx, usbhdfsd_irx_size, "usbhdfsd", 0, NULL);
     }
     if (want_hdd && ata_rc != 0) {
-        scr_printf("  internal HDD BDM bridge unavailable (rc=%d)\n", ata_rc);
+        ui_log("  internal HDD BDM bridge unavailable (rc=%d)\n", ata_rc);
     }
 
     load_irx(netman_irx,      netman_irx_size,      "netman",      0, NULL);
@@ -195,7 +205,7 @@ static void boot_device_modules(const SyncState *state) {
      * call against an iomanX-registered device (mass:, hdd:, etc.)
      * silently fails — the RPC descriptor is uninitialised. */
     int fxr = fileXioInit();
-    scr_printf("  fileXioInit -> %d\n", fxr);
+    ui_log("  fileXioInit -> %d\n", fxr);
 }
 
 /* ---- mass:/ wait ---- */
@@ -244,7 +254,7 @@ static bool wait_for_mass(SyncState *state, int timeout_seconds) {
             int stat_errno = errno;
 
             if (stat_rc == 0) {
-                scr_printf("  storage: stat ok at %s\n", data_dir);
+                ui_log("  storage: stat ok at %s\n", data_dir);
                 strncpy(state->usb_root, roots[r], sizeof(state->usb_root) - 1);
                 state->usb_root[sizeof(state->usb_root) - 1] = '\0';
                 state->usb_ready = true;
@@ -256,7 +266,7 @@ static bool wait_for_mass(SyncState *state, int timeout_seconds) {
             int mkdir_rc = mkdir(data_dir, 0777);
             int mkdir_errno = errno;
             if (mkdir_rc == 0 || mkdir_errno == EEXIST) {
-                scr_printf("  storage: mkdir ok at %s\n", data_dir);
+                ui_log("  storage: mkdir ok at %s\n", data_dir);
                 strncpy(state->usb_root, roots[r], sizeof(state->usb_root) - 1);
                 state->usb_root[sizeof(state->usb_root) - 1] = '\0';
                 state->usb_ready = true;
@@ -266,7 +276,7 @@ static bool wait_for_mass(SyncState *state, int timeout_seconds) {
 
             errno = 0;
             if (stat(root_dir, &st) == 0) {
-                scr_printf("  storage: root stat ok at %s - using anyway\n", root_dir);
+                ui_log("  storage: root stat ok at %s - using anyway\n", root_dir);
                 mkdir(data_dir, 0777);
                 strncpy(state->usb_root, roots[r], sizeof(state->usb_root) - 1);
                 state->usb_root[sizeof(state->usb_root) - 1] = '\0';
@@ -281,9 +291,9 @@ static bool wait_for_mass(SyncState *state, int timeout_seconds) {
     }
 
     /* Show why we gave up — last errno from each candidate root. */
-    scr_printf("  storage: wait_for_mass timed out after %ds\n", timeout_seconds);
+    ui_log("  storage: wait_for_mass timed out after %ds\n", timeout_seconds);
     for (int r = 0; roots[r]; r++) {
-        scr_printf("    %-7s last errno=%d\n", roots[r], last_errno[r]);
+        ui_log("    %-7s last errno=%d\n", roots[r], last_errno[r]);
     }
     return false;
 }
@@ -317,6 +327,13 @@ static void pad_reinit(void) {
 }
 
 static unsigned int g_prev_btns = 0;
+static uint32_t     g_repeat_at = 0;
+
+/* Held D-pad directions repeat: first after REPEAT_DELAY_MS, then every
+ * REPEAT_RATE_MS. */
+#define REPEAT_MASK      (PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT)
+#define REPEAT_DELAY_MS  380
+#define REPEAT_RATE_MS   70
 
 static unsigned int pad_read_pressed(void) {
     /* Non-blocking: bail this frame if the pad isn't in a stable state.
@@ -332,8 +349,19 @@ static unsigned int pad_read_pressed(void) {
     unsigned int btns = 0xFFFF ^ g_pad_state.btns;
     unsigned int pressed = btns & ~g_prev_btns;
     g_prev_btns = btns;
+
+    uint32_t now = ui_ms();
+    unsigned int held_dir = btns & REPEAT_MASK;
+    if (pressed & REPEAT_MASK) {
+        g_repeat_at = now + REPEAT_DELAY_MS;
+    } else if (held_dir && (int32_t)(now - g_repeat_at) >= 0) {
+        pressed |= held_dir;
+        g_repeat_at = now + REPEAT_RATE_MS;
+    }
     return pressed;
 }
+
+static void draw_screen(void);
 
 /* Modal yes/no prompt for read/write/sync operations.  Blocks until the
  * user presses CROSS (confirm) or CIRCLE (cancel). */
@@ -344,16 +372,50 @@ static bool confirm(const char *fmt, ...) {
     vsnprintf(msg, sizeof(msg), fmt, ap);
     va_end(ap);
 
-    char body[320];
-    snprintf(body, sizeof(body), "%s\n\nCROSS = Confirm    CIRCLE = Cancel", msg);
-    ui_clear();
-    ui_draw_message("Confirm", body);
+    draw_screen();
+    ui_draw_confirm("Confirm", msg);
     ui_flush();
 
     for (;;) {
         unsigned int p = pad_read_pressed();
         if (p & PAD_CROSS)  return true;
         if (p & PAD_CIRCLE) return false;
+        DelayThread(16000);
+    }
+}
+
+/* Modal action menu.  Returns the chosen index, or -1 on CIRCLE. */
+static int choose(const char *title, const char *const *items, int count) {
+    int sel = 0;
+    for (;;) {
+        draw_screen();
+        ui_draw_menu(title, items, count, sel);
+        ui_flush();
+        unsigned int p;
+        while ((p = pad_read_pressed()) == 0) DelayThread(16000);
+        if (p & PAD_CIRCLE) return -1;
+        if (p & PAD_CROSS)  return sel;
+        if (p & PAD_UP)     sel = (sel + count - 1) % count;
+        if (p & PAD_DOWN)   sel = (sel + 1) % count;
+    }
+}
+
+/* Modal details card; any of CIRCLE / CROSS / TRIANGLE closes it. */
+static void show_info(const char *title, const char *fmt, ...)
+    __attribute__((format(printf, 2, 3)));
+static void show_info(const char *title, const char *fmt, ...) {
+    char msg[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    draw_screen();
+    ui_draw_info(title, msg);
+    ui_flush();
+    for (;;) {
+        unsigned int p = pad_read_pressed();
+        if (p & (PAD_CIRCLE | PAD_CROSS | PAD_TRIANGLE)) return;
         DelayThread(16000);
     }
 }
@@ -373,7 +435,9 @@ static DownloadList  g_downloads;
 static SaveVmcList   g_saves;
 static McGameList    g_mcard;       /* slot 1 (port 0) */
 static McGameList    g_mcard2;      /* slot 2 (port 1) */
+static int           g_mc_slot = 0; /* Memory Card view sub-tab: 0 slot 1, 1 slot 2 */
 static AppView       g_view = APP_VIEW_ROMS;
+static int           g_cfg_row = CFG_ROW_STORAGE;
 static int           g_rom_selected   = 0, g_rom_scroll   = 0;
 static int           g_local_selected = 0, g_local_scroll = 0;
 static int           g_dl_selected    = 0, g_dl_scroll    = 0;
@@ -386,7 +450,6 @@ static int           g_server_source = 0;   /* 0=VMC, 1=Slot1, 2=Slot2 */
 /* GameID device per slot lives in g_state.mmce_mode[] (persisted to config).
  * 0=off, 1=auto, 2=gen1, 3=gen2. */
 static const char   *g_mmce_mode_names[4] = {"off", "auto", "gen1", "gen2"};
-static bool          g_hdd_format_confirm = false;
 
 static char          g_scratch[256 * 1024];      /* JSON page buffer */
 
@@ -401,17 +464,17 @@ static bool require_storage_ready(void) {
 }
 
 static bool init_hdloader_targets(void) {
-    scr_printf("BOOT: probing APA/HDLoader hdd0:...\n");
+    ui_log("BOOT: probing APA/HDLoader hdd0:...\n");
     if (!ensure_hdd_format_modules()) return false;
 
     if (hddCheckPresent() != 0) {
-        scr_printf("BOOT: no internal HDD present\n");
+        ui_log("BOOT: no internal HDD present\n");
         return false;
     }
 
     if (hddCheckFormatted() != 0) {
-        scr_printf("BOOT: internal HDD is not APA-formatted\n");
-        ui_status("HDD needs APA format; Config TRIANGLE twice");
+        ui_log("BOOT: internal HDD is not APA-formatted\n");
+        ui_status("HDD needs APA format: Settings > Format internal HDD");
         return false;
     }
 
@@ -423,7 +486,7 @@ static bool init_hdloader_targets(void) {
     roms_set_storage_root("hdd0:");
     roms_set_downloads_file(HDL_DOWNLOADS_FILE);
     downloads_load(&g_downloads);
-    scr_printf("BOOT: APA/HDLoader storage ready at hdd0:\n");
+    ui_log("BOOT: APA/HDLoader storage ready at hdd0:\n");
     return true;
 }
 
@@ -432,27 +495,27 @@ static void init_storage_targets(void) {
     g_state.usb_ready = false;
     g_downloads.count = 0;
 
-    scr_printf("BOOT: probing storage (%s)...\n",
-               config_storage_pref_to_str(g_state.storage_pref));
+    ui_log("BOOT: probing storage (%s)...\n",
+           config_storage_pref_to_str(g_state.storage_pref));
 
     if (g_state.storage_pref != STORAGE_PREF_USB) {
         if (init_hdloader_targets()) return;
         if (g_state.storage_pref == STORAGE_PREF_HDD) {
-            scr_printf("WARN: APA/HDLoader storage unavailable\n");
-            ui_status("HDD not ready; format APA from Config");
+            ui_log("WARN: APA/HDLoader storage unavailable\n");
+            ui_status("HDD not ready; format APA from Settings");
             return;
         }
     }
 
     if (g_state.storage_pref != STORAGE_PREF_HDD) {
         if (!wait_for_mass(&g_state, 12)) {
-            scr_printf("WARN: no storage root mounted\n");
+            ui_log("WARN: no storage root mounted\n");
             ui_status("Storage not ready; downloads disabled");
             return;
         }
 
         g_state.storage_backend = STORAGE_BACKEND_MASS;
-        scr_printf("BOOT: mass storage ready at %s\n", g_state.usb_root);
+        ui_log("BOOT: mass storage ready at %s\n", g_state.usb_root);
         roms_ensure_target_dirs();
         downloads_load(&g_downloads);
     }
@@ -506,7 +569,7 @@ static bool ensure_hdd_format_modules(void) {
 
     (void)hddPreparePoweroff();
     rc = fileXioInit();
-    scr_printf("  fileXioInit (hdd formatter) -> %d\n", rc);
+    ui_log("  fileXioInit (hdd formatter) -> %d\n", rc);
     return true;
 }
 
@@ -574,8 +637,16 @@ static volatile uint64_t g_active_done  = 0;
 static volatile uint64_t g_active_total = 0;
 static volatile uint64_t g_active_bps   = 0;
 static volatile bool     g_pause_requested = false;
+static bool              g_transfer_active = false;
+static char              g_active_name[160];
+static uint32_t          g_active_start_ms = 0;
+static uint32_t          g_last_draw_ms = 0;
 static time_t            g_last_speed_t = 0;
 static uint64_t          g_last_speed_bytes = 0;
+
+/* Progress redraws are capped at 4 per second and skip the vblank wait,
+ * so the HTTP receive loop never stalls on the display. */
+#define PROGRESS_REDRAW_MS 250
 
 static int progress_cb(uint64_t done, uint64_t total) {
     g_active_done  = done;
@@ -586,12 +657,19 @@ static int progress_cb(uint64_t done, uint64_t total) {
         g_active_bps = done > g_last_speed_bytes
                      ? (done - g_last_speed_bytes) / (uint64_t)(now - g_last_speed_t + 1)
                      : 0;
-        /* Refresh the screen at most once per wall-clock second so the
-         * progress bar / KB/s line update without flooding libdebug
-         * with full-frame char DMA. */
-        redraw();
         g_last_speed_t     = now;
         g_last_speed_bytes = done;
+    }
+
+    uint32_t ms = ui_ms();
+    if (ms - g_last_draw_ms >= PROGRESS_REDRAW_MS) {
+        g_last_draw_ms = ms;
+        /* CIRCLE held at a refresh pauses (USB downloads resume later;
+         * HDLoader installs restart from zero). */
+        unsigned int p = pad_read_pressed();
+        if ((p | g_prev_btns) & PAD_CIRCLE) g_pause_requested = true;
+        draw_screen();
+        ui_flush_nowait();
     }
 
     return g_pause_requested ? 1 : 0;
@@ -637,18 +715,191 @@ static void clamp_scroll(int *selected, int *scroll, int count) {
     if (*scroll < 0) *scroll = 0;
 }
 
-static void fetch_catalog(void) {
+/* ---- Catalog (fingerprint-cached, see catcache.h) ----
+ *
+ * Where the cache lives:
+ *   mass storage (USB / BDM HDD)  <root>/3dssync/catalog.dat — next to the
+ *                                 download queue, no size limit
+ *   otherwise (APA/HDLoader, or no storage)
+ *                                 mc0:/3DSSYNC/CATALOG.DAT, but only while
+ *                                 it is <= CATCACHE_MC_MAX_BYTES; a bigger
+ *                                 catalog lives in RAM for the session.
+ * The PS2 client has no catalog search or RetroAchievements filter, so
+ * there is no server-side query to preserve: the rows are cached whole. */
+
+#define CATALOG_SYSTEM "PS2"
+
+static char g_cache_path[96];   /* shown in Settings; stdio path when !on_mc */
+static bool g_cache_on_mc;
+
+static void resolve_cache_path(void) {
+    if (g_state.storage_backend == STORAGE_BACKEND_MASS && g_state.usb_ready) {
+        snprintf(g_cache_path, sizeof(g_cache_path), "%s%s%s",
+                 g_state.usb_root, STORAGE_DATA_SUBDIR, CATALOG_CACHE_LEAF);
+        g_cache_on_mc = false;
+    } else {
+        snprintf(g_cache_path, sizeof(g_cache_path), "%s", CATALOG_CACHE_MC);
+        g_cache_on_mc = true;
+    }
+    ui_set_catalog_info(NULL, g_cache_path);
+}
+
+/* The three cache operations, on mass storage (stdio) or the memory card
+ * (libmc via config.c, staged in g_scratch — free outside a fetch). */
+static bool cache_read(char *fp, size_t fp_size) {
+    if (!g_cache_on_mc)
+        return catcache_load(g_cache_path, CATALOG_SYSTEM, fp, fp_size, &g_catalog);
+    int n = config_mc_read_file(CATALOG_CACHE_MC_REL, g_scratch, sizeof(g_scratch));
+    if (n <= 0) { g_catalog.count = 0; return false; }
+    return catcache_decode(g_scratch, (size_t)n, CATALOG_SYSTEM, fp, fp_size, &g_catalog);
+}
+
+static void cache_remove(void) {
+    if (g_cache_on_mc) config_mc_delete_file(CATALOG_CACHE_MC_REL);
+    else               catcache_remove(g_cache_path);
+}
+
+/* Keep `fingerprint`'s rows (already in g_catalog) for the next start. */
+static void store_catalog_cache(const char *fingerprint) {
+    bool ok;
+    if (g_cache_on_mc) {
+        size_t need = catcache_encoded_size(CATALOG_SYSTEM, fingerprint, &g_catalog);
+        if (need > CATCACHE_MC_MAX_BYTES || need > sizeof(g_scratch)) {
+            /* Too big for an 8 MB memory card: RAM for this session only. */
+            cache_remove();
+            ui_set_catalog_info(NULL, "RAM only (too big for mc0:)");
+            return;
+        }
+        size_t n = catcache_encode(g_scratch, sizeof(g_scratch), CATALOG_SYSTEM,
+                                   fingerprint, &g_catalog);
+        ok = n > 0 && config_mc_write_file(CATALOG_CACHE_MC_REL, g_scratch, n);
+    } else {
+        ok = catcache_save(g_cache_path, CATALOG_SYSTEM, fingerprint, &g_catalog);
+    }
+    ui_set_catalog_info(NULL, ok ? g_cache_path : "RAM only (write failed)");
+}
+
+/* Server unreachable: keep this session's rows, else the cached copy. */
+static void use_cached_catalog(const char *why) {
+    char fp[80];
+    if (g_catalog.count > 0) {
+        ui_set_catalog_info("Offline", NULL);
+        ui_status("%s - catalog from this session", why);
+        return;
+    }
+    if (cache_read(fp, sizeof(fp))) {
+        ui_set_catalog_info("Offline", NULL);
+        ui_status("%s - cached catalog (%d games)", why, g_catalog.count);
+        return;
+    }
+    snprintf(g_catalog.last_error, sizeof(g_catalog.last_error), "%s", why);
+    ui_error("%s", why);
+}
+
+static bool fetch_catalog_rows(void) {
     ui_status("Fetching PS2 catalog...");
     redraw();   /* show "Fetching..." before HTTP blocks the loop */
-    bool ok = roms_fetch_catalog(&g_state, "PS2",
-                                 g_scratch, sizeof(g_scratch),
-                                 &g_catalog);
-    if (!ok) {
-        ui_error("%s", g_catalog.last_error);
-    } else {
-        ui_status("Catalog: %d entries", g_catalog.count);
+    return roms_fetch_catalog(&g_state, CATALOG_SYSTEM,
+                              g_scratch, sizeof(g_scratch), &g_catalog);
+}
+
+/* Load the catalog: cached copy when its fingerprint still matches the
+ * server's, otherwise a fresh fetch.  force = Settings > Refresh catalog:
+ * ask the server to rescan, drop the cache, refetch everything. */
+static void load_catalog(bool force) {
+    char rescan_note[48] = "";
+    ui_set_catalog_info("", NULL);
+
+    if (force) {
+        if (!network_is_ready(&g_state)) {
+            ui_error("Network not ready - catalog not refreshed");
+            redraw();
+            return;
+        }
+        ui_status("Asking the server to rescan its ROMs...");
+        redraw();
+        int st = 0;
+        int n = network_get(&g_state, "/api/v1/roms/scan", g_scratch, sizeof(g_scratch), &st);
+        if (st == 403 || st == 404 || st == 405)
+            snprintf(rescan_note, sizeof(rescan_note), "; server rescan not allowed");
+        else if (n < 0 || st != 200)
+            snprintf(rescan_note, sizeof(rescan_note), "; server rescan failed (%d)", st);
+        cache_remove();
+        g_catalog.count = 0;
     }
-    redraw();   /* show result */
+
+    if (!network_is_ready(&g_state)) {
+        char why[64];
+        snprintf(why, sizeof(why), "Network not ready (ip=%s)", g_state.ip);
+        use_cached_catalog(why);
+        redraw();
+        return;
+    }
+
+    ui_status("Checking the catalog...");
+    redraw();
+    char fingerprint[80] = "";
+    int st = 0;
+    int n = network_get(&g_state, "/api/v1/roms/fingerprints", g_scratch, sizeof(g_scratch), &st);
+    int found = -1;
+    if (n >= 0 && st == 200)
+        found = catcache_parse_fingerprint(g_scratch, (size_t)n, CATALOG_SYSTEM,
+                                           fingerprint, sizeof(fingerprint), NULL);
+
+    if (n < 0 || st == 0) {
+        use_cached_catalog("Server unreachable");
+        redraw();
+        return;
+    }
+
+    if (st == 404 || st == 405 || (st == 200 && found < 0)) {
+        /* Server predates /roms/fingerprints: fetch whole, cache nothing. */
+        if (fetch_catalog_rows())
+            ui_status("Catalog: %d games%s", g_catalog.count, rescan_note);
+        else
+            ui_error("%s", g_catalog.last_error);
+        redraw();
+        return;
+    }
+
+    if (st != 200) {
+        char why[64];
+        snprintf(why, sizeof(why), "Catalog check failed (HTTP %d)", st);
+        use_cached_catalog(why);
+        redraw();
+        return;
+    }
+
+    if (found == 0) {
+        /* The server lists no PS2 games at all. */
+        cache_remove();
+        g_catalog.count = 0;
+        snprintf(g_catalog.last_error, sizeof(g_catalog.last_error),
+                 "No PS2 games on the server");
+        ui_status("Catalog: no PS2 games on the server%s", rescan_note);
+        redraw();
+        return;
+    }
+
+    char cached_fp[80];
+    if (!force &&
+        cache_read(cached_fp, sizeof(cached_fp)) &&
+        strcmp(cached_fp, fingerprint) == 0) {
+        ui_status("Catalog: %d games (unchanged)", g_catalog.count);
+        redraw();
+        return;
+    }
+
+    if (fetch_catalog_rows()) {
+        store_catalog_cache(fingerprint);
+        ui_status("Catalog: %d games (%s)%s", g_catalog.count,
+                  force ? "refreshed" : "updated", rescan_note);
+    } else {
+        char why[128];
+        snprintf(why, sizeof(why), "%s", g_catalog.last_error);
+        use_cached_catalog(why);
+    }
+    redraw();
 }
 
 static void scan_local(void) {
@@ -698,8 +949,6 @@ static void upload_selected_save(void) {
     if (g_saves.count == 0 || g_saves_selected >= g_saves.count) return;
 
     const SaveVmc *v = &g_saves.items[g_saves_selected];
-    if (!confirm("Upload card image\n%s\nto server (split per game)?", v->filename))
-        return;
     ui_status("Uploading %s...", v->filename);
     redraw();
 
@@ -778,9 +1027,6 @@ static void upload_mc_game_at(McGameList *list, int sel) {
     if (list->count == 0 || sel >= list->count) return;
 
     const McGame *g = &list->items[sel];
-    if (!confirm("Upload %s\nfrom Slot%d to server?",
-                 g->serial[0] ? g->serial : g->dir, list->port + 1))
-        return;
     ui_status("Uploading %s...", g->serial[0] ? g->serial : g->dir);
     redraw();
 
@@ -844,7 +1090,7 @@ static void fetch_server_saves(void) {
 /* ---- Server view sync source (VMC / Slot1 / Slot2) ---- */
 
 static const char *source_name(void) {
-    return g_server_source == 1 ? "Slot1" : g_server_source == 2 ? "Slot2" : "VMC";
+    return g_server_source == 1 ? "Slot 1" : g_server_source == 2 ? "Slot 2" : "VMC";
 }
 
 /* Memory-card port for the current source, or -1 for VMC. */
@@ -903,7 +1149,6 @@ static void server_upload_from_source(void) {
         return;
     }
 
-    if (!confirm("Upload %s from %s\nto server?", serial, source_name())) return;
     ui_status("Reading %s on %s...", serial, source_name());
     redraw();
 
@@ -913,7 +1158,7 @@ static void server_upload_from_source(void) {
     for (int i = 0; i < list->count; i++)
         if (strcmp(list->items[i].serial, serial) == 0) { idx = i; break; }
     if (idx < 0) {
-        ui_error("%s not on %s (R1 switches channel)", serial, source_name());
+        ui_error("%s not on %s (Cross > Switch MemCard Pro first)", serial, source_name());
         return;
     }
     char msg[128];
@@ -923,21 +1168,18 @@ static void server_upload_from_source(void) {
     redraw();
 }
 
-/* L1: sync every save of the current source with the server. */
-static void server_sync_all(void) {
+/* Upload every save on the card in `port` to the server. */
+static void upload_card_all(int port) {
     if (!network_is_ready(&g_state)) { ui_error("Network not ready"); return; }
-    int port = source_port();
+    port = port == 1 ? 1 : 0;
+    char name[8];
+    snprintf(name, sizeof(name), "Slot %d", port + 1);
 
-    if (port < 0) {                 /* VMC: pull all server saves into VMC/ */
-        pull_all_saves();
-        return;
-    }
-
-    if (!confirm("Upload ALL saves on %s\nto the server?", source_name())) return;
-    ui_status("Scanning %s...", source_name());
+    if (!confirm("Upload ALL saves on %s\nto the server?", name)) return;
+    ui_status("Scanning %s...", name);
     redraw();
 
-    McGameList *list = source_list();
+    McGameList *list = port == 1 ? &g_mcard2 : &g_mcard;
     saves_scan_mcard(port, list);
 
     int ok = 0, fail = 0;
@@ -958,31 +1200,37 @@ static void server_sync_all(void) {
     mark_server_local();
     fill_mc_names(&g_mcard);
     fill_mc_names(&g_mcard2);
-    ui_status("%s sync: %d uploaded, %d failed", source_name(), ok, fail);
+    ui_status("%s sync: %d uploaded, %d failed", name, ok, fail);
     redraw();
+}
+
+/* SQUARE on the Server view: sync every save of the current source. */
+static void server_sync_all(void) {
+    if (!network_is_ready(&g_state)) { ui_error("Network not ready"); return; }
+    int port = source_port();
+    if (port < 0) pull_all_saves();     /* VMC: pull all server saves into VMC/ */
+    else          upload_card_all(port);
 }
 
 static void cycle_server_source(void) {
     g_server_source = (g_server_source + 1) % 3;
-    ui_set_server_source(source_name());
+    ui_set_server_source(g_server_source);
     ui_status("Sync source: %s", source_name());
-    redraw();
 }
 
-static void cycle_mmce_mode(int port) {
+static void cycle_mmce_mode(int port, int delta) {
     port = port == 1 ? 1 : 0;
-    g_state.mmce_mode[port] = (g_state.mmce_mode[port] + 1) % 4;
+    g_state.mmce_mode[port] = (g_state.mmce_mode[port] + 4 + delta) % 4;
     ui_set_mmce(port, g_state.mmce_mode[port]);
     config_save(&g_state);   /* persist the per-slot choice */
-    ui_status("Slot%d GameID: %s (saved)", port + 1,
+    ui_status("Slot %d GameID: %s (saved)", port + 1,
               g_mmce_mode_names[g_state.mmce_mode[port]]);
-    redraw();
 }
 
 static void mcp_switch_gameid(const char *serial, int port) {
     port = port == 1 ? 1 : 0;
     if (g_state.mmce_mode[port] == 0) {
-        ui_error("Slot%d GameID off - SELECT to set device", port + 1);
+        ui_error("Slot %d GameID is off - set the device in Settings", port + 1);
         redraw();
         return;
     }
@@ -994,8 +1242,8 @@ static void mcp_switch_gameid(const char *serial, int port) {
 
     /* Do NOT auto-rescan here: right after a channel switch the MemCard Pro is
      * still mounting the new VMC, and probing it mid-mount intermittently hangs
-     * libmc (gen1 freeze).  Tell the user to rescan ([]) once it has switched. */
-    ui_status("[%s] %s - press [] to rescan", g_mmce_mode_names[mode], msg);
+     * libmc (gen1 freeze).  Tell the user to rescan once it has switched. */
+    ui_status("[%s] %s - rescan from the Cross menu", g_mmce_mode_names[mode], msg);
     redraw();
 }
 
@@ -1010,9 +1258,15 @@ static void run_active_download(DownloadEntry *e) {
 
     g_active_done       = e->offset;
     g_active_total      = e->total;
+    g_active_bps        = 0;
     g_pause_requested   = false;
     g_last_speed_t      = time(NULL);
     g_last_speed_bytes  = e->offset;
+    g_active_start_ms   = ui_ms();
+    g_last_draw_ms      = 0;
+    snprintf(g_active_name, sizeof(g_active_name), "%s",
+             e->name[0] ? e->name : e->filename);
+    g_transfer_active   = true;
 
     network_set_progress64_cb(progress_cb);
 
@@ -1056,6 +1310,7 @@ static void run_active_download(DownloadEntry *e) {
                                             &total);
     }
     network_set_progress64_cb(NULL);
+    g_transfer_active = false;
     if (total > 0) e->total = total;
 
     if (rc == 0) {
@@ -1084,13 +1339,11 @@ static void run_active_download(DownloadEntry *e) {
 /* ---- Main loop ---- */
 
 static void cycle_view(int delta) {
-    g_hdd_format_confirm = false;
     int n = (int)APP_VIEW_COUNT;
     g_view = (AppView)((((int)g_view + delta) % n + n) % n);
 }
 
 static void cycle_storage_pref(int delta) {
-    g_hdd_format_confirm = false;
     int next = (int)g_state.storage_pref + delta;
     if (next < (int)STORAGE_PREF_AUTO) next = (int)STORAGE_PREF_HDD;
     if (next > (int)STORAGE_PREF_HDD) next = (int)STORAGE_PREF_AUTO;
@@ -1104,8 +1357,310 @@ static void cycle_storage_pref(int delta) {
     }
 }
 
-static void redraw(void) {
-    ui_clear();
+static void fmt_size(uint64_t bytes, char *out, size_t out_size) {
+    if (bytes >= 1024ULL * 1024ULL * 1024ULL)
+        snprintf(out, out_size, "%llu.%llu GB",
+                 (unsigned long long)(bytes >> 30),
+                 (unsigned long long)(((bytes * 10) >> 30) % 10));
+    else if (bytes >= 1024ULL * 1024ULL)
+        snprintf(out, out_size, "%llu MB", (unsigned long long)(bytes >> 20));
+    else
+        snprintf(out, out_size, "%llu KB", (unsigned long long)((bytes + 1023) >> 10));
+}
+
+/* D-pad: Up/Down one row, Left/Right one page.  Returns true if handled. */
+static bool move_selection(unsigned int pressed, int *selected) {
+    if      (pressed & PAD_UP)    (*selected)--;
+    else if (pressed & PAD_DOWN)  (*selected)++;
+    else if (pressed & PAD_LEFT)  *selected -= ui_list_visible();
+    else if (pressed & PAD_RIGHT) *selected += ui_list_visible();
+    else return false;
+    return true;
+}
+
+/* -- Catalog -- */
+
+static void handle_roms(unsigned int pressed) {
+    int count = g_catalog.count;
+    if (move_selection(pressed, &g_rom_selected)) {
+        /* moved */
+    } else if (count > 0 && g_rom_selected < count) {
+        const RomEntry *rom = &g_catalog.items[g_rom_selected];
+        if (pressed & PAD_CROSS) {
+            /* Install now. */
+            if (require_storage_ready()) {
+                DownloadEntry *e = queue_catalog_entry(rom);
+                if (e) run_active_download(e);
+                else   ui_error("Download list full");
+            }
+        } else if (pressed & PAD_SQUARE) {
+            /* Add to the queue. */
+            if (require_storage_ready()) {
+                DownloadEntry *e = queue_catalog_entry(rom);
+                if (e) {
+                    downloads_save(&g_downloads);
+                    ui_status("Queued: %s", e->name);
+                } else {
+                    ui_error("Download list full");
+                }
+            }
+        } else if (pressed & PAD_TRIANGLE) {
+            char size[24], target[260];
+            fmt_size(rom->size, size, sizeof(size));
+            if (g_state.storage_backend == STORAGE_BACKEND_HDLOADER)
+                hdl_resolve_target_path_from_rom(rom, target, sizeof(target));
+            else if (!roms_resolve_target_path(rom, target, sizeof(target)))
+                snprintf(target, sizeof(target), "-");
+            show_info("Game details",
+                      "%s\nSerial: %s\nFile: %s\nSize: %s (%s)\nFormat: %s\nInstalls to: %s",
+                      rom->name[0] ? rom->name : rom->filename,
+                      rom->serial[0] ? rom->serial : "unknown", rom->filename, size,
+                      rom->is_cd ? "CD" : "DVD",
+                      rom->extract_format[0] ? rom->extract_format : "iso", target);
+        }
+    }
+    clamp_scroll(&g_rom_selected, &g_rom_scroll, g_catalog.count);
+}
+
+/* -- Installed games -- */
+
+static void handle_local(unsigned int pressed) {
+    int count = g_local.count;
+    if (move_selection(pressed, &g_local_selected)) {
+        /* moved */
+    } else if (pressed & PAD_SQUARE) {
+        scan_local();
+    } else if (count > 0 && g_local_selected < count) {
+        const LocalRom *r = &g_local.items[g_local_selected];
+        if (pressed & PAD_CROSS) {
+            if (confirm("Delete %s\nfrom this console?", r->name[0] ? r->name : r->filename)) {
+                int del_rc = (g_state.storage_backend == STORAGE_BACKEND_HDLOADER)
+                           ? hdl_remove_partition(r->path)
+                           : unlink(r->path);
+                if (del_rc == 0) {
+                    ui_status("Deleted: %s", r->filename);
+                    scan_local();
+                } else {
+                    ui_error("Delete failed: %s", r->filename);
+                }
+            }
+        } else if (pressed & PAD_TRIANGLE) {
+            char size[24];
+            fmt_size(r->size, size, sizeof(size));
+            show_info("Installed game", "%s\nSerial: %s\nSize: %s (%s)\nLocation: %s",
+                      r->name[0] ? r->name : r->filename, r->serial, size,
+                      r->is_cd ? "CD" : "DVD", r->path);
+        }
+    }
+    clamp_scroll(&g_local_selected, &g_local_scroll, g_local.count);
+}
+
+/* -- Downloads -- */
+
+static void handle_downloads(unsigned int pressed) {
+    int count = g_downloads.count;
+    if (move_selection(pressed, &g_dl_selected)) {
+        /* moved */
+    } else if (count > 0 && g_dl_selected < count) {
+        DownloadEntry *e = &g_downloads.items[g_dl_selected];
+        if (pressed & PAD_CROSS) {
+            run_active_download(e);
+        } else if (pressed & PAD_SQUARE) {
+            if (require_storage_ready()) {
+                downloads_remove(&g_downloads, e->rom_id);
+                downloads_save(&g_downloads);
+            }
+        } else if (pressed & PAD_TRIANGLE) {
+            char done[24], total[24];
+            fmt_size(e->offset, done, sizeof(done));
+            fmt_size(e->total, total, sizeof(total));
+            show_info("Download", "%s\nSerial: %s\nProgress: %s / %s\nTarget: %s",
+                      e->name[0] ? e->name : e->filename, e->serial, done, total,
+                      e->target_path);
+        }
+    }
+    clamp_scroll(&g_dl_selected, &g_dl_scroll, g_downloads.count);
+}
+
+/* -- Virtual memory cards -- */
+
+static void handle_saves(unsigned int pressed) {
+    int count = g_saves.count;
+    bool have = count > 0 && g_saves_selected < count;
+    if (move_selection(pressed, &g_saves_selected)) {
+        /* moved */
+    } else if (pressed & PAD_CROSS) {
+        static const char *const with_card[] = { "Upload card to server", "Rescan VMC folder" };
+        static const char *const no_card[]   = { "Rescan VMC folder" };
+        int pick = have ? choose(g_saves.items[g_saves_selected].filename, with_card, 2)
+                        : choose("Card images", no_card, 1);
+        if (!have && pick == 0) pick = 1;
+        if (pick == 0)      upload_selected_save();
+        else if (pick == 1) scan_saves();
+    } else if (pressed & PAD_SQUARE) {
+        pull_all_saves();
+    } else if ((pressed & PAD_TRIANGLE) && have) {
+        const SaveVmc *v = &g_saves.items[g_saves_selected];
+        char size[24];
+        fmt_size(v->size, size, sizeof(size));
+        show_info("Card image", "%s\nFile: %s\nSerial: %s\nFormat: %s\nSize: %s",
+                  v->name[0] ? v->name : v->filename, v->filename,
+                  v->serial[0] ? v->serial : "unknown",
+                  v->is_ps1 ? "PS1 card" : (v->has_ecc ? "PS2 card (ECC)" : "PS2 card"), size);
+    }
+    clamp_scroll(&g_saves_selected, &g_saves_scroll, g_saves.count);
+}
+
+/* -- Physical memory card (SELECT: slot 1 / slot 2) -- */
+
+static void handle_mcard(unsigned int pressed) {
+    int port = g_mc_slot;
+    McGameList *list = port == 1 ? &g_mcard2 : &g_mcard;
+    int *sel    = port == 1 ? &g_mcard2_selected : &g_mcard_selected;
+    int *scroll = port == 1 ? &g_mcard2_scroll : &g_mcard_scroll;
+    bool have = list->count > 0 && *sel < list->count;
+
+    if (move_selection(pressed, sel)) {
+        /* moved */
+    } else if (pressed & PAD_SELECT) {
+        g_mc_slot ^= 1;
+        return;
+    } else if (pressed & PAD_CROSS) {
+        static const char *const with_save[] = {
+            "Upload to server", "Restore from server",
+            "Switch MemCard Pro to this game", "Rescan card",
+        };
+        static const char *const no_save[] = { "Rescan card" };
+        char title[48];
+        snprintf(title, sizeof(title), "Slot %d", port + 1);
+        int pick;
+        if (have) {
+            const McGame *g = &list->items[*sel];
+            snprintf(title, sizeof(title), "Slot %d: %s", port + 1,
+                     g->serial[0] ? g->serial : g->dir);
+            pick = choose(title, with_save, 4);
+        } else {
+            pick = choose(title, no_save, 1) == 0 ? 3 : -1;
+        }
+        switch (pick) {
+            case 0: upload_mc_game_at(list, *sel); break;
+            case 1: restore_mc_game_at(list, *sel); break;
+            case 2: mcp_switch_gameid(list->items[*sel].serial, port); break;
+            case 3: scan_mcard_list(port, list); break;
+            default: break;
+        }
+    } else if (pressed & PAD_SQUARE) {
+        upload_card_all(port);
+    } else if ((pressed & PAD_TRIANGLE) && have) {
+        const McGame *g = &list->items[*sel];
+        char size[24];
+        fmt_size(g->total_size, size, sizeof(size));
+        show_info("Memory card save", "%s\nSlot %d (%s card)\nSerial: %s\nFolder: %s\n"
+                  "Files: %d, %s\nGameID device: %s",
+                  g->name[0] ? g->name : (g->serial[0] ? g->serial : g->dir), port + 1,
+                  list->is_ps1 ? "PS1" : "PS2", g->serial[0] ? g->serial : "unknown",
+                  g->dir, g->file_count, size, g_mmce_mode_names[g_state.mmce_mode[port] & 3]);
+    }
+    clamp_scroll(sel, scroll, list->count);
+}
+
+/* -- Server saves (SELECT: sync source VMC / slot 1 / slot 2) -- */
+
+static void handle_server(unsigned int pressed) {
+    bool have = g_server.count > 0 && g_server_selected < g_server.count;
+    if (move_selection(pressed, &g_server_selected)) {
+        /* moved */
+    } else if (pressed & PAD_SELECT) {
+        cycle_server_source();
+    } else if (pressed & PAD_CROSS) {
+        int port = source_port();
+        int gid_port = port < 0 ? 0 : port;
+        char download[40], upload[40], sw[48];
+        snprintf(download, sizeof(download), "Download to %s", source_name());
+        snprintf(upload, sizeof(upload), "Upload from %s", source_name());
+        snprintf(sw, sizeof(sw), "Switch MemCard Pro (slot %d) to it", gid_port + 1);
+
+        const char *items[4];
+        int actions[4], n = 0;
+        enum { ACT_DOWNLOAD, ACT_UPLOAD, ACT_SWITCH, ACT_REFRESH };
+        if (have) {
+            items[n] = download; actions[n++] = ACT_DOWNLOAD;
+            if (port >= 0) { items[n] = upload; actions[n++] = ACT_UPLOAD; }
+            items[n] = sw; actions[n++] = ACT_SWITCH;
+        }
+        items[n] = "Refresh server list"; actions[n++] = ACT_REFRESH;
+
+        const char *title = have ? (g_server.items[g_server_selected].name[0]
+                                        ? g_server.items[g_server_selected].name
+                                        : g_server.items[g_server_selected].serial)
+                                 : "Server saves";
+        int pick = choose(title, items, n);
+        if (pick >= 0) {
+            switch (actions[pick]) {
+                case ACT_DOWNLOAD: server_download_to_source(); break;
+                case ACT_UPLOAD:   server_upload_from_source(); break;
+                case ACT_SWITCH:
+                    mcp_switch_gameid(g_server.items[g_server_selected].serial, gid_port);
+                    break;
+                case ACT_REFRESH:  fetch_server_saves(); break;
+                default: break;
+            }
+        }
+    } else if (pressed & PAD_SQUARE) {
+        server_sync_all();
+    } else if ((pressed & PAD_TRIANGLE) && have) {
+        const ServerSave *sv = &g_server.items[g_server_selected];
+        char when[32] = "-";
+        if (sv->timestamp) {
+            time_t t = (time_t)sv->timestamp;
+            struct tm *tm = gmtime(&t);
+            if (tm) strftime(when, sizeof(when), "%Y-%m-%d %H:%M", tm);
+        }
+        show_info("Server save", "%s\nSerial: %s (%s)\nSaved: %s\n%s\nSync source: %s",
+                  sv->name[0] ? sv->name : sv->serial, sv->serial, sv->is_ps1 ? "PS1" : "PS2",
+                  when, sv->local ? "Also on a memory card" : "Only on the server",
+                  source_name());
+    }
+    clamp_scroll(&g_server_selected, &g_server_scroll, g_server.count);
+}
+
+/* -- Settings -- */
+
+static void config_change(int delta) {
+    switch (g_cfg_row) {
+        case CFG_ROW_STORAGE: cycle_storage_pref(delta); break;
+        case CFG_ROW_GAMEID1: cycle_mmce_mode(0, delta); break;
+        case CFG_ROW_GAMEID2: cycle_mmce_mode(1, delta); break;
+        default: break;
+    }
+}
+
+static void handle_config(unsigned int pressed) {
+    if (pressed & PAD_UP) {
+        if (g_cfg_row > 0) g_cfg_row--;
+    } else if (pressed & PAD_DOWN) {
+        if (g_cfg_row < CFG_ROW_COUNT - 1) g_cfg_row++;
+    } else if (pressed & PAD_LEFT) {
+        config_change(-1);
+    } else if (pressed & PAD_RIGHT) {
+        config_change(+1);
+    } else if (pressed & PAD_CROSS) {
+        if (g_cfg_row == CFG_ROW_REFRESH) {
+            load_catalog(true);
+        } else if (g_cfg_row == CFG_ROW_FORMAT) {
+            if (confirm("Format the internal HDD as PS2 APA for OPL?") &&
+                confirm("This ERASES EVERYTHING on the internal HDD.\nReally format it?"))
+                format_internal_hdd();
+        } else {
+            config_change(+1);
+        }
+    }
+}
+
+/* Build the current view into the frame without presenting it, so modal
+ * cards (confirm, menu, details, transfer) can be layered on top. */
+static void draw_screen(void) {
+    ui_begin();
     ui_draw_header(&g_state, g_view);
     switch (g_view) {
         case APP_VIEW_ROMS:
@@ -1115,263 +1670,138 @@ static void redraw(void) {
             ui_draw_local(&g_local, g_local_selected, g_local_scroll);
             break;
         case APP_VIEW_DOWNLOADS:
-            ui_draw_downloads(&g_downloads, g_dl_selected, g_dl_scroll,
-                              g_active_done, g_active_total, g_active_bps);
+            ui_draw_downloads(&g_downloads, g_dl_selected, g_dl_scroll);
             break;
         case APP_VIEW_SAVES:
             ui_draw_saves(&g_saves, g_saves_selected, g_saves_scroll);
             break;
         case APP_VIEW_MCARD:
-            ui_draw_mcard(&g_mcard, g_mcard_selected, g_mcard_scroll);
-            break;
-        case APP_VIEW_MCARD2:
-            ui_draw_mcard(&g_mcard2, g_mcard2_selected, g_mcard2_scroll);
+            if (g_mc_slot == 1)
+                ui_draw_mcard(&g_mcard2, g_mcard2_selected, g_mcard2_scroll);
+            else
+                ui_draw_mcard(&g_mcard, g_mcard_selected, g_mcard_scroll);
             break;
         case APP_VIEW_SERVER:
             ui_draw_server(&g_server, g_server_selected, g_server_scroll);
             break;
         case APP_VIEW_CONFIG:
-            ui_draw_config(&g_state);
+            ui_draw_config(&g_state, g_cfg_row);
             break;
         default: break;
     }
+    if (g_transfer_active) {
+        char target[48];
+        if (g_state.storage_backend == STORAGE_BACKEND_HDLOADER)
+            snprintf(target, sizeof(target), "the internal HDD (HDLoader)");
+        else
+            snprintf(target, sizeof(target), "USB / HDD storage (%s)", g_state.usb_root);
+        ui_draw_transfer(g_active_name, target,
+                         g_active_done, g_active_total, g_active_bps,
+                         ui_ms() - g_active_start_ms);
+    }
+}
+
+static void redraw(void) {
+    draw_screen();
+    ui_flush();
 }
 
 int main(int argc, char *argv[]) {
     (void)argc; (void)argv;
 
-    /* Phase 1: bring up the libdebug scrolling console so every boot
-     * step (IRX load, mc init, network bring-up) leaves a visible
-     * line.  gsKit isn't initialised yet — that happens after boot
-     * completes, in the ui_init() call below. */
-    ui_boot_init();
-    scr_printf("ps2sync v%s booting...\n", APP_VERSION);
+    /* gsKit owns the GS from the very first frame: the boot splash logs
+     * every step (IRX load, mc init, network bring-up) as it happens.
+     * gsKit only drives the EE DMA controller and the GS, so the IOP
+     * reset below doesn't disturb it. */
+    ui_init();
+    ui_set_context(&g_local, &g_downloads);
+    ui_log("ps2sync v%s booting...\n", APP_VERSION);
 
     boot_iop_modules();
-    scr_printf("BOOT: IRX done — pausing 3 s so you can read the log\n");
+    ui_log("BOOT: IRX done - pausing 3 s so you can read the log\n");
     DelayThread(3000000);
 
-    scr_printf("BOOT: loading config (mcInit...)\n");
+    ui_log("BOOT: loading config (mcInit...)\n");
     char err[256];
     if (!config_load(&g_state, err, sizeof(err))) {
-        ui_draw_message("Config", err);
-        scr_printf("\nPress CIRCLE to exit.\n");
+        ui_boot_done();
         pad_init();
+        ui_draw_message("Config error", err);
         for (;;) {
             unsigned int p = pad_read_pressed();
             if (p & PAD_CIRCLE) break;
+            DelayThread(16000);
         }
         return 1;
     }
     config_load_console_id(&g_state);
     ui_set_mmce(0, g_state.mmce_mode[0]);   /* reflect persisted GameID modes */
     ui_set_mmce(1, g_state.mmce_mode[1]);
-    scr_printf("BOOT: console_id=%s server=%s\n",
-               g_state.console_id, g_state.server_url);
+    ui_log("BOOT: console_id=%s server=%s\n",
+           g_state.console_id, g_state.server_url);
 
     boot_device_modules(&g_state);
 
-    scr_printf("BOOT: bringing up network\n");
+    ui_log("BOOT: bringing up network\n");
     network_init(&g_state);
-    scr_printf("BOOT: net ready=%d dhcp=%d ip=%s\n",
-               g_state.net_ready, g_state.dhcp_ok, g_state.ip);
+    ui_log("BOOT: net ready=%d dhcp=%d ip=%s\n",
+           g_state.net_ready, g_state.dhcp_ok, g_state.ip);
 
     init_storage_targets();
+    resolve_cache_path();
 
-    scr_printf("BOOT: pad init\n");
+    ui_log("BOOT: pad init\n");
     pad_init();
 
-    scr_printf("BOOT: ready - switching to gsKit UI\n");
-    /* Pause briefly so user sees boot log before gsKit overwrites it. */
-    DelayThread(2000000);
+    ui_log("BOOT: ready\n");
+    ui_boot_done();
 
-    /* Phase 2: hand the GS to gsKit. */
-    ui_init();
-
-    /* Auto-populate the views so the user lands on a usable list
-     * instead of "Press X to fetch catalog" / an empty Local view. */
+    /* Auto-populate the views so the user lands on usable lists.  The
+     * catalog comes from the cache when the server's fingerprint is
+     * unchanged (or the server is unreachable). */
     if (g_state.usb_ready) {
         scan_local();
         scan_saves();
     }
     scan_mcard_list(0, &g_mcard);
     scan_mcard_list(1, &g_mcard2);
+    load_catalog(false);
     if (network_is_ready(&g_state)) {
-        fetch_catalog();
         fetch_server_saves();
     }
 
     redraw();
-    ui_flush();
 
     for (;;) {
         unsigned int pressed = pad_read_pressed();
 
-        /* Event-driven redraw: libdebug renders synchronously into the
-         * GS frame buffer with no double buffer, so repainting on every
-         * frame produces visible flicker (~140 KB of char DMA per
-         * frame).  Only redraw when state actually changed. */
+        /* Event-driven redraw: the last frame stays on screen (double
+         * buffered), so only repaint when input changed something. */
         if (pressed == 0) {
             DelayThread(16000);
             continue;
         }
 
-        bool dirty = true;
-
-        if (pressed & PAD_CIRCLE) break;
-
-        if (pressed & PAD_R2) {
+        if (pressed & PAD_START) {
+            if (confirm("Exit GameSync?")) break;
+        } else if (pressed & PAD_R1) {
             cycle_view(+1);
-        } else if (pressed & PAD_L2) {
+        } else if (pressed & PAD_L1) {
             cycle_view(-1);
-        } else if (g_view == APP_VIEW_ROMS) {
-            int count = g_catalog.count;
-            if      (pressed & PAD_UP)       g_rom_selected--;
-            else if (pressed & PAD_DOWN)     g_rom_selected++;
-            else if (pressed & PAD_LEFT)     g_rom_selected -= ui_list_visible();
-            else if (pressed & PAD_RIGHT)    g_rom_selected += ui_list_visible();
-            else if (pressed & PAD_CROSS)    fetch_catalog();
-            else if (pressed & PAD_SQUARE) {
-                /* Queue selected ROM for download. */
-                if (require_storage_ready() &&
-                    count > 0 && g_rom_selected < count)
-                {
-                    DownloadEntry *e =
-                        queue_catalog_entry(&g_catalog.items[g_rom_selected]);
-                    if (e) {
-                        downloads_save(&g_downloads);
-                        ui_status("Queued: %s", e->name);
-                    } else {
-                        ui_error("Download list full");
-                    }
-                }
-            } else if (pressed & PAD_TRIANGLE) {
-                /* Trigger active download for the selected entry. */
-                if (require_storage_ready() &&
-                    count > 0 && g_rom_selected < count)
-                {
-                    DownloadEntry *e =
-                        queue_catalog_entry(&g_catalog.items[g_rom_selected]);
-                    if (e) run_active_download(e);
-                }
-            }
-            clamp_scroll(&g_rom_selected, &g_rom_scroll, count);
-        } else if (g_view == APP_VIEW_LOCAL) {
-            int count = g_local.count;
-            if      (pressed & PAD_UP)       g_local_selected--;
-            else if (pressed & PAD_DOWN)     g_local_selected++;
-            else if (pressed & PAD_LEFT)     g_local_selected -= ui_list_visible();
-            else if (pressed & PAD_RIGHT)    g_local_selected += ui_list_visible();
-            else if (pressed & PAD_CROSS)    scan_local();
-            else if (pressed & PAD_SQUARE) {
-                /* Delete the selected installed game. */
-                if (count > 0 && g_local_selected < count) {
-                    const LocalRom *r = &g_local.items[g_local_selected];
-                    int del_rc = (g_state.storage_backend == STORAGE_BACKEND_HDLOADER)
-                               ? hdl_remove_partition(r->path)
-                               : unlink(r->path);
-                    if (del_rc == 0) {
-                        ui_status("Deleted: %s", r->filename);
-                        scan_local();
-                    } else {
-                        ui_error("Delete failed: %s", r->filename);
-                    }
-                }
-            }
-            clamp_scroll(&g_local_selected, &g_local_scroll, count);
-        } else if (g_view == APP_VIEW_DOWNLOADS) {
-            int count = g_downloads.count;
-            if      (pressed & PAD_UP)       g_dl_selected--;
-            else if (pressed & PAD_DOWN)     g_dl_selected++;
-            else if (pressed & PAD_CROSS) {
-                if (count > 0 && g_dl_selected < count) {
-                    run_active_download(&g_downloads.items[g_dl_selected]);
-                }
-            } else if (pressed & PAD_SQUARE) {
-                if (require_storage_ready() &&
-                    count > 0 && g_dl_selected < count)
-                {
-                    downloads_remove(&g_downloads,
-                                     g_downloads.items[g_dl_selected].rom_id);
-                    downloads_save(&g_downloads);
-                    count = g_downloads.count;
-                }
-            }
-            clamp_scroll(&g_dl_selected, &g_dl_scroll, count);
-        } else if (g_view == APP_VIEW_SAVES) {
-            int count = g_saves.count;
-            if      (pressed & PAD_UP)       g_saves_selected--;
-            else if (pressed & PAD_DOWN)     g_saves_selected++;
-            else if (pressed & PAD_LEFT)     g_saves_selected -= ui_list_visible();
-            else if (pressed & PAD_RIGHT)    g_saves_selected += ui_list_visible();
-            else if (pressed & PAD_SQUARE)   scan_saves();
-            else if (pressed & PAD_CROSS)    upload_selected_save();
-            else if (pressed & PAD_TRIANGLE) pull_all_saves();
-            clamp_scroll(&g_saves_selected, &g_saves_scroll, g_saves.count);
-        } else if (g_view == APP_VIEW_MCARD) {
-            if      (pressed & PAD_UP)       g_mcard_selected--;
-            else if (pressed & PAD_DOWN)     g_mcard_selected++;
-            else if (pressed & PAD_LEFT)     g_mcard_selected -= ui_list_visible();
-            else if (pressed & PAD_RIGHT)    g_mcard_selected += ui_list_visible();
-            else if (pressed & PAD_SQUARE)   scan_mcard_list(0, &g_mcard);
-            else if (pressed & PAD_CROSS)    upload_mc_game_at(&g_mcard, g_mcard_selected);
-            else if (pressed & PAD_TRIANGLE) restore_mc_game_at(&g_mcard, g_mcard_selected);
-            else if (pressed & PAD_SELECT)   cycle_mmce_mode(0);
-            else if (pressed & PAD_R1) {
-                if (g_mcard.count > 0 && g_mcard_selected < g_mcard.count)
-                    mcp_switch_gameid(g_mcard.items[g_mcard_selected].serial, 0);
-            }
-            clamp_scroll(&g_mcard_selected, &g_mcard_scroll, g_mcard.count);
-        } else if (g_view == APP_VIEW_MCARD2) {
-            if      (pressed & PAD_UP)       g_mcard2_selected--;
-            else if (pressed & PAD_DOWN)     g_mcard2_selected++;
-            else if (pressed & PAD_LEFT)     g_mcard2_selected -= ui_list_visible();
-            else if (pressed & PAD_RIGHT)    g_mcard2_selected += ui_list_visible();
-            else if (pressed & PAD_SQUARE)   scan_mcard_list(1, &g_mcard2);
-            else if (pressed & PAD_CROSS)    upload_mc_game_at(&g_mcard2, g_mcard2_selected);
-            else if (pressed & PAD_TRIANGLE) restore_mc_game_at(&g_mcard2, g_mcard2_selected);
-            else if (pressed & PAD_SELECT)   cycle_mmce_mode(1);
-            else if (pressed & PAD_R1) {
-                if (g_mcard2.count > 0 && g_mcard2_selected < g_mcard2.count)
-                    mcp_switch_gameid(g_mcard2.items[g_mcard2_selected].serial, 1);
-            }
-            clamp_scroll(&g_mcard2_selected, &g_mcard2_scroll, g_mcard2.count);
-        } else if (g_view == APP_VIEW_SERVER) {
-            if      (pressed & PAD_UP)       g_server_selected--;
-            else if (pressed & PAD_DOWN)     g_server_selected++;
-            else if (pressed & PAD_LEFT)     g_server_selected -= ui_list_visible();
-            else if (pressed & PAD_RIGHT)    g_server_selected += ui_list_visible();
-            else if (pressed & PAD_START)    cycle_server_source();
-            else if (pressed & PAD_SQUARE)   fetch_server_saves();
-            else if (pressed & PAD_CROSS)    server_download_to_source();
-            else if (pressed & PAD_TRIANGLE) server_upload_from_source();
-            else if (pressed & PAD_L1)       server_sync_all();
-            else if (pressed & PAD_SELECT)   cycle_mmce_mode(source_port() < 0 ? 0 : source_port());
-            else if (pressed & PAD_R1) {
-                if (g_server.count > 0 && g_server_selected < g_server.count)
-                    mcp_switch_gameid(g_server.items[g_server_selected].serial,
-                                      source_port() < 0 ? 0 : source_port());
-            }
-            clamp_scroll(&g_server_selected, &g_server_scroll, g_server.count);
-        } else if (g_view == APP_VIEW_CONFIG) {
-            if (pressed & PAD_LEFT) {
-                cycle_storage_pref(-1);
-            } else if (pressed & PAD_RIGHT) {
-                cycle_storage_pref(1);
-            } else if (pressed & PAD_TRIANGLE) {
-                if (!g_hdd_format_confirm) {
-                    g_hdd_format_confirm = true;
-                    ui_error("TRIANGLE again wipes ALL HDD data (APA)");
-                } else {
-                    g_hdd_format_confirm = false;
-                    format_internal_hdd();
-                }
-            } else {
-                g_hdd_format_confirm = false;
+        } else {
+            switch (g_view) {
+                case APP_VIEW_ROMS:      handle_roms(pressed);      break;
+                case APP_VIEW_LOCAL:     handle_local(pressed);     break;
+                case APP_VIEW_DOWNLOADS: handle_downloads(pressed); break;
+                case APP_VIEW_SAVES:     handle_saves(pressed);     break;
+                case APP_VIEW_MCARD:     handle_mcard(pressed);     break;
+                case APP_VIEW_SERVER:    handle_server(pressed);    break;
+                case APP_VIEW_CONFIG:    handle_config(pressed);    break;
+                default: break;
             }
         }
 
-        if (dirty) redraw();
+        redraw();
     }
 
     network_shutdown();

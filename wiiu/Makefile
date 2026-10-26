@@ -33,7 +33,7 @@ TARGET		:=	wiiusync
 BUILD		:=	build
 SOURCES		:=	source
 DATA		:=	data
-INCLUDES	:=	include
+INCLUDES	:=	include third_party/stb
 
 #---------------------------------------------------------------------------------
 # .wuhb metadata (consumed by wuhbtool via wut_rules)
@@ -93,6 +93,11 @@ ifneq ($(BUILD),$(notdir $(CURDIR)))
 
 export OUTPUT	:=	$(CURDIR)/$(TARGET)
 export TOPDIR	:=	$(CURDIR)
+
+# .wuhb icon and splash screens (tools/brand_art.py)
+export APP_ICON		:=	$(TOPDIR)/meta/icon.png
+export APP_TV_SPLASH	:=	$(TOPDIR)/meta/tv-splash.png
+export APP_DRC_SPLASH	:=	$(TOPDIR)/meta/drc-splash.png
 
 export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
 			$(foreach dir,$(DATA),$(CURDIR)/$(dir))

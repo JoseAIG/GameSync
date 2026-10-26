@@ -33,6 +33,7 @@ server/data/archive/
 
 # ds build artifacts
 ds/build/
+ds/build_dsi/
 ds/*.nds
 ds/*.srl
 ds/*.elf
@@ -94,6 +95,7 @@ desktop/.ra_cache/
 
 # others
 *.json
+!ps5/sce_sys/param.json
 *.exe
 *.bak
 *.lst

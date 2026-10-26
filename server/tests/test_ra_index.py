@@ -503,3 +503,81 @@ def test_title_only_system_matches_ra_dump_names(db, tmp_path, monkeypatch):
     ra_index.refresh([entry], tmp_path / "cache")
     found = ra_index.lookup([str(rom)])[str(rom)]
     assert (found["ra_game_id"], found["ra_match"]) == (23831, ra_index.MATCH_TITLE)
+    assert found.get("ra_dump") is True
+
+
+def test_ra_dump_marks_only_the_registered_region(db, tmp_path, monkeypatch):
+    """Both regions title-match; only the dump RA registered is ``ra_dump``."""
+    europe = tmp_path / "Soulcalibur (Europe) (En,Fr,De,Es).chd"
+    usa = tmp_path / "Soulcalibur (USA).chd"
+    entries = []
+    for rom in (europe, usa):
+        rom.write_bytes(b"x")
+        entry = _Entry(rom, system="DC")
+        entry.name = rom.stem
+        entries.append(entry)
+    lib = RaLibrary(40, {"a1": 3395}, {3395: "Soulcalibur"}, achievements={3395: 88})
+    monkeypatch.setattr(ra_index, "fetch_library", lambda cid, **kw: lib)
+    names = {3395: ["Soulcalibur (Europe) (En,Fr,De,Es)"]}
+    monkeypatch.setattr(ra_index, "fetch_hash_names", lambda library, **kw: names)
+    ra_index.refresh(entries, tmp_path / "cache")
+    found = ra_index.lookup([str(europe), str(usa)])
+    assert found[str(europe)]["ra_game_id"] == found[str(usa)]["ra_game_id"] == 3395
+    assert found[str(europe)].get("ra_dump") is True
+    assert "ra_dump" not in found[str(usa)]
+
+    # RA registers the USA disc later: the cached row is re-matched, no reread.
+    names[3395] = names[3395] + ["Soulcalibur (USA)"]
+    assert ra_index.refresh(entries, tmp_path / "cache")["rematched"] == 1
+    assert ra_index.lookup([str(usa)])[str(usa)].get("ra_dump") is True
+
+
+def test_dump_column_is_added_to_an_old_table(db, tmp_path):
+    conn = rom_db.connection()
+    conn.execute("DROP TABLE IF EXISTS ra_roms")
+    conn.execute("CREATE TABLE ra_roms (path TEXT PRIMARY KEY, size INTEGER NOT NULL DEFAULT 0, "
+                 "mtime REAL NOT NULL DEFAULT 0, md5 TEXT NOT NULL DEFAULT '', "
+                 "game_id INTEGER NOT NULL DEFAULT 0, achievements INTEGER NOT NULL DEFAULT 0, "
+                 "title TEXT NOT NULL DEFAULT '', checked_at REAL NOT NULL DEFAULT 0, "
+                 "match_kind TEXT NOT NULL DEFAULT 'hash')")
+    conn.execute("INSERT INTO ra_roms (path, game_id) VALUES ('a.sfc', 5)")
+    conn.commit()
+    assert ra_index.lookup(["a.sfc"])["a.sfc"]["ra_game_id"] == 5
+
+
+def test_unknown_cartridge_is_linked_to_its_ra_game_without_a_badge(db, tmp_path, monkeypatch):
+    """A hash RA does not know still names the game, so a client can offer
+    the version RA does support - but nothing badges."""
+    rom = tmp_path / "Front Mission Series - Gun Hazard (Japan) [T-En by Aeon Genesis v1.01].sfc"
+    rom.write_bytes(OTHER_BYTES)
+    entry = _Entry(rom)
+    entry.name = rom.stem
+    lib = RaLibrary(3, {ROM_MD5: 1408}, {1408: "Front Mission: Gun Hazard"},
+                    achievements={1408: 112})
+    monkeypatch.setattr(ra_index, "fetch_library", lambda cid, **kw: lib)
+    monkeypatch.setattr(ra_index, "fetch_hash_names",
+                        lambda library, **kw: {1408: ["Front Mission Series - Gun Hazard (Japan)"]})
+    ra_index.refresh([entry], tmp_path / "cache")
+    found = ra_index.lookup([str(rom)])[str(rom)]
+    assert found["ra_game_id"] == 1408
+    assert found["ra_achievements"] == 0
+    assert found["ra_match"] == ra_index.MATCH_TITLE
+    assert "ra_hash" not in found
+
+
+def test_cached_cartridge_misses_are_linked_on_a_later_pass(db, tmp_path, monkeypatch):
+    rom = tmp_path / "Front Mission (Japan) [T-En by Frank Hughes v1.0b] [Splash screen removed].sfc"
+    rom.write_bytes(OTHER_BYTES)
+    entry = _Entry(rom)
+    entry.name = rom.stem
+    empty = RaLibrary(3, {}, {}, achievements={})
+    monkeypatch.setattr(ra_index, "fetch_library", lambda cid, **kw: empty)
+    monkeypatch.setattr(ra_index, "fetch_hash_names", lambda library, **kw: {})
+    ra_index.refresh([entry], tmp_path / "cache")
+    assert ra_index.lookup([str(rom)]) == {}
+
+    lib = RaLibrary(3, {ROM_MD5: 2895}, {2895: "Front Mission"}, achievements={2895: 50})
+    monkeypatch.setattr(ra_index, "fetch_library", lambda cid, **kw: lib)
+    result = ra_index.refresh([entry], tmp_path / "cache")
+    assert result["hashed"] == 0                 # no file read for the link
+    assert ra_index.lookup([str(rom)])[str(rom)]["ra_game_id"] == 2895

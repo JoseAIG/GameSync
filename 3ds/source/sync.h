@@ -40,6 +40,8 @@ typedef struct {
     int skipped;       // server_only titles not on this device
     // First few conflicting title IDs for display (null-terminated strings)
     char conflict_titles[MAX_CONFLICT_DISPLAY][17];
+    // TitleSyncState for each entry of the titles[] passed to sync_all
+    u8 title_state[MAX_TITLES];
 } SyncSummary;
 
 // Callback for progress updates during sync
@@ -83,6 +85,7 @@ typedef struct {
     // not treat "couldn't ask" as "server has nothing" and offer an upload.
     bool server_error;
     u32 server_status;              // HTTP status, 0 if there was no response
+    char server_error_msg[96];      // network_last_error() of that query, "" if none
 
     // Sync status
     bool is_synced;           // local_hash == server_hash

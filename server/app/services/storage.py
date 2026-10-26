@@ -29,6 +29,11 @@ from app.models.save import SaveBundle, SaveMetadata
 from app.services import db, game_names
 from app.services.ps1_cards import is_ps1_title_id, psp_visible_stats
 from app.services.rom_id import parse_title_id as _parse_emulator_id
+from app.services.safe_path import (
+    safe_join,
+    validate_path_component,
+    validate_relative_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +89,9 @@ def comparable_files(title_id: str, files: list[tuple[str, bytes]]) -> list[tupl
 
 
 def _title_dir(title_id: str) -> Path:
-    return settings.save_dir / title_id
+    # Title IDs are validated at the API boundary; this is a last line of
+    # defence so no caller can ever address a directory outside save_dir.
+    return settings.save_dir / validate_path_component(title_id)
 
 
 def _current_dir(title_id: str) -> Path:
@@ -218,6 +225,10 @@ def store_save(
     current = _current_dir(title_id)
     history = _history_dir(title_id)
 
+    # Reject unsafe file names before touching the existing save.
+    for f in bundle.files:
+        validate_relative_path(f.path)
+
     # Archive existing save to history
     if current.exists():
         old_meta = get_metadata(title_id)
@@ -239,7 +250,7 @@ def store_save(
     current.mkdir(parents=True, exist_ok=True)
     _trace_files("store-write", title_id, [(f.path, f.data) for f in bundle.files])
     for f in bundle.files:
-        file_path = current / f.path
+        file_path = safe_join(current, f.path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_bytes(f.data)
 

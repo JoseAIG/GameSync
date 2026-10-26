@@ -55,10 +55,18 @@ from app.models.save import (
     BundleFile,
     SaveBundle,
 )
+from app.services.safe_path import UnsafePathError, validate_relative_path
 
 
 class BundleError(Exception):
     pass
+
+
+def _decode_title_id(raw: bytes) -> str:
+    try:
+        return raw.rstrip(b"\x00").decode("ascii").upper()
+    except UnicodeDecodeError:
+        raise BundleError("Title ID is not valid ASCII")
 
 
 def _parse_payload(data: bytes, file_count: int) -> list[BundleFile]:
@@ -76,7 +84,14 @@ def _parse_payload(data: bytes, file_count: int) -> list[BundleFile]:
 
         if offset + path_len > len(data):
             raise BundleError("Truncated file path")
-        path = data[offset : offset + path_len].decode("utf-8")
+        try:
+            path = data[offset : offset + path_len].decode("utf-8")
+        except UnicodeDecodeError:
+            raise BundleError("File path is not valid UTF-8")
+        try:
+            validate_relative_path(path)
+        except UnsafePathError as e:
+            raise BundleError(f"Invalid file path: {e}")
         offset += path_len
 
         if offset + 4 > len(data):
@@ -142,7 +157,7 @@ def parse_bundle(data: bytes) -> SaveBundle:
             raise BundleError("Truncated v5 title_id string")
         raw = data[offset : offset + 64]
         offset += 64
-        title_id_str = raw.rstrip(b"\x00").decode("ascii").upper()
+        title_id_str = _decode_title_id(raw)
         title_id_int = 0
 
     elif version == BUNDLE_VERSION_V4:
@@ -151,7 +166,7 @@ def parse_bundle(data: bytes) -> SaveBundle:
             raise BundleError("Truncated v4 title_id string")
         raw = data[offset : offset + 32]
         offset += 32
-        title_id_str = raw.rstrip(b"\x00").decode("ascii").upper()
+        title_id_str = _decode_title_id(raw)
         title_id_int = 0
 
     elif version == BUNDLE_VERSION_V3:
@@ -160,7 +175,7 @@ def parse_bundle(data: bytes) -> SaveBundle:
             raise BundleError("Truncated v3 title_id string")
         raw = data[offset : offset + 16]
         offset += 16
-        title_id_str = raw.rstrip(b"\x00").decode("ascii").upper()
+        title_id_str = _decode_title_id(raw)
         title_id_int = 0
 
     else:

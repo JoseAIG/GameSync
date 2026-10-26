@@ -229,6 +229,8 @@ static void wait_for_start(UiTone tone, const char *title, const char *body) {
 // Actions
 // ---------------------------------------------------------------------------
 
+static bool compare_title(int idx, const char *what);
+
 static void do_history(void) {
     int idx = sel_title_idx();
     if (idx < 0) return;
@@ -243,22 +245,38 @@ static void do_history(void) {
         set_status(UI_TONE_INFO, "No history available for %.40s", titles[idx].name);
     } else {
         char *selected_ts = ui_show_history(&titles[idx], versions, count);
-        if (selected_ts) {
-            op_title = "Restoring";
-            sync_progress("Downloading history version...");
-            SyncResult res = sync_download_history(&config, &titles[idx], selected_ts, sync_progress);
-            if (res == SYNC_OK) {
-                set_status(UI_TONE_OK, "Restored: %.40s", titles[idx].name);
-                titles[idx].in_conflict = false;
-                titles[idx].sync_state = TSTATE_DOWNLOADED;
-            } else {
-                set_status(UI_TONE_ERR, "Restore failed: %s", sync_result_str(res));
-            }
-            last_details_idx = -1;
-            free(selected_ts);
-        } else {
+        if (!selected_ts) {
             set_status(UI_TONE_ACCENT, "History closed");
+            return;
         }
+        int vi = -1;
+        for (int i = 0; i < count && vi < 0; i++)
+            if (strcmp(versions[i].timestamp, selected_ts) == 0) vi = i;
+        // Overwriting the console's save: show what's there now and ask first
+        if (vi < 0 || !compare_title(idx, "Restore")) {
+            ui_message(UI_TONE_ERR, "Restore", "Couldn't read this console's save.\n" UI_DIM "Nothing was changed.");
+            free(selected_ts);
+            return;
+        }
+        bool had_save = last_details.local_exists && last_details.local_file_count > 0;
+        if (!ui_confirm_restore(&titles[idx], &last_details, &versions[vi], vi, count, config.local_backups)) {
+            set_status(UI_TONE_ACCENT, "Restore cancelled");
+            free(selected_ts);
+            return;
+        }
+        op_title = "Restoring";
+        sync_progress("Downloading history version...");
+        SyncResult res = sync_download_history(&config, &titles[idx], selected_ts, sync_progress);
+        if (res == SYNC_OK) {
+            set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
+                       had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");
+            titles[idx].in_conflict = false;
+            titles[idx].sync_state = TSTATE_DOWNLOADED;
+        } else {
+            set_status(UI_TONE_ERR, "Restore failed: %s", sync_result_str(res));
+        }
+        last_details_idx = -1;
+        free(selected_ts);
     }
 }
 
@@ -743,6 +761,8 @@ int main(int argc, char *argv[]) {
         return 0;
     }
     gui_set_reduce_motion(config.reduce_motion);
+    ui_set_local_console_id(config.console_id);
+    ui_set_utc_offset(config.utc_offset_minutes);
 
     // Initialize network
     if (!network_init()) {

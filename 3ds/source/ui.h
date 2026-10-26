@@ -11,9 +11,22 @@
 #include "common.h"
 #include "gui.h"
 #include "sync.h"
+#include "ui_format.h"
 
 void ui_init(void);
 void ui_exit(void);
+
+// What the formatting helpers need to know about this console (set once
+// the config is loaded)
+void ui_set_local_console_id(const char *console_id);
+void ui_set_utc_offset(int utc_offset_minutes);
+
+// A server timestamp (ISO 8601 or Unix seconds) as "Today 21:14",
+// "Yesterday 21:14" or "Oct 12 21:14" in the console's local time, see
+// ui_format_when_at()
+void ui_format_when(const char *iso, char *out, int out_size);
+// "This console" or "Another device · XXXX"
+void ui_device_label(const char *console_id, char *out, int out_size);
 
 // ---------------------------------------------------------------------------
 // Backdrop
@@ -211,6 +224,11 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
 
 // History versions; returns the chosen timestamp (caller frees) or NULL
 char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int version_count);
+
+// Restore confirmation: this console's save now (details, from a compare)
+// beside history version `index` of `count`. True only for A.
+bool ui_confirm_restore(const TitleInfo *title, const SaveDetails *details,
+                        const HistoryVersion *version, int index, int count, int local_backups);
 
 // ---------------------------------------------------------------------------
 // Settings

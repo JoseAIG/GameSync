@@ -33,4 +33,7 @@ gcc $CFLAGS -o "$out/test_gui_motion" tests/test_gui_motion.c source/gui_motion.
 gcc $CFLAGS $HOST_INC -o "$out/test_config_file" tests/test_config_file.c source/config_file.c
 "$out/test_config_file"
 
+gcc $CFLAGS -o "$out/test_ui_format" tests/test_ui_format.c source/ui_format.c
+"$out/test_ui_format"
+
 rm -rf "$out"

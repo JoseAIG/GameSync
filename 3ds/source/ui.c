@@ -36,22 +36,35 @@ u32 ui_tone_hex(UiTone tone) {
 }
 
 static void format_size(u32 bytes, char *out, int out_size) {
-    if (bytes >= 1024 * 1024)
-        snprintf(out, out_size, "%.1f MB", bytes / (1024.0 * 1024.0));
-    else if (bytes >= 1024)
-        snprintf(out, out_size, "%.1f KB", bytes / 1024.0);
-    else
-        snprintf(out, out_size, "%lu B", (unsigned long)bytes);
+    ui_format_size_str(bytes, out, out_size);
 }
 
 // ISO 8601 "YYYY-MM-DDTHH:MM:SS..." -> "YYYY-MM-DD HH:MM"
 static void format_date(const char *iso, char *out, int out_size) {
-    if (strlen(iso) >= 16 && iso[10] == 'T')
-        snprintf(out, out_size, "%.10s %.5s", iso, iso + 11);
-    else if (iso[0])
-        snprintf(out, out_size, "%.19s", iso);
-    else
-        snprintf(out, out_size, "-");
+    ui_format_date_str(iso, out, out_size);
+}
+
+static char local_console_id[17];
+static int utc_offset_minutes;
+
+void ui_set_local_console_id(const char *console_id) {
+    snprintf(local_console_id, sizeof(local_console_id), "%s", console_id ? console_id : "");
+}
+
+void ui_set_utc_offset(int minutes) {
+    utc_offset_minutes = minutes;
+}
+
+void ui_format_when(const char *iso, char *out, int out_size) {
+    // osGetTime(): ms since 1900-01-01 on the console's (local, settable)
+    // clock. Only used for the date words; ui_format_when_at() distrusts it
+    // when it is implausible.
+    int64_t now_local = (int64_t)(osGetTime() / 1000ULL) - 2208988800LL;
+    ui_format_when_at(iso, utc_offset_minutes, now_local, out, out_size);
+}
+
+void ui_device_label(const char *console_id, char *out, int out_size) {
+    ui_device_label_for(console_id, local_console_id, out, out_size);
 }
 
 // Wait for the next frame's input; false if the app is closing
@@ -821,7 +834,8 @@ static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const cha
 }
 
 // `error` (with an optional `error_detail` line) replaces the contents when
-// the copy couldn't be read at all
+// the copy couldn't be read at all. `hash` NULL leaves the hash line out;
+// `extra_label` NULL shows `extra` on its own.
 static void save_column(float x, float y, float w, const char *heading, bool exists,
                         int files, u32 size, const char *hash, const char *extra_label,
                         const char *extra, u32 tone, const char *error, const char *error_detail) {
@@ -843,12 +857,17 @@ static void save_column(float x, float y, float w, const char *heading, bool exi
     format_size(size, size_str, sizeof(size_str));
     snprintf(line, sizeof(line), "%s  \xC2\xB7  %d file%s", size_str, files, files == 1 ? "" : "s");
     gui_text_fit(x + 8, y + 6 + lh, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - 16, line);
-    snprintf(line, sizeof(line), "%.16s", hash);
-    gui_text_fit(x + 8, y + 9 + 2 * lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, line);
+    float ly = y + 9 + 2 * lh;
+    if (hash) {
+        snprintf(line, sizeof(line), "%.16s", hash);
+        gui_text_fit(x + 8, ly, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, line);
+        ly += lh;
+    }
     if (extra && extra[0]) {
         char e[64];
-        snprintf(e, sizeof(e), "%s %s", extra_label, extra);
-        gui_text_fit(x + 8, y + 9 + 3 * lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, e);
+        if (extra_label) snprintf(e, sizeof(e), "%s %s", extra_label, extra);
+        else snprintf(e, sizeof(e), "%s", extra);
+        gui_text_fit(x + 8, ly, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, e);
     }
 }
 
@@ -1000,11 +1019,12 @@ static void history_row(void *ctx, int index, float x, float y, float w, float h
     const HistoryView *v = ctx;
     const HistoryVersion *hv = &v->versions[index];
     char date[32], size[24];
-    format_date(hv->timestamp, date, sizeof(date));
+    ui_format_when(hv->timestamp, date, sizeof(date));
     format_size(hv->size, size, sizeof(size));
     u32 text = gui_mix(HEX_TEXT, HEX_INK, hl), dim = gui_mix(HEX_DIM, HEX_INK, hl);
-    gui_text_mid(x + 10, y, h, GUI_S_BODY, text, GUI_LEFT, 0, date);
-    if (index == 0) gui_text_mid(x + 134, y, h, GUI_S_TINY, gui_mix(HEX_ACCENT2, HEX_INK, hl), GUI_LEFT, 0, "Newest");
+    float dw = gui_text_mid(x + 10, y, h, GUI_S_BODY, text, GUI_LEFT, 0, date);
+    float tag_x = x + 10 + dw + 8 > x + 134 ? x + 10 + dw + 8 : x + 134;
+    if (index == 0) gui_text_mid(tag_x, y, h, GUI_S_TINY, gui_mix(HEX_ACCENT2, HEX_INK, hl), GUI_LEFT, 0, "Newest");
     gui_text_mid(x + w - 70, y, h, GUI_S_SMALL, dim, GUI_RIGHT, 0, size);
     char files[16];
     snprintf(files, sizeof(files), "%d file%s", hv->file_count, hv->file_count == 1 ? "" : "s");
@@ -1018,7 +1038,7 @@ static void history_top(void *ctx) {
     gui_text_wrap(20, 40, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_TOP_W - 40, 2, v->title->name);
     const HistoryVersion *hv = &v->versions[v->selected];
     char date[32], size[24], files[16], pos[24];
-    format_date(hv->timestamp, date, sizeof(date));
+    ui_format_when(hv->timestamp, date, sizeof(date));
     format_size(hv->size, size, sizeof(size));
     snprintf(files, sizeof(files), "%d", hv->file_count);
     snprintf(pos, sizeof(pos), "%d of %d", v->selected + 1, v->count);
@@ -1027,8 +1047,6 @@ static void history_top(void *ctx) {
     kv(20, y + lh, 70, 300, "Saved", date, HEX_TEXT);
     kv(20, y + 2 * lh, 70, 300, "Size", size, HEX_TEXT);
     kv(20, y + 3 * lh, 70, 300, "Files", files, HEX_TEXT);
-    gui_text_fit(20, 190, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 40,
-                 "Restoring writes this version to the console.");
     static const GuiHint hints[] = { { "LR", "Page" } };
     gui_footer(hints, 1);
 }
@@ -1084,6 +1102,72 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
     }
     ui_restore_backdrop(prev);
     return result;
+}
+
+// Restore confirmation: the save this replaces beside the chosen version
+typedef struct {
+    const TitleInfo *title;
+    const SaveDetails *details;
+    const HistoryVersion *version;
+    int index, count;
+} RestoreView;
+
+static void restore_top(void *ctx) {
+    const RestoreView *r = ctx;
+    const SaveDetails *d = r->details;
+    gui_header("Restore");
+
+    gui_text_fit(12, 32, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 24, r->title->name);
+    gui_textf(12, 32 + gui_line_h(GUI_S_TITLE), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
+              "%s%s", r->title->title_id_hex,
+              r->title->media_type == MEDIATYPE_GAME_CARD ? "  \xC2\xB7  game card" : "");
+
+    float y = 70, w = (GUI_TOP_W - 16 - 10) / 2.0f;
+    // Left: what is on the console now, and whether it changed since the
+    // last sync (i.e. whether restoring loses progress the server never saw)
+    const char *state = !d->has_last_synced ? "No sync record"
+                      : strcmp(d->local_hash, d->last_synced_hash) != 0 ? "Changed since last sync"
+                      : "Same as last sync";
+    bool unreadable = d->local_exists && d->local_file_count == 0 && strncmp(d->local_hash, "ERROR", 5) == 0;
+    save_column(8, y, w, "Now on this console", d->local_exists, d->local_file_count, d->local_size,
+                NULL, NULL, state, HEX_LINE, unreadable ? "Can't read the save" : NULL,
+                unreadable ? d->local_hash : NULL);
+
+    // Right: the version that replaces it
+    char pos[32], when[40];
+    snprintf(pos, sizeof(pos), "Version %d of %d", r->index + 1, r->count);
+    ui_format_when(r->version->timestamp, when, sizeof(when));
+    save_column(8 + w + 10, y, w, pos, true, r->version->file_count, r->version->size,
+                NULL, NULL, when, HEX_INFO, NULL, NULL);
+
+    gui_text_fit(10, y + 84, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20,
+                 "The server keeps every version: restoring one doesn't remove any.");
+
+    // Thin footer so the top screen looks finished
+    gui_rect(0, GUI_FOOTER_Y + 8, GUI_TOP_W, GUI_FOOTER_H - 8, gui_rgb(HEX_BG2));
+}
+
+bool ui_confirm_restore(const TitleInfo *title, const SaveDetails *details,
+                        const HistoryVersion *version, int index, int count, int local_backups) {
+    RestoreView view = { title, details, version, index, count };
+    char body[256];
+    bool has_save = details->local_exists && details->local_file_count > 0;
+    if (!has_save)
+        snprintf(body, sizeof(body), "Writes this version to this console.\n"
+                 UI_DIM "There's no save on this console now.");
+    else if (local_backups == 1)
+        snprintf(body, sizeof(body), "Replaces the save on this console.\n"
+                 "Your current save is copied to the SD first (keeps 1 copy).");
+    else if (local_backups > 1)
+        snprintf(body, sizeof(body), "Replaces the save on this console.\n"
+                 "Your current save is copied to the SD first (keeps the last %d).", local_backups);
+    else
+        snprintf(body, sizeof(body), "Replaces the save on this console.\n"
+                 UI_HI "Your current save is not backed up (Local backups is off).");
+    UiBackdrop prev = ui_set_backdrop(restore_top, compare_bottom, &view);
+    bool ok = ui_confirm(UI_TONE_WARN, "Restore this version?", body, "Restore");
+    ui_restore_backdrop(prev);
+    return ok;
 }
 
 // ---------------------------------------------------------------------------

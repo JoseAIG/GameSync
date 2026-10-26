@@ -110,6 +110,8 @@ import com.savesync.android.ui.components.stripLeadingGlyph
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
+import com.savesync.android.ui.components.LocalInputTracker
+import com.savesync.android.ui.components.isRevealGuarded
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.net.URI
@@ -157,6 +159,7 @@ fun SavesScreen(
     // Hold-to-accelerate state for d-pad left/right: page scroll → faster
     // page scroll → alphabet jump.  See HoldNav.kt.
     val holdNav = rememberHoldNavState()
+    val inputTracker = LocalInputTracker.current
     val searchFocusRequester = remember { FocusRequester() }
     // Parent container steals focus on entry so the search TextField below
     // doesn't auto-focus and pop the keyboard when this tab opens.
@@ -422,6 +425,11 @@ fun SavesScreen(
                         )
                     ) return@onPreviewKeyEvent true
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    // First key after touch on a device without a gamepad: it only
+                    // reveals the cursor, so nothing acts on a row that wasn't lit.
+                    if (inputTracker?.isRevealPress == true && isRevealGuarded(event.key)) {
+                        return@onPreviewKeyEvent true
+                    }
                     when (event.key) {
                         // D-pad / analog stick — vertical: scroll list
                         Key.DirectionDown -> {

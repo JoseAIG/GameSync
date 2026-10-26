@@ -75,7 +75,13 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.max
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.runtime.State
+import androidx.compose.ui.graphics.graphicsLayer
 import com.savesync.android.ui.theme.GsElevation
+import com.savesync.android.ui.theme.GsMotion
+import com.savesync.android.ui.theme.LocalReduceMotion
 import com.savesync.android.ui.theme.GsShapes
 import com.savesync.android.ui.theme.LocalHighContrast
 import com.savesync.android.ui.theme.gsDim
@@ -277,8 +283,12 @@ fun GsHitTarget(
 // ── Rows, pills, banners ──────────────────────────────────────────────────
 
 /**
- * A list row on a panel.  The selected row (gamepad cursor) is lifted to
- * PANEL_HI with a teal selection bar down its left edge.
+ * A list row on a panel.  In Pad mode ([LocalInputMode]) the selected row
+ * (gamepad cursor) is lifted to PANEL_HI with a teal selection bar down its
+ * left edge, drawn instantly on the press that moved it.  In Touch mode
+ * [isSelected] is ignored, so a phone doesn't show row 0 permanently
+ * "selected".  Both modes show a press state — a handheld's screen is
+ * touched in Pad mode too: PANEL_HI on press-down and a slight scale.
  */
 @Composable
 fun GsListRow(
@@ -289,25 +299,34 @@ fun GsListRow(
     content: @Composable RowScope.() -> Unit,
 ) {
     val shape = GsShapes.Row
+    val selected = isSelected && LocalInputMode.current == GsInputMode.Pad
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale = rememberPressScale(pressed, GS_ROW_PRESS_SCALE)
     // High contrast: the selection border goes from Accent@55% to solid.
     val selectedBorder = if (LocalHighContrast.current) GsColors.Accent else GsColors.Accent.copy(alpha = 0.55f)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
+            .graphicsLayer {
+                val s = scale.value
+                scaleX = s
+                scaleY = s
+            }
             .clip(shape)
-            .background(if (isSelected) GsColors.PanelHi else containerColor)
+            .background(if (selected || pressed) GsColors.PanelHi else containerColor)
             .then(
-                if (isSelected) Modifier.border(1.dp, selectedBorder, shape)
+                if (selected) Modifier.border(1.dp, selectedBorder, shape)
                 else Modifier
             )
-            .clickable(onClick = onClick),
+            .clickable(interactionSource = source, indication = rememberRipple(), onClick = onClick),
     ) {
         Box(
             modifier = Modifier
                 .width(4.dp)
                 .fillMaxHeight()
-                .background(if (isSelected) GsColors.Accent else Color.Transparent)
+                .background(if (selected) GsColors.Accent else Color.Transparent)
         )
         Row(
             modifier = Modifier
@@ -318,6 +337,28 @@ fun GsListRow(
             content = content,
         )
     }
+}
+
+/** Press scale of a list row. */
+const val GS_ROW_PRESS_SCALE = 0.98f
+/** Press scale of a button (dialog choice, detail action). */
+const val GS_BUTTON_PRESS_SCALE = 0.97f
+
+/**
+ * Scale for a pressable surface: down to [pressedScale] with the PRESS
+ * spring on press-down, back with QUICK on release.  animateFloatAsState
+ * re-targets with velocity, so a quick tap reverses mid-way instead of
+ * restarting.  Always 1 under reduced motion.  Read the returned State only
+ * inside `graphicsLayer {}` so the animation never recomposes.
+ */
+@Composable
+fun rememberPressScale(pressed: Boolean, pressedScale: Float): State<Float> {
+    val reduce = LocalReduceMotion.current
+    return animateFloatAsState(
+        targetValue = if (pressed && !reduce) pressedScale else 1f,
+        animationSpec = if (pressed) GsMotion.press() else GsMotion.quick(),
+        label = "pressScale",
+    )
 }
 
 /**
@@ -617,15 +658,23 @@ private fun DialogChoice(
     textColor: Color,
     onClick: () -> Unit,
 ) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale = rememberPressScale(pressed, GS_BUTTON_PRESS_SCALE)
     Row(
         modifier = Modifier
             // Pressed by its button or tapped, never focused by the D-pad:
             // canFocus only affects key focus, not touch or TalkBack.
             .focusProperties { canFocus = false }
             .heightIn(min = 48.dp)
+            .graphicsLayer {
+                val s = scale.value
+                scaleX = s
+                scaleY = s
+            }
             .clip(GsShapes.Choice)
             .background(background)
-            .clickable(onClick = onClick)
+            .clickable(interactionSource = source, indication = rememberRipple(), onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -98,6 +98,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
+import com.savesync.android.ui.components.LocalInputTracker
+import com.savesync.android.ui.components.isRevealGuarded
 import kotlinx.coroutines.launch
 
 /**
@@ -159,6 +161,7 @@ fun RomCatalogScreen(
     val listState = rememberLazyListState()
     // Hold-to-accelerate state for d-pad left/right (page → alphabet jump).
     val holdNav = rememberHoldNavState()
+    val inputTracker = LocalInputTracker.current
     val listFocusRequester = remember { FocusRequester() }
     val searchFocusRequester = remember { FocusRequester() }
 
@@ -438,6 +441,11 @@ fun RomCatalogScreen(
                         )
                     ) return@onPreviewKeyEvent true
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    // First key after touch on a device without a gamepad: it only
+                    // reveals the cursor, so nothing acts on a row that wasn't lit.
+                    if (inputTracker?.isRevealPress == true && isRevealGuarded(event.key)) {
+                        return@onPreviewKeyEvent true
+                    }
                     when (event.key) {
                         Key.DirectionDown -> {
                             if (filtered.isNotEmpty()) {

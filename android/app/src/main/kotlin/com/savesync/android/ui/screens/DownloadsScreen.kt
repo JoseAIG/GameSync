@@ -64,6 +64,8 @@ import com.savesync.android.ui.components.GsPill
 import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
+import com.savesync.android.ui.components.LocalInputTracker
+import com.savesync.android.ui.components.isRevealGuarded
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
 import com.savesync.android.ui.components.gsScrollToItem
@@ -144,6 +146,7 @@ fun DownloadsScreen(
     val scope = rememberCoroutineScope()
     val reduceMotion = LocalReduceMotion.current
     val holdNav = rememberHoldNavState()
+    val inputTracker = LocalInputTracker.current
     val listFocusRequester = remember { FocusRequester() }
     // Y asks before cancelling / removing the selected row.
     var removeTarget by remember { mutableStateOf<DownloadEntity?>(null) }
@@ -235,6 +238,11 @@ fun DownloadsScreen(
                         )
                     ) return@onPreviewKeyEvent true
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    // First key after touch on a device without a gamepad: it only
+                    // reveals the cursor, so nothing acts on a row that wasn't lit.
+                    if (inputTracker?.isRevealPress == true && isRevealGuarded(event.key)) {
+                        return@onPreviewKeyEvent true
+                    }
                     when (event.key) {
                         Key.DirectionDown -> { moveTo(selectedIndex + 1); true }
                         Key.DirectionUp -> { moveTo(selectedIndex - 1); true }

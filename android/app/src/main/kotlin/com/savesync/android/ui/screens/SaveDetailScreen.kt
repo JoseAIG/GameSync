@@ -76,7 +76,12 @@ import com.savesync.android.api.preferredDownloadFilename
 import com.savesync.android.emulators.SaveEntry
 import com.savesync.android.storage.SyncStateEntity
 import com.savesync.android.ui.MainViewModel
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.graphics.graphicsLayer
+import com.savesync.android.ui.components.GS_BUTTON_PRESS_SCALE
 import com.savesync.android.ui.components.GsButton
+import com.savesync.android.ui.components.rememberPressScale
 import com.savesync.android.ui.components.GsFooterHints
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.GsSubScreenBar
@@ -727,12 +732,22 @@ private fun ActionButton(
     isSelected: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
+    // Same press scale in Touch and Pad mode: a handheld's screen is touched too.
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale = rememberPressScale(pressed, GS_BUTTON_PRESS_SCALE)
     Button(
         onClick = onClick,
         enabled = enabled,
+        interactionSource = source,
         modifier = Modifier
             .fillMaxWidth()
-            .then(modifier),
+            .then(modifier)
+            .graphicsLayer {
+                val s = scale.value
+                scaleX = s
+                scaleY = s
+            },
         colors = ButtonDefaults.buttonColors(
             containerColor = containerColor,
             contentColor = contentColor

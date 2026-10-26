@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -41,6 +42,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
@@ -62,7 +64,6 @@ import com.savesync.android.ui.screens.SettingsScreen
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.LocalServerOnline
 import com.savesync.android.ui.components.LocalShowButtonHints
-import com.savesync.android.ui.components.rememberShowButtonHints
 import com.savesync.android.ui.theme.SaveSyncTheme
 import com.savesync.android.ui.NAV_TAB_ROUTES
 import com.savesync.android.ui.enter
@@ -75,6 +76,12 @@ import com.savesync.android.ui.components.LocalFooterHeight
 import com.savesync.android.ui.components.LocalGsHaptics
 import com.savesync.android.ui.components.LocalGsNotifier
 import com.savesync.android.ui.components.rememberGsHaptics
+import com.savesync.android.ui.components.GsInputMode
+import com.savesync.android.ui.components.GsInputTracker
+import com.savesync.android.ui.components.LocalInputMode
+import com.savesync.android.ui.components.LocalInputTracker
+import com.savesync.android.ui.components.isPhysicalPadKey
+import com.savesync.android.ui.components.rememberGamepadConnected
 import com.savesync.android.ui.theme.LocalHighContrast
 import com.savesync.android.ui.theme.LocalReduceMotion
 import com.savesync.android.ui.theme.rememberHighContrast
@@ -120,6 +127,9 @@ class MainActivity : ComponentActivity() {
 
     private val _exitRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val exitRequests: SharedFlow<Unit> = _exitRequests
+
+    /** Touch vs pad input (see InputMode.kt); read by MainApp. */
+    val inputTracker = GsInputTracker()
 
     /** Kept current by MainApp: true while a top-level tab is showing. */
     @Volatile
@@ -187,6 +197,27 @@ class MainActivity : ComponentActivity() {
      * keys, which is how its A/B/START work.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Input mode only: which input the user is on decides whether list
+        // rows draw the pad cursor.  The bindings below are unchanged.
+        val reveal = event.action == KeyEvent.ACTION_DOWN &&
+            isPhysicalPadKey(
+                deviceIsVirtual = event.device?.isVirtual,
+                deviceId = event.deviceId,
+                source = event.source,
+                keyCode = event.keyCode,
+                flags = event.flags,
+            ) &&
+            inputTracker.onPadKey()
+        return inputTracker.dispatching(reveal) { dispatchBoundKeyEvent(event) }
+    }
+
+    /** Touch switches the input mode back to Touch; the touch itself is untouched. */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) inputTracker.onTouchDown()
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun dispatchBoundKeyEvent(event: KeyEvent): Boolean {
         val globalDelta: Pair<MutableSharedFlow<Int>, Int>? = when (event.keyCode) {
             KeyEvent.KEYCODE_BUTTON_L1 -> _tabCycleEvents to -1
             KeyEvent.KEYCODE_BUTTON_R1 -> _tabCycleEvents to 1
@@ -326,6 +357,8 @@ class MainActivity : ComponentActivity() {
         axisRepeatJob?.cancel()
         axisRepeatJob = null
         if (dirX == 0 && dirY == 0) return
+        // A stick or HAT means a pad is in hand: show the cursor.
+        inputTracker.onStick()
         // Fire the edge press immediately, then keep pulsing while held.
         emitDpadPulse(dirX, dirY)
         axisRepeatJob = lifecycleScope.launch {
@@ -451,7 +484,15 @@ private fun MainApp() {
         navigateToTab(navController, TAB_ROUTES[idx])
     }
 
-    val showHints = rememberShowButtonHints()
+    // One gamepad listener feeds both the hint footer and the input mode.
+    val gamepad = rememberGamepadConnected()
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val showHints = gamepad || landscape
+    val inputTracker = activity?.inputTracker
+    SideEffect { inputTracker?.gamepadConnected = gamepad }
+    // Always Pad while a gamepad is connected: touching a handheld's screen
+    // must never hide the cursor the next A press acts on.
+    val inputMode = if (gamepad) GsInputMode.Pad else inputTracker?.lastInput ?: GsInputMode.Touch
     val reduceMotion = rememberReduceMotion()
     val highContrast = rememberHighContrast()
     val haptics = rememberGsHaptics()
@@ -470,6 +511,8 @@ private fun MainApp() {
     CompositionLocalProvider(
         LocalServerOnline provides serverOnline,
         LocalShowButtonHints provides showHints,
+        LocalInputMode provides inputMode,
+        LocalInputTracker provides inputTracker,
         LocalReduceMotion provides reduceMotion,
         LocalHighContrast provides highContrast,
         LocalGsHaptics provides haptics,

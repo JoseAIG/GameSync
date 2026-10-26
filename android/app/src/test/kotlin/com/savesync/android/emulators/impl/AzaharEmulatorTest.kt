@@ -83,6 +83,21 @@ class AzaharEmulatorTest {
     }
 
     @Test
+    fun `non-zero id0 and id1 are detected`() {
+        val id0 = "0123456789abcdef0123456789abcdef"
+        val id1 = "fedcba9876543210fedcba9876543210"
+        val (user, titleRoot) = azaharUserDir(id0, id1)
+
+        assertEquals(
+            titleRoot.absolutePath,
+            AzaharEmulator.resolveOverrideTitleRoot(user).absolutePath
+        )
+        // Auto-detection (no override) under a storage root holding Azahar/.
+        val entries = AzaharEmulator(storageBaseDir = tmp.root).discoverSaves()
+        assertEquals(listOf("000400000011C400"), entries.map { it.titleId })
+    }
+
+    @Test
     fun `missing override does not fall back to auto-detected saves`() {
         azaharUserDir()  // auto-detection would find this one
         val missing = File(tmp.root, "unmounted-sd/Azahar").path

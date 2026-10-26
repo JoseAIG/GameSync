@@ -1,3 +1,6 @@
+// Save layout based on analysis of Azahar (https://github.com/azahar-emu/azahar,
+// GPL-2.0-or-later): src/core/hle/service/fs/archive.h and
+// src/core/file_sys/archive_source_sd_savedata.cpp.  No code copied.
 package com.savesync.android.emulators.impl
 
 import com.savesync.android.emulators.EmulatorBase
@@ -77,6 +80,13 @@ class AzaharEmulator(
         /** Key used in [com.savesync.android.storage.Settings.saveDirOverrides]. */
         const val EMULATOR_KEY = "Azahar"
 
+        /**
+         * Azahar (like Citra before it) hardcodes both ID0 and ID1 to 32
+         * zeros — ``SYSTEM_ID`` / ``SDCARD_ID`` in
+         * src/core/hle/service/fs/archive.h of github.com/azahar-emu/azahar
+         * (GPL-2.0-or-later).  Other 32-hex IDs are still accepted (copied
+         * real-SD layouts, forks) but the zero pair is preferred.
+         */
         private const val ZERO_ID = "00000000000000000000000000000000"
         private val HEX8_REGEX = Regex("^[0-9A-Fa-f]{8}$")
         private val HEX32_REGEX = Regex("^[0-9A-Fa-f]{32}$")
@@ -175,31 +185,35 @@ class AzaharEmulator(
                 allowNonExistent = true,
                 candidateTitleRoots = candidateTitleRoots
             ) ?: return null
-            val upper = titleId.uppercase()
+            // Azahar names these folders with lowercase hex ("{:08x}" in
+            // archive_source_sd_savedata.cpp); match it so the tree looks the
+            // same as one Azahar created, even on case-sensitive storage.
+            val lower = titleId.lowercase()
             return File(
                 File(
-                    File(titleRoot, upper.substring(0, 8)),
-                    upper.substring(8)
+                    File(titleRoot, lower.substring(0, 8)),
+                    lower.substring(8)
                 ),
                 "data/00000001"
             )
         }
 
         private fun buildCandidateTitleRoots(storageBaseDir: File): List<File> {
-            val suffix = "Nintendo 3DS/$ZERO_ID/$ZERO_ID/title"
-            val candidates = listOf(
-                "sdmc/$suffix",
-                "Azahar/sdmc/$suffix",
-                "azahar/sdmc/$suffix",
-                "Azahar-emu/sdmc/$suffix",
-                "azahar-emu/sdmc/$suffix",
-                "citra-emu/sdmc/$suffix",
-                "lime3ds-emu/sdmc/$suffix",
-                "Android/data/org.azahar_emu.azahar/files/sdmc/$suffix",
-                "Android/data/org.citra.citra_emu/files/sdmc/$suffix",
-                "Android/data/io.github.lime3ds.android/files/sdmc/$suffix",
+            val sdmcDirs = listOf(
+                "sdmc",
+                "Azahar/sdmc",
+                "azahar/sdmc",
+                "Azahar-emu/sdmc",
+                "azahar-emu/sdmc",
+                "citra-emu/sdmc",
+                "lime3ds-emu/sdmc",
+                "Android/data/org.azahar_emu.azahar/files/sdmc",
+                "Android/data/org.citra.citra_emu/files/sdmc",
+                "Android/data/io.github.lime3ds.android/files/sdmc",
             )
-            return candidates.map { relative -> File(storageBaseDir, relative) }
+            return sdmcDirs.map { relative ->
+                titleRootUnder(File(File(storageBaseDir, relative), "Nintendo 3DS"))
+            }
         }
     }
 }

@@ -499,6 +499,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         // Find the title and its cached hash
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, upload_ids[i]) == 0) {
+                if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
                 snprintf(msg, sizeof(msg), "Uploading %d/%d: %s",
                     i + 1, upload_count, upload_ids[i]);
                 if (progress) progress(msg);
@@ -519,6 +520,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     for (int i = 0; i < download_count; i++) {
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, download_ids[i]) == 0) {
+                if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
                 snprintf(msg, sizeof(msg), "Downloading %d/%d: %s",
                     ++dl_done, total_dl, download_ids[i]);
                 if (progress) progress(msg);
@@ -532,10 +534,15 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         }
     }
 
-    // server_only titles: download if title exists locally
+    // server_only titles: download if title exists locally.
+    // Titles left out of the sync request (cartridges, marked with an empty
+    // hash_cache entry) always come back as server_only; never touch them here.
+    // The same check above keeps a cartridge from being picked instead of an
+    // installed copy that shares its title ID.
     for (int i = 0; i < server_only_count; i++) {
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, server_only_ids[i]) == 0) {
+                if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
                 snprintf(msg, sizeof(msg), "Downloading %d/%d: %s",
                     ++dl_done, total_dl, server_only_ids[i]);
                 if (progress) progress(msg);

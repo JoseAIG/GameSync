@@ -545,8 +545,9 @@ private fun MainApp() {
             },
         ) { padding ->
             // Transitions come from the route pair alone (see NavMotion.kt):
-            // fade between tabs, slide for push/pop, fade-only under reduced
-            // motion.  Enter and pop-enter share one rule, as do the exits.
+            // tab content slides the way L1/R1 point (fade on a wrap), push
+            // and pop slide, fade-only under reduced motion.  Enter and
+            // pop-enter share one rule, as do the exits.
             NavHost(
                 navController = navController,
                 startDestination = TAB_ROUTES[0],

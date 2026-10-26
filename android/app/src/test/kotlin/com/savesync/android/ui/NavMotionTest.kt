@@ -18,10 +18,28 @@ class NavMotionTest {
     }
 
     @Test
-    fun `tab to tab fades either way`() {
-        assertEquals(NavMotion.FADE, navMotionFor("saves", "catalog", reduce = false))
-        assertEquals(NavMotion.FADE, navMotionFor("catalog", "saves", reduce = false))
+    fun `R1 slides content forward`() {
+        assertEquals(NavMotion.TAB_FORWARD, navMotionFor("saves", "catalog", reduce = false))
+        assertEquals(NavMotion.TAB_FORWARD, navMotionFor("downloads", "settings", reduce = false))
+    }
+
+    @Test
+    fun `L1 slides content back`() {
+        assertEquals(NavMotion.TAB_BACK, navMotionFor("catalog", "saves", reduce = false))
+        assertEquals(NavMotion.TAB_BACK, navMotionFor("settings", "downloads", reduce = false))
+    }
+
+    @Test
+    fun `a tap two tabs away slides by its sign`() {
+        assertEquals(NavMotion.TAB_FORWARD, navMotionFor("saves", "installed", reduce = false))
+        assertEquals(NavMotion.TAB_BACK, navMotionFor("settings", "catalog", reduce = false))
+    }
+
+    @Test
+    fun `a wrap across the whole strip fades`() {
+        // R1 on Settings → Saves, L1 on Saves → Settings (or a first↔last tap).
         assertEquals(NavMotion.FADE, navMotionFor("settings", "saves", reduce = false))
+        assertEquals(NavMotion.FADE, navMotionFor("saves", "settings", reduce = false))
     }
 
     @Test
@@ -36,6 +54,7 @@ class NavMotionTest {
         assertEquals(NavMotion.FADE, navMotionFor("saves", "detail/{titleId}", reduce = true))
         assertEquals(NavMotion.FADE, navMotionFor("detail/{titleId}", "saves", reduce = true))
         assertEquals(NavMotion.FADE, navMotionFor("saves", "catalog", reduce = true))
+        assertEquals(NavMotion.FADE, navMotionFor("catalog", "saves", reduce = true))
     }
 
     @Test

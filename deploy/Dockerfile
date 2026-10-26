@@ -14,9 +14,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app/server
 
-# Dependencias primero (capa cacheable), fijadas por uv.lock.
+# Dependencias primero (capa cacheable), fijadas por uv.lock. --locked hace
+# fallar el build si uv.lock no corresponde con pyproject.toml.
 COPY server/pyproject.toml server/uv.lock ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --locked --no-dev --no-install-project
 
 # Código. Solo lo que el servidor necesita en tiempo de ejecución.
 COPY shared/ /app/shared/

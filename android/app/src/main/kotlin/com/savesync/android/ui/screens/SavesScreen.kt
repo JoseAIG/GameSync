@@ -3,6 +3,10 @@ package com.savesync.android.ui.screens
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.ui.unit.IntOffset
+import com.savesync.android.ui.theme.GsMotion
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -630,6 +634,7 @@ private fun EmptyState(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SavesList(
     saves: List<SaveEntry>,
@@ -645,6 +650,7 @@ private fun SavesList(
     // Built once per sync-state change, not once per row per frame.
     val syncMap = remember(syncStateEntities) { syncStateEntities.associateBy { it.titleId } }
     val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
+    val reduce = LocalReduceMotion.current
 
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -664,7 +670,10 @@ private fun SavesList(
                 onClick = {
                     onSelectIndex(index)
                     onSaveClick(entry.titleId)
-                }
+                },
+                // Rows glide to their new place when the list changes.
+                modifier = if (reduce) Modifier
+                    else Modifier.animateItemPlacement(GsMotion.standard(IntOffset.VisibilityThreshold)),
             )
         }
     }

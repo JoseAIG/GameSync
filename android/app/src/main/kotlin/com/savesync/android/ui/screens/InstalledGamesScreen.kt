@@ -1,6 +1,10 @@
 package com.savesync.android.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.ui.unit.IntOffset
+import com.savesync.android.ui.theme.GsMotion
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -542,6 +546,7 @@ fun InstalledGamesScreen(
  * derivedStateOf, so a D-pad step recomposes only the two rows whose
  * highlight changes.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun InstalledList(
     roms: List<InstalledRom>,
@@ -549,6 +554,7 @@ private fun InstalledList(
     selectedIndex: () -> Int,
     onRowClick: (Int, InstalledRom) -> Unit,
 ) {
+    val reduce = LocalReduceMotion.current
     LazyColumn(
         state = listState,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
@@ -563,6 +569,9 @@ private fun InstalledList(
                 rom = rom,
                 isSelected = isSelected,
                 onClick = { onRowClick(index, rom) },
+                // Rows glide to their new place when one is deleted or found.
+                modifier = if (reduce) Modifier
+                    else Modifier.animateItemPlacement(GsMotion.standard(IntOffset.VisibilityThreshold)),
             )
         }
     }
@@ -573,8 +582,9 @@ private fun InstalledRomCard(
     rom: InstalledRom,
     isSelected: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    GsListRow(isSelected = isSelected, onClick = onClick) {
+    GsListRow(isSelected = isSelected, onClick = onClick, modifier = modifier) {
         SystemBadge(rom.system)
         Column(modifier = Modifier.weight(1f)) {
             Text(

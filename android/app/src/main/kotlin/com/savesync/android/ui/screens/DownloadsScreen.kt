@@ -1,6 +1,14 @@
 package com.savesync.android.ui.screens
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VisibilityThreshold
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.unit.IntOffset
+import com.savesync.android.ui.theme.GsMotion
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -158,12 +166,12 @@ fun DownloadsScreen(
     }
     LaunchedEffect(Unit) { runCatching { listFocusRequester.requestFocus() } }
 
-    // The summary line sits above the rows as item 0 while anything runs.
-    val headerItems = if (activeCount > 0) 1 else 0
+    // The summary line is a fixed line above the list, not item 0, so rows
+    // don't jump when the first download starts: list index = row index.
     fun moveTo(index: Int) {
         if (downloads.isEmpty()) return
         selectedIndex = index.coerceIn(0, downloads.size - 1)
-        follower.follow(selectedIndex + headerItems, reduceMotion)
+        follower.follow(selectedIndex, reduceMotion)
     }
     /** Up/Down: re-anchor after a fling, else step; the list follows. */
     fun step(delta: Int) {
@@ -171,7 +179,6 @@ fun DownloadsScreen(
             selectedIndex, delta, downloads.size,
             reveal = inputTracker?.isRevealPress == true,
             reduce = reduceMotion,
-            headerItems = headerItems,
         )
     }
 
@@ -296,16 +303,22 @@ fun DownloadsScreen(
         if (downloads.isEmpty()) {
             EmptyDownloads()
         } else {
-            DownloadsList(
-                downloads = downloads,
-                liveProgress = liveProgress,
-                listState = listState,
-                activeCount = activeCount,
-                finishedCount = finishedCount,
-                selectedIndex = { selectedIndex },
-                onSelect = { selectedIndex = it },
-                viewModel = viewModel,
-            )
+            Column(modifier = Modifier.fillMaxSize()) {
+                Text(
+                    "$activeCount active · $finishedCount finished",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = gsDim(),
+                    modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                )
+                DownloadsList(
+                    downloads = downloads,
+                    liveProgress = liveProgress,
+                    listState = listState,
+                    selectedIndex = { selectedIndex },
+                    onSelect = { selectedIndex = it },
+                    viewModel = viewModel,
+                )
+            }
         }
     }
 
@@ -335,36 +348,29 @@ fun DownloadsScreen(
  * derivedStateOf, so a D-pad step recomposes only the two rows whose
  * highlight changes (progress ticks already touch only their own row).
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun DownloadsList(
     downloads: List<DownloadEntity>,
     liveProgress: Map<String, DownloadManager.ProgressEvent>,
     listState: LazyListState,
-    activeCount: Int,
-    finishedCount: Int,
     selectedIndex: () -> Int,
     onSelect: (Int) -> Unit,
     viewModel: MainViewModel,
 ) {
+    val reduce = LocalReduceMotion.current
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        if (activeCount > 0) {
-            item {
-                Text(
-                    "$activeCount active · $finishedCount finished",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = gsDim(),
-                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                )
-            }
-        }
         itemsIndexed(downloads, key = { _, d -> d.id }) { index, download ->
             val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
             DownloadRow(
+                // Rows glide to their new place when one is added or removed.
+                modifier = if (reduce) Modifier
+                    else Modifier.animateItemPlacement(GsMotion.standard(IntOffset.VisibilityThreshold)),
                 download = download,
                 liveProgress = liveProgress[download.id],
                 isSelected = isSelected,
@@ -413,6 +419,7 @@ private fun EmptyDownloads() {
 /** Progress card: name, status pill, bar, then bytes · speed · ETA. */
 @Composable
 private fun DownloadRow(
+    modifier: Modifier = Modifier,
     download: DownloadEntity,
     liveProgress: DownloadManager.ProgressEvent?,
     isSelected: Boolean,
@@ -431,7 +438,24 @@ private fun DownloadRow(
         (downloaded.toDouble() / total.toDouble()).toFloat().coerceIn(0f, 1f)
     } else null
 
-    GsListRow(isSelected = isSelected, onClick = onSelect) {
+    // The ~4 Hz progress updates glide instead of stepping: one Animatable
+    // per row, re-targeted (with its velocity) on each update; a retry from
+    // 0 snaps rather than animating backwards.  Read in the bar's draw.
+    val reduce = LocalReduceMotion.current
+    val latestFraction = rememberUpdatedState(fraction ?: 0f)
+    val progress = remember(download.id) { Animatable(fraction ?: 0f) }
+    LaunchedEffect(progress, reduce) {
+        snapshotFlow { latestFraction.value }.collect { f ->
+            if (f < progress.value || reduce) {
+                progress.snapTo(f)
+            } else {
+                val v = progress.velocity
+                launch { progress.animateTo(f, GsMotion.gentle(0.001f), initialVelocity = v) }
+            }
+        }
+    }
+
+    GsListRow(isSelected = isSelected, onClick = onSelect, modifier = modifier) {
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -469,7 +493,7 @@ private fun DownloadRow(
                 // Lambda form is the supported overload in Material 3 1.2+
                 // — the older Float form is deprecated and gone in 1.3.
                 LinearProgressIndicator(
-                    progress = { fraction },
+                    progress = { progress.value },
                     modifier = Modifier.fillMaxWidth(),
                     color = statusColor(download.status),
                     trackColor = GsColors.Line,
@@ -523,14 +547,14 @@ private fun StatusPill(status: String) {
         DownloadEntity.Status.QUEUED -> "Queued"
         else -> "Downloading"
     }
-    val color = statusColor(status)
+    val base = statusColor(status)
     // Muted / Dim are not legible on a tint (or on a lifted row): their pill
     // text steps up to TextMuted.
-    GsPill(
-        text = label,
-        color = color,
-        textColor = if (color == GsColors.Muted || color == GsColors.Dim) gsTextMuted() else textVariantOf(color),
-    )
+    val textTarget = if (base == GsColors.Muted || base == GsColors.Dim) gsTextMuted() else textVariantOf(base)
+    // A status change tints over rather than flipping.
+    val color by animateColorAsState(base, GsMotion.standard(), label = "downloadPill")
+    val textColor by animateColorAsState(textTarget, GsMotion.standard(), label = "downloadPillText")
+    GsPill(text = label, color = color, textColor = textColor)
 }
 
 @Composable

@@ -41,6 +41,9 @@ import com.savesync.android.ui.theme.gsExpandIn
 import com.savesync.android.ui.theme.gsShrinkOut
 import com.savesync.android.ui.theme.gsTextMuted
 import kotlinx.coroutines.flow.first
+import androidx.compose.material.icons.filled.History
+import com.savesync.android.sync.LocalBackup
+import com.savesync.android.ui.components.GsConfirmDialog
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -189,7 +192,7 @@ fun SaveDetailScreen(
             is SaveDetailState.Success -> {
                 val kind = noticeKindForSaveMessage(state.message)
                 notifier.show(
-                    GsNotice(kind, stripLeadingGlyph(state.message)),
+                    saveResultNotice(state) { id -> viewModel.restoreLatestBackup(id) },
                     // A conflict is a Warning that still rejects.
                     hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
                 )
@@ -451,9 +454,24 @@ fun SaveDetailScreen(
     val hasRom = entry.titleId in romAvailable
     val roms = if (hasRom) romsByTitle[entry.titleId].orEmpty() else emptyList()
 
+    // ── Local copy kept by the last download (sync/LocalBackups.kt) ──
+    val backupsVersion by viewModel.backupsVersion.collectAsState()
+    val latestBackup by produceState<LocalBackup?>(null, titleId, backupsVersion, resumeTick, fileModTime) {
+        value = viewModel.latestBackup(titleId)
+    }
+    // The three confirms: overwriting either side, and putting a copy back.
+    var confirmDownload by remember { mutableStateOf(false) }
+    var confirmUpload by remember { mutableStateOf(false) }
+    var confirmRestore by remember { mutableStateOf<LocalBackup?>(null) }
+
     // ── Gamepad navigation state ───────────────────────────────────
     val focusRequester = remember { FocusRequester() }
     var selectedActionIndex by remember { mutableIntStateOf(0) }
+    // Opened from a conflict, the cursor starts on the Force row of the
+    // newer side once both times are known — never on its own after the
+    // user moved, and A on it only opens the confirm.
+    var cursorMovedByUser by remember { mutableStateOf(false) }
+    var conflictCursorPlaced by remember { mutableStateOf(false) }
 
     // The ordered, gamepad-selectable actions; list order is D-pad order
     // (unchanged).  Smart Sync is the one filled primary; the overrides are
@@ -475,7 +493,7 @@ fun SaveDetailScreen(
             style = ActionStyle.Outlined,
             isBusy = isBusy && detailState.isUpload,
             headerAbove = "Override",
-            onClick = { viewModel.uploadSave(entry) }
+            onClick = { confirmUpload = true }
         ))
         add(DetailAction(
             label = if (isBusy && detailState.isDownload) "Downloading…" else "Force Download",
@@ -484,7 +502,7 @@ fun SaveDetailScreen(
             enabled = !isBusy && canDownloadSave,
             style = ActionStyle.Outlined,
             isBusy = isBusy && detailState.isDownload,
-            onClick = { viewModel.downloadSave(entry) }
+            onClick = { confirmDownload = true }
         ))
         if (hasRom) {
             if (roms.size <= 1) {
@@ -550,6 +568,25 @@ fun SaveDetailScreen(
                 onClick = { viewModel.normalizeRomAndSave(entry) }
             ))
         }
+        // The pad path for Undo: put the copy kept by the last download back.
+        latestBackup?.let { backup ->
+            add(DetailAction(
+                label = if (isBusy && detailState.isRestore) "Restoring…"
+                    else "Restore previous copy (${formatWhen(backup.takenAt)})",
+                icon = Icons.Filled.History,
+                enabled = !isBusy,
+                style = ActionStyle.Outlined,
+                isBusy = isBusy && detailState.isRestore,
+                onClick = { confirmRestore = backup }
+            ))
+        }
+    }
+
+    LaunchedEffect(openedFromConflict, newer) {
+        if (openedFromConflict && !conflictCursorPlaced && !cursorMovedByUser && newer != 0) {
+            selectedActionIndex = if (newer < 0) FORCE_UPLOAD_INDEX else FORCE_DOWNLOAD_INDEX
+            conflictCursorPlaced = true
+        }
     }
 
     // Clamp selection when the list size changes (e.g. ROM availability
@@ -609,6 +646,7 @@ fun SaveDetailScreen(
                 if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                 when (event.key) {
                     Key.DirectionDown -> {
+                        cursorMovedByUser = true
                         if (actions.isNotEmpty()) {
                             selectedActionIndex = (selectedActionIndex + 1)
                                 .coerceAtMost(actions.size - 1)
@@ -616,6 +654,7 @@ fun SaveDetailScreen(
                         true
                     }
                     Key.DirectionUp -> {
+                        cursorMovedByUser = true
                         if (actions.isNotEmpty()) {
                             selectedActionIndex = (selectedActionIndex - 1)
                                 .coerceAtLeast(0)
@@ -743,6 +782,7 @@ fun SaveDetailScreen(
                     action = action,
                     isSelected = index == selectedActionIndex,
                     onClick = {
+                        cursorMovedByUser = true
                         selectedActionIndex = index
                         action.onClick()
                     },
@@ -818,6 +858,85 @@ fun SaveDetailScreen(
             }
         }
     }
+
+    // ── Confirms ────────────────────────────────────────────────────
+    val serverFound = serverMeta as? ServerMetaState.Found
+    if (confirmDownload) {
+        GsConfirmDialog(
+            title = "Replace this device's save?",
+            message = forceDownloadMessage(
+                localWhen = if (canUploadSave) formatWhen(modifiedAt) else null,
+                localSize = formatSize(localSize),
+                serverWhen = serverFound?.let { formatWhen(it.timestamp) },
+                serverSize = serverFound?.let { formatSize(it.sizeBytes) },
+                serverFrom = serverFound?.source,
+                retroArch = viewModel.isRetroArchEntry(entry),
+            ),
+            confirmLabel = "Replace",
+            dismissLabel = "Keep mine",
+            destructive = true,
+            onConfirm = {
+                confirmDownload = false
+                viewModel.downloadSave(entry)
+            },
+            onDismiss = { confirmDownload = false },
+        )
+    }
+    if (confirmUpload) {
+        GsConfirmDialog(
+            title = "Replace the server's save?",
+            message = "The server keeps the previous version in its history.",
+            confirmLabel = "Upload",
+            onConfirm = {
+                confirmUpload = false
+                viewModel.uploadSave(entry)
+            },
+            onDismiss = { confirmUpload = false },
+        )
+    }
+    confirmRestore?.let { backup ->
+        val shared = entry.systemName == "SAT" && entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+        GsConfirmDialog(
+            title = "Put back the copy from ${formatWhen(backup.takenAt)}?",
+            message = "The save on this device now is kept as a copy too, so this can be undone." +
+                if (shared) " This file holds other Saturn games' saves as well; they go back to that copy too." else "",
+            confirmLabel = "Restore",
+            dismissLabel = "Keep current",
+            destructive = true,
+            onConfirm = {
+                confirmRestore = null
+                viewModel.restoreLatestBackup(entry.titleId)
+            },
+            onDismiss = { confirmRestore = null },
+        )
+    }
+}
+
+/** D-pad positions of the override rows (the action order never changes). */
+private const val FORCE_UPLOAD_INDEX = 1
+private const val FORCE_DOWNLOAD_INDEX = 2
+
+/**
+ * The Force Download confirm: both sides' time and size, that a copy of the
+ * current save is kept, and — for RetroArch — the save-state caveat.
+ */
+internal fun forceDownloadMessage(
+    localWhen: String?,
+    localSize: String,
+    serverWhen: String?,
+    serverSize: String?,
+    serverFrom: String?,
+    retroArch: Boolean,
+): String = buildString {
+    if (localWhen != null) append("This device: $localWhen, $localSize. ")
+    if (serverWhen != null) {
+        append("Server: $serverWhen")
+        serverSize?.let { append(", $it") }
+        serverFrom?.let { append(", from $it") }
+        append(". ")
+    }
+    append("A copy of the current save is kept on this device.")
+    if (retroArch) append("\nClose RetroArch first — an auto-loaded save state can undo this.")
 }
 
 /** How a detail action is drawn: one filled primary, then lighter tiers. */
@@ -1097,6 +1216,7 @@ private val SaveDetailState.isSync get() = this is SaveDetailState.Working && ac
 private val SaveDetailState.isUpload get() = this is SaveDetailState.Working && action == "upload"
 private val SaveDetailState.isDownload get() = this is SaveDetailState.Working && action == "download"
 private val SaveDetailState.isNormalize get() = this is SaveDetailState.Working && action == "normalize"
+private val SaveDetailState.isRestore get() = this is SaveDetailState.Working && action == "restore"
 
 private fun formatSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"

@@ -204,7 +204,7 @@ fun InstalledGamesScreen(
             is SaveDetailState.Success -> {
                 val kind = noticeKindForSaveMessage(s.message)
                 notifier.show(
-                    GsNotice(kind, stripLeadingGlyph(s.message)),
+                    saveResultNotice(s) { id -> viewModel.restoreLatestBackup(id) },
                     hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
                 )
                 viewModel.resetDetailState()

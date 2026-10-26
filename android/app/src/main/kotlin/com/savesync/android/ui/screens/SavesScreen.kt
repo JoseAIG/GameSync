@@ -288,7 +288,7 @@ fun SavesScreen(
                 } else {
                     val kind = noticeKindForSaveMessage(s.message)
                     notifier.show(
-                        GsNotice(kind, stripLeadingGlyph(s.message)),
+                        saveResultNotice(s) { id -> viewModel.restoreLatestBackup(id) },
                         hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
                     )
                 }
@@ -1089,6 +1089,22 @@ fun systemChipColor(systemName: String): Color {
 internal const val SETTINGS_TAB = 4
 /** The Saves tab's index. */
 internal const val SAVES_TAB = 0
+
+/**
+ * The notice for a single-save result.  A download that replaced a save
+ * and kept a copy offers "Undo" (touch; the pad path is Save detail's
+ * "Restore previous copy" row).
+ */
+internal fun saveResultNotice(s: SaveDetailState.Success, onUndo: (String) -> Unit): GsNotice {
+    val kind = noticeKindForSaveMessage(s.message)
+    val text = stripLeadingGlyph(s.message)
+    val undo = s.undoTitleId
+    return if (undo != null && kind == GsNoticeKind.Success) {
+        GsNotice(kind, text, actionLabel = "Undo", onAction = { onUndo(undo) })
+    } else {
+        GsNotice(kind, text)
+    }
+}
 
 /**
  * An Error notice for a view-model error string.  "Server URL not

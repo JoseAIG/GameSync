@@ -79,4 +79,41 @@ class NoticeCopyTest {
         assertEquals("2 emulator folders not found — tap to fix", missingFolderBannerText(listOf("a", "b")))
         assertEquals("", missingFolderBannerText(emptyList()))
     }
+
+    @Test
+    fun `a download that kept a copy offers Undo with the title`() {
+        var undone: String? = null
+        val n = saveResultNotice(
+            com.savesync.android.ui.SaveDetailState.Success(
+                "Replaced with the server's save · backup kept",
+                undoTitleId = "GBA_zelda",
+            )
+        ) { undone = it }
+        assertEquals(GsNoticeKind.Success, n.kind)
+        assertEquals("Undo", n.actionLabel)
+        n.onAction?.invoke()
+        assertEquals("GBA_zelda", undone)
+
+        val plain = saveResultNotice(com.savesync.android.ui.SaveDetailState.Success("Already in sync with server.")) {}
+        assertNull(plain.actionLabel)
+    }
+
+    @Test
+    fun `force download confirm names both sides and the kept copy`() {
+        val m = forceDownloadMessage(
+            localWhen = "Today 21:14 · 26 Oct 2026", localSize = "8.0 KB",
+            serverWhen = "Yesterday 10:00 · 25 Oct 2026", serverSize = "8.0 KB", serverFrom = "3ds_emu",
+            retroArch = false,
+        )
+        assertEquals(
+            "This device: Today 21:14 · 26 Oct 2026, 8.0 KB. Server: Yesterday 10:00 · 25 Oct 2026, 8.0 KB, " +
+                "from 3ds_emu. A copy of the current save is kept on this device.",
+            m,
+        )
+        val ra = forceDownloadMessage(null, "0 B", null, null, null, retroArch = true)
+        assertEquals(
+            "A copy of the current save is kept on this device.\nClose RetroArch first — an auto-loaded save state can undo this.",
+            ra,
+        )
+    }
 }

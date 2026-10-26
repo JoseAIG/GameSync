@@ -51,6 +51,9 @@ import com.savesync.android.sync.SaturnSaveFormatConverter
 import com.savesync.android.sync.SyncEngine
 import com.savesync.android.sync.SyncResult
 import com.savesync.android.sync.localSyncHash
+import com.savesync.android.sync.LocalBackup
+import com.savesync.android.sync.LocalBackupStore
+import com.savesync.android.sync.LocalBackups
 import com.savesync.android.sync.localSaveTimestamp
 import com.savesync.android.workers.SyncWorker
 import kotlinx.coroutines.Dispatchers
@@ -119,7 +122,15 @@ enum class SaveSyncStatus(val label: String) {
 sealed class SaveDetailState {
     object Idle : SaveDetailState()
     data class Working(val action: String) : SaveDetailState()
-    data class Success(val message: String, val navigateBack: Boolean = false) : SaveDetailState()
+    /**
+     * [undoTitleId]: a download replaced this title's save and a local copy
+     * was kept, so the notice offers Undo (see [MainViewModel.restoreLatestBackup]).
+     */
+    data class Success(
+        val message: String,
+        val navigateBack: Boolean = false,
+        val undoTitleId: String? = null,
+    ) : SaveDetailState()
     data class Error(val message: String) : SaveDetailState()
 }
 
@@ -2831,11 +2842,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
+                val backupBefore = latestBackupDir(entry.titleId)
                 val result = engine.sync(listOf(entry))
                 applyConflictOutcome(result)
+                // A download that replaced an existing save kept a copy: offer Undo.
+                val backedUp = result.downloaded > 0 && latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
+                if (backedUp) _backupsVersion.value++
                 val msg = buildString {
                     if (result.uploaded > 0) append("↑ Uploaded to server. ")
-                    if (result.downloaded > 0) append("↓ Downloaded from server. ")
+                    if (result.downloaded > 0) {
+                        append(if (backedUp) "Replaced with the server's save · backup kept. " else "↓ Downloaded from server. ")
+                    }
                     if (result.conflicts.isNotEmpty()) append("⚠ Conflict detected — use Upload or Download to force. ")
                     if (result.errors.isNotEmpty()) append("✗ Error: ${result.errors.first()}. ")
                     if (result.uploaded == 0 && result.downloaded == 0
@@ -2849,7 +2866,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // rescan so the list stops treating it as "nothing local" — the
                 // stale flag is what made a later smart sync overwrite newer play.
                 if (result.uploaded > 0 || result.downloaded > 0) scanSaves()
-                _saveDetailState.value = SaveDetailState.Success(msg.trim())
+                _saveDetailState.value = SaveDetailState.Success(
+                    msg.trim(),
+                    undoTitleId = entry.titleId.takeIf { backedUp && result.errors.isEmpty() },
+                )
             } catch (e: Exception) {
                 _saveDetailState.value = SaveDetailState.Error(e.message ?: "Sync failed")
             }
@@ -2951,25 +2971,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
+                val backupBefore = latestBackupDir(entry.titleId)
                 val ok = engine.downloadSave(entry, entry.titleId)
+                var backedUp = false
                 if (ok) {
                     clearConflict(entry.titleId)
                     engine.recordSyncedStateFromFile(entry)
+                    backedUp = latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
+                    if (backedUp) _backupsVersion.value++
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()
                 }
+                // The RetroArch save-state caveat lives in the confirm dialog now.
                 _saveDetailState.value = if (ok)
                     SaveDetailState.Success(
-                        "↓ Downloaded successfully.\n\n" +
-                        "⚠ Make sure RetroArch is fully closed before opening the game — " +
-                        "if RetroArch auto-loaded a save state when you last closed it, " +
-                        "load the game once and use RetroArch's Load State menu to discard it, " +
-                        "or delete the .state file from the saves folder."
+                        if (backedUp) "Replaced with the server's save · backup kept" else "Downloaded the server's save",
+                        undoTitleId = entry.titleId.takeIf { backedUp },
                     )
                 else
                     SaveDetailState.Error("No save found on server")
             } catch (e: Exception) {
                 _saveDetailState.value = SaveDetailState.Error(e.message ?: "Download failed")
+            }
+        }
+    }
+
+    // ── Local backups (sync/LocalBackups.kt) ──────────────────────────
+
+    /** Bumped whenever a backup is taken or restored, so the detail re-reads its latest one. */
+    private val _backupsVersion = MutableStateFlow(0)
+    val backupsVersion: StateFlow<Int> = _backupsVersion
+
+    private suspend fun latestBackupDir(titleId: String): File? = withContext(Dispatchers.IO) {
+        runCatching { LocalBackups.store.latest(titleId)?.dir }.getOrNull()
+    }
+
+    /** The newest local copy of [titleId]'s save, or null; reads the disk off the main thread. */
+    suspend fun latestBackup(titleId: String): LocalBackup? = withContext(Dispatchers.IO) {
+        runCatching { LocalBackups.store.latest(titleId) }.getOrNull()
+    }
+
+    /** Whether [entry] is a RetroArch save (its auto-loaded save states can undo a download). */
+    fun isRetroArchEntry(entry: SaveEntry): Boolean {
+        val path = (entry.saveFile ?: entry.saveDir)?.absolutePath ?: return false
+        val override = settings.value.saveDirOverrides[RetroArchEmulator.EMULATOR_KEY]
+            ?.takeIf { it.isNotBlank() }
+        return path.contains("retroarch", ignoreCase = true) ||
+            (override != null && path.startsWith(File(override).absolutePath))
+    }
+
+    /**
+     * Undo of a download, and Save detail's "Restore previous copy": puts the
+     * newest local copy of [titleId]'s save back and restores the sync base it
+     * had then (never the restored file's hash — see [LocalBackupStore.restore]),
+     * so the next sync sees what the user had before.  The save it replaces is
+     * kept as a copy too.
+     */
+    fun restoreLatestBackup(titleId: String) {
+        viewModelScope.launch {
+            val entry = _allSaves.value.firstOrNull { it.titleId == titleId }?.reconcileWithDisk()
+            if (entry == null) {
+                _saveDetailState.value = SaveDetailState.Error("This save isn't listed any more — rescan, then try again")
+                return@launch
+            }
+            _saveDetailState.value = SaveDetailState.Working("restore")
+            try {
+                val restored = withContext(Dispatchers.IO) {
+                    val store = LocalBackups.store
+                    val backup = store.latest(titleId) ?: return@withContext null
+                    val target = (if (backup.isDirectory) entry.saveDir else entry.saveFile)
+                        ?: return@withContext null
+                    if (store.restore(titleId, target, db.syncStateDao(), backup, entry.displayName, entry.systemName)) backup
+                    else null
+                }
+                _backupsVersion.value++
+                if (restored == null) {
+                    _saveDetailState.value = SaveDetailState.Error("No local copy to put back")
+                } else {
+                    fetchServerMeta(entry.titleId, entry.systemName)
+                    scanSaves()
+                    _saveDetailState.value = SaveDetailState.Success(
+                        "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _saveDetailState.value = SaveDetailState.Error(e.message ?: "Restore failed")
             }
         }
     }

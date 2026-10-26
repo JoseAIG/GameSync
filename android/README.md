@@ -79,9 +79,24 @@ shows the cursor (it doesn't sync, download or open anything). The list
 scrolls only when the cursor comes near its top or bottom edge, and holding
 the D-pad glides instead of stepping. After flinging a list by touch, the
 next Up / Down picks up from a row that is on screen rather than scrolling
-back. Search opens by sliding down from the header. A busy spinner always
-takes the place of the button it belongs to, so nothing moves under your
-finger, and rows slide to their new place when the list changes.
+back. Pressing past the first or last row makes the list give a little in
+the direction you pressed (with a short tick when touch feedback is on)
+instead of doing nothing; holding the stick there gives one tick, not a
+stream. When a held Left / Right starts jumping by first letter, the letter
+it reached shows in a square in the middle of the list and fades half a
+second after you let go. Search opens by sliding down from the header. A
+busy spinner always takes the place of the button it belongs to, so nothing
+moves under your finger, and rows slide to their new place when the list
+changes. Changing the system or status filter (or RetroAchievements only)
+slides the new list in from the side the filter moved to. There are no
+divider lines under the header or over the hints: a soft shadow appears
+there only while content is scrolled under them. Status pills carry an icon
+next to their word (a tick for *Synced*, a phone for *Never synced*, a cloud
+for *Server only*, arrows for *Local / Server newer*, a warning sign for
+*Conflict*).
+
+Dialogs grow in slightly from the centre and shrink back the same way when
+they close; a second press while one is closing does nothing.
 
 Messages appear in one place at the bottom of the screen, above the button
 hints. A new message replaces the one showing instead of waiting behind it,
@@ -124,7 +139,7 @@ The same scheme on every screen (shared by all GameSync console clients):
 | Button | Everywhere |
 |---|---|
 | D-pad / left stick Up / Down | Move one row (hold repeats) |
-| D-pad Left / Right | Page up / page down (hold to speed up, then jump by first letter) |
+| D-pad Left / Right | Page up / page down (hold to speed up, then jump by first letter, shown in the middle of the list) |
 | L1 / R1 | Previous / next tab (Saves, Catalog, Installed, Downloads, Settings; wraps around) |
 | SELECT | Next sub-tab: the system filter on Saves, Catalog and Installed |
 | A | Confirm / the highlighted row's main action |
@@ -142,7 +157,7 @@ each choice answers only to the button drawn on it.
 | Button | Action |
 |---|---|
 | A | Smart sync the selected save (upload or download, whichever it needs); a conflict, or a Saturn save, opens its detail screen |
-| X | Sync all: exactly the local saves the list shows, after the system filter, search and status filter (asks first; with no server set it offers Settings instead) |
+| X | Sync all: exactly the local saves the list shows, after the system filter, search and status filter. It first shows what it will do (see below); with no server set it offers Settings instead |
 | Y | Details: compare with the server, force upload / download, download the ROM, normalize the name |
 | L2 / R2 | Step the sync-status filter (all / synced / local newer / conflict / ...) |
 | SELECT | Next system |
@@ -159,6 +174,26 @@ one. *Smart Sync* is the main action; *Force Upload* and *Force Download* sit
 under *Override* and both ask first: Force Download names both copies and
 says that a copy of this device's save is kept (RetroArch users are reminded
 to close RetroArch, whose auto-loaded save state can undo it).
+
+**Sync all shows its plan first.** X opens a dialog that says *Checking with
+the server…* and then what the sync will do: how many saves go up, how many
+server copies will replace saves on this device (a copy of each is kept),
+how many are new from the server, which conflicts are left alone and how
+many are up to date. Nothing has moved yet: A *Sync* runs it, B cancels, Y
+lists every game by what happens to it. A save that is much smaller than
+the server's copy (under half its size) or has fewer files looks like a new
+game or an old backup about to overwrite your progress everywhere; such
+saves are listed under *Smaller than the server copy — new game or old
+backup?* and are **skipped unless you include them** — move to one with the
+D-pad and press X (or tap it) to switch it between *Skip* and *Include*. A
+always means *Sync* here (it reads *Done* when nothing is left to do). Only
+the first 20 uploads are size-checked; the dialog says how many weren't. If
+you wait on the dialog, each save is checked again before it moves, and one
+that changed in the meantime is skipped and named in the result. Auto sync
+never uploads such a save on its own: it leaves it and tells you the next
+time you open the app. A smart sync (A) of such a save doesn't upload it
+either and says so; use *Force Upload* on its detail screen if it is the
+save you want.
 
 Every download that replaces a save — smart sync, Sync all, Force Download —
 first copies the current save to the app's private storage
@@ -264,7 +299,9 @@ List rows are read as one sentence with their status and, when it is the
 controller cursor, "selected"; the tap action is named ("Download",
 "Manage", "Open details"). Footer hints read as "A: Sync", dialog buttons by
 their label, tappable banners by what they do ("Review conflicts", "Fix
-emulator folder"), and download progress bars report their percentage.
+emulator folder"), and download progress bars report their percentage. The
+letter of an alphabet jump is announced as it changes, and status icons stay
+silent (the word beside them is read).
 
 ## Game catalog cache
 

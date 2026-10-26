@@ -728,8 +728,12 @@ static void upload_title(TitleInfo *t) {
         }
         set_status(UI_TONE_ERR, "Upload failed: %s", sync_result_str(res));
         set_title_failed(t, sync_result_str(res));
-        last_details_idx = -1;
-        if (!transfer_failed_card(t, res, true, "upload")) return;
+        // The compare stays on the top screen for a retry (it succeeds
+        // into "Matches the server"); closing the card drops it
+        if (!transfer_failed_card(t, res, true, "upload")) {
+            last_details_idx = -1;
+            return;
+        }
     }
 }
 
@@ -746,8 +750,12 @@ static void download_title(TitleInfo *t) {
         }
         set_status(UI_TONE_ERR, "Download failed: %s", sync_result_str(res));
         set_title_failed(t, sync_result_str(res));
-        last_details_idx = -1;
-        if (!transfer_failed_card(t, res, false, "download")) return;
+        // The compare stays on the top screen for a retry (it succeeds
+        // into "Matches the server"); closing the card drops it
+        if (!transfer_failed_card(t, res, false, "download")) {
+            last_details_idx = -1;
+            return;
+        }
     }
 }
 

@@ -229,6 +229,10 @@ void gui_scrollbar_ex(float x, float y, float h, int visible, int total, float s
 
 // Rounded card with a title strip. tone = title accent colour (0xRRGGBB)
 void gui_card(float x, float y, float w, float h, const char *title, u32 tone);
+// The same; `x_icon` = an error card: a cross in a tone disc before the title
+void gui_card_ex(float x, float y, float w, float h, const char *title, u32 tone, bool x_icon);
+// Thin ring (16 line segments) of radius r
+void gui_ring(float cx, float cy, float r, float thick, u32 color);
 // Plain panel (no title)
 void gui_panel(float x, float y, float w, float h);
 // Translucent overlay over the whole screen (behind a modal card)

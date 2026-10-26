@@ -593,7 +593,7 @@ static void do_save_menu(void) {
                 server_query_failed("Upload");
             } else if (!last_details.local_exists) {
                 ui_message(UI_TONE_INFO, "Upload", "This console has no save for this game yet.");
-            } else if (ui_confirm_sync(t, &last_details, true)) {
+            } else if (ui_confirm_sync(t, &last_details, true, config.local_backups)) {
                 upload_title(t);
             } else {
                 set_status(UI_TONE_ACCENT, "Upload cancelled");
@@ -605,7 +605,7 @@ static void do_save_menu(void) {
                 server_query_failed("Download");
             } else if (!last_details.server_exists) {
                 ui_message(UI_TONE_INFO, "Download", "The server has no save for this game yet.");
-            } else if (ui_confirm_sync(t, &last_details, false)) {
+            } else if (ui_confirm_sync(t, &last_details, false, config.local_backups)) {
                 download_title(t);
             } else {
                 set_status(UI_TONE_ACCENT, "Download cancelled");
@@ -634,7 +634,12 @@ static void do_smart_sync(void) {
     if (!compare_title(idx, "Smart Sync")) return;
     SyncAction suggested = sync_decide(&last_details);
 
-    SyncAction chosen = ui_confirm_smart_sync(t, &last_details, suggested);
+    if (suggested == SYNC_ACTION_UP_TO_DATE) {
+        // Nothing to decide: say so without a modal
+        set_status(UI_TONE_OK, "Up to date: %.40s matches the server", t->name);
+        return;
+    }
+    SyncAction chosen = ui_confirm_smart_sync(t, &last_details, suggested, config.local_backups);
     if (suggested == SYNC_ACTION_SERVER_ERROR) {
         // Never upload or download on a server state we couldn't read
         set_status(UI_TONE_ERR, "Server unreachable, nothing changed");
@@ -642,8 +647,6 @@ static void do_smart_sync(void) {
         upload_title(t);
     } else if (chosen == SYNC_ACTION_DOWNLOAD) {
         download_title(t);
-    } else if (suggested == SYNC_ACTION_UP_TO_DATE) {
-        set_status(UI_TONE_OK, "Up to date: %.40s", t->name);
     } else {
         set_status(UI_TONE_ACCENT, "Sync cancelled");
     }

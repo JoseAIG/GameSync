@@ -90,6 +90,19 @@ typedef struct {
 // A/B/X/Y/START/SELECT/L/R close it, and so does a touch-up anywhere
 // (returns KEY_TOUCH).
 u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count);
+
+typedef struct {
+    // > 0: the first `row1` buttons share a first row, all filled (equal
+    // choices, neither looks like the default); the rest fill a second row
+    int row1;
+    bool x_icon;   // an error card: a cross before the title
+} UiDialogOpts;
+u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count,
+                 const UiDialogOpts *opts);
+// While a dialog runs: the keys of the button being pressed (a finger on
+// it, or its key held), 0 otherwise. The backdrop reads it to preview the
+// choice before it is made.
+u32 ui_dialog_pressed(void);
 // Copy `s` cut to one line of dialog body text (for lists of names)
 void ui_body_line(const char *s, char *out, int out_size);
 // Message closed by any button
@@ -281,16 +294,20 @@ bool ui_is_new3ds(void);
 void ui_show_save_details(const TitleInfo *title, const SaveDetails *details);
 
 // Upload / download confirmation with save details. A = true, B = false.
-bool ui_confirm_sync(const TitleInfo *title, const SaveDetails *details, bool is_upload);
+// `local_backups`: the config's value (what the card says about backups).
+bool ui_confirm_sync(const TitleInfo *title, const SaveDetails *details, bool is_upload, int local_backups);
 
 // Smart sync dialog: shows the comparison and the suggested action.
 // Returns SYNC_ACTION_UPLOAD / SYNC_ACTION_DOWNLOAD to perform, or
-// SYNC_ACTION_UP_TO_DATE for "nothing to do / cancelled". For a conflict
-// A uploads (the server keeps the old copy in its history), X downloads,
-// B cancels. When the server couldn't be queried (SYNC_ACTION_SERVER_ERROR)
-// it only explains that and returns SYNC_ACTION_SERVER_ERROR: never an
-// upload or download.
-SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *details, SyncAction suggested);
+// SYNC_ACTION_UP_TO_DATE for "nothing to do / cancelled" (an up-to-date
+// save opens no dialog at all). For a conflict A keeps this console's copy
+// (uploads; the server keeps the old copy in its history), X keeps the
+// server's (downloads), B cancels; the two are equal buttons mirroring the
+// cards, and pressing one previews which copy stays. When the server
+// couldn't be queried (SYNC_ACTION_SERVER_ERROR) it only explains that and
+// returns SYNC_ACTION_SERVER_ERROR: never an upload or download.
+SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *details, SyncAction suggested,
+                                 int local_backups);
 
 // History versions; returns the chosen timestamp (caller frees) or NULL
 char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int version_count);

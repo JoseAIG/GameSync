@@ -523,7 +523,7 @@ static void split_glyph(const char *glyph, char *key, size_t key_size, int *icon
 
 static float glyph_part_w(const char *key, int icon) {
     float w = key[0] ? gui_button_w(key) : 0;
-    if (icon) w += (w > 0 ? 4 : 0) + BTN_ICON_W;
+    if (icon) w += (w > 0 ? 3 : 0) + BTN_ICON_W;
     return w;
 }
 
@@ -577,7 +577,7 @@ void gui_btn_ex(GuiRect r, const char *glyph, const char *label, GuiBtnStyle sty
     float x = r.x + (r.w - cw) / 2;
     if (x < r.x + 6) x = r.x + 6;
     float cy = r.y + r.h / 2;
-    if (key[0]) x += button_glyph(x, cy, key, style == GUI_BTN_DISABLED) + 4;
+    if (key[0]) x += button_glyph(x, cy, key, style == GUI_BTN_DISABLED) + (icon ? 3 : 4);
     if (icon) {
         u32 c = gui_rgb(text);
         float icx = x + BTN_ICON_W / 2.0f;
@@ -641,7 +641,7 @@ void gui_panel(float x, float y, float w, float h) {
     gui_rrect(x, y, w, h, 7, gui_rgb(HEX_PANEL));
 }
 
-void gui_card(float x, float y, float w, float h, const char *title, u32 tone) {
+void gui_card_ex(float x, float y, float w, float h, const char *title, u32 tone, bool x_icon) {
     // Drop shadow
     gui_rrect(x + 2, y + 3, w, h, 8, gui_rgb(0x070B10));
     gui_rrect(x - 1, y - 1, w + 2, h + 2, 8, gui_mix(HEX_LINE, tone, 0.4f));
@@ -651,8 +651,30 @@ void gui_card(float x, float y, float w, float h, const char *title, u32 tone) {
         gui_rrect(x, y, w, 24, 7, gui_rgb(HEX_PANEL_HI));
         gui_rect(x, y + 14, w, 10, gui_rgb(HEX_PANEL_HI));
         gui_rect(x, y + 24, w, 1, gui_rgb(HEX_LINE));
-        gui_rrect(x + 9, y + 8, 4, 8, 2, gui_rgb(tone));
-        gui_text_mid(x + 19, y, 24, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - 28, title);
+        float tx = x + 19;
+        if (x_icon) {
+            // An error: a cross in a tone disc instead of the tone tab
+            gui_circle(x + 15, y + 12, 6.5f, gui_rgb(tone));
+            gui_icon_x(x + 15, y + 12, 9, gui_rgb(HEX_INK));
+            tx = x + 27;
+        } else {
+            gui_rrect(x + 9, y + 8, 4, 8, 2, gui_rgb(tone));
+        }
+        gui_text_mid(tx, y, 24, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - (tx - x) - 9, title);
+    }
+}
+
+void gui_card(float x, float y, float w, float h, const char *title, u32 tone) {
+    gui_card_ex(x, y, w, h, title, tone, false);
+}
+
+// A ring of 16 segments (citro2d has no ring primitive)
+void gui_ring(float cx, float cy, float r, float thick, u32 color) {
+    const int n = 16;
+    for (int i = 0; i < n; i++) {
+        float a0 = (float)i / n * 2 * (float)M_PI, a1 = (float)(i + 1) / n * 2 * (float)M_PI;
+        C2D_DrawLine(cx + cosf(a0) * r, cy + sinf(a0) * r, color, cx + cosf(a1) * r, cy + sinf(a1) * r, color,
+                     thick, 0.5f);
     }
 }
 

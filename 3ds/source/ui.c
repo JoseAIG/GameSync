@@ -194,6 +194,7 @@ static void layout_body(const char *body, float width, DialogLines *out) {
 
 #define DLG_MAX_BUTTONS 4
 #define DLG_BTN_AREA 40   // the card's bottom: 30 px buttons, 10 px margin below
+#define DLG_BTN_AREA2 (DLG_BTN_AREA + GUI_BTN_H + GUI_BTN_GAP)   // two rows
 
 static float body_height(const DialogLines *lines) {
     float lh = gui_line_h(GUI_S_BODY), h = 0;
@@ -201,18 +202,22 @@ static float body_height(const DialogLines *lines) {
     return h;
 }
 
-// Buttons split the card's inner width equally, 8 px apart. The touch
-// rects reach 5 px above and below each pill and halfway into the gaps,
-// so the row has no dead strips.
-static void card_buttons(float card_y, float card_h, int n, GuiRect *draw, GuiRect *touch) {
-    float by = card_y + card_h - 10 - GUI_BTN_H;
+// `n` buttons at y `by` splitting the card's inner width equally, 8 px
+// apart. The touch rects reach `above` / `below` px past each pill and
+// halfway into the gaps, so the row has no dead strips.
+static void button_row(float by, int n, float above, float below, GuiRect *draw, GuiRect *touch) {
     float avail = DLG_W - 24;
     float bw = (avail - GUI_BTN_GAP * (n - 1)) / (n > 0 ? n : 1);
     for (int i = 0; i < n; i++) {
         float x = DLG_X + 12 + i * (bw + GUI_BTN_GAP);
         draw[i] = gui_rect_make(x, by, bw, GUI_BTN_H);
-        touch[i] = gui_rect_make(x - GUI_BTN_GAP / 2.0f, by - 5, bw + GUI_BTN_GAP, GUI_BTN_H + 10);
+        touch[i] = gui_rect_make(x - GUI_BTN_GAP / 2.0f, by - above, bw + GUI_BTN_GAP, GUI_BTN_H + above + below);
     }
+}
+
+// One row in the card's bottom 40 px, with 5 px of touch above and below
+static void card_buttons(float card_y, float card_h, int n, GuiRect *draw, GuiRect *touch) {
+    button_row(card_y + card_h - 10 - GUI_BTN_H, n, 5, 5, draw, touch);
 }
 
 // The button that confirms (has A) is the filled one; with none, the last
@@ -223,18 +228,34 @@ static int primary_button(const UiButton *b, int n) {
 }
 
 typedef struct {
-    float y, h;
+    float y, h, area;
     GuiRect draw[DLG_MAX_BUTTONS], touch[DLG_MAX_BUTTONS];
-    int n, primary;
+    int n, primary, row1;
+    bool x_icon;
 } DialogGeom;
 
-static void dialog_geom(const DialogLines *lines, const UiButton *b, int n, DialogGeom *g) {
-    g->h = 24 + 10 + body_height(lines) + 10 + DLG_BTN_AREA;
+static void dialog_geom(const DialogLines *lines, const UiButton *b, int n, const UiDialogOpts *o, DialogGeom *g) {
+    g->row1 = o && o->row1 > 0 && o->row1 < n ? o->row1 : 0;
+    g->x_icon = o && o->x_icon;
+    g->area = g->row1 ? DLG_BTN_AREA2 : DLG_BTN_AREA;
+    g->h = 24 + 10 + body_height(lines) + 10 + g->area;
     if (g->h > GUI_H - 12) g->h = GUI_H - 12;
     g->y = (GUI_H - g->h) / 2;
     g->n = n;
     g->primary = primary_button(b, n);
-    card_buttons(g->y, g->h, n, g->draw, g->touch);
+    if (g->row1) {
+        // Two rows: the first `row1` buttons side by side, the rest below
+        float by2 = g->y + g->h - 10 - GUI_BTN_H, by1 = by2 - GUI_BTN_GAP - GUI_BTN_H;
+        button_row(by1, g->row1, 5, GUI_BTN_GAP / 2.0f, g->draw, g->touch);
+        button_row(by2, n - g->row1, GUI_BTN_GAP / 2.0f, 5, g->draw + g->row1, g->touch + g->row1);
+    } else {
+        card_buttons(g->y, g->h, n, g->draw, g->touch);
+    }
+}
+
+static GuiBtnStyle dialog_btn_style(const DialogGeom *g, int i) {
+    if (g->row1) return i < g->row1 ? GUI_BTN_PRIMARY : GUI_BTN_TONAL;
+    return i == g->primary ? GUI_BTN_PRIMARY : GUI_BTN_TONAL;
 }
 
 // `pressed`: index a finger is on, or -1; `held`: keys held down
@@ -244,7 +265,7 @@ static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines
     u32 hex = ui_tone_hex(tone);
 
     gui_dim();
-    gui_card(DLG_X, g->y, DLG_W, g->h, title, hex);
+    gui_card_ex(DLG_X, g->y, DLG_W, g->h, title, hex, g->x_icon);
 
     float ty = g->y + 24 + 9;
     for (int i = 0; i < lines->count; i++) {
@@ -253,7 +274,7 @@ static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines
             continue;
         }
         // Too long for the screen: stop above the buttons
-        if (ty + lh > g->y + g->h - DLG_BTN_AREA - 2) break;
+        if (ty + lh > g->y + g->h - g->area - 2) break;
         u32 color = lines->style[i] == 1 ? HEX_DIM : (lines->style[i] == 2 ? hex : HEX_TEXT);
         gui_text(DLG_X + 12, ty, GUI_S_BODY, gui_rgb(color), GUI_LEFT, lines->text[i]);
         ty += lh;
@@ -261,14 +282,19 @@ static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines
 
     for (int i = 0; i < g->n; i++) {
         bool down = pressed == i || (held & buttons[i].keys) != 0;
-        gui_btn(g->draw[i], buttons[i].button, buttons[i].label,
-                i == g->primary ? GUI_BTN_PRIMARY : GUI_BTN_TONAL, hex, down);
+        gui_btn(g->draw[i], buttons[i].button, buttons[i].label, dialog_btn_style(g, i), hex, down);
     }
 }
 
 static bool progress_cancelling;
+static u32 dialog_pressed_keys;   // see ui_dialog_pressed()
 
-u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count) {
+u32 ui_dialog_pressed(void) {
+    return dialog_pressed_keys;
+}
+
+u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count,
+                 const UiDialogOpts *opts) {
     static const UiButton any = { 0, "A", "Continue" };
     bool any_key = (count <= 0);
     if (any_key) {
@@ -279,8 +305,10 @@ u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *
     DialogLines lines;
     layout_body(body, DLG_W - 24, &lines);
     DialogGeom g;
-    dialog_geom(&lines, buttons, count, &g);
+    dialog_geom(&lines, buttons, count, opts, &g);
     progress_cancelling = false;   // whatever was cancelling has been answered
+    u32 all_keys = 0;
+    for (int i = 0; i < count; i++) all_keys |= buttons[i].keys;
 
     // Ignore keys still held from whatever opened the dialog, and the
     // finger that opened it
@@ -305,17 +333,26 @@ u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *
                 if (in.down & buttons[i].keys) result = in.down & buttons[i].keys;
             if (result) break;
         }
+        // What the backdrop may preview: the button under a finger, or a
+        // held key (on its press frame; sliding off cancels it)
+        u32 held = any_key ? 0 : (in.held & armed);
+        dialog_pressed_keys = (pressed >= 0 && !any_key ? buttons[pressed].keys : 0) | (held & all_keys);
 
         gui_begin(true);
         gui_screen(GUI_TOP);
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_dialog(tone, title, &lines, buttons, &g, pressed, any_key ? 0 : (in.held & armed));
+        draw_dialog(tone, title, &lines, buttons, &g, pressed, held);
         gui_end();
     }
+    dialog_pressed_keys = 0;
     ui_input_latch_touch();
     return result;
+}
+
+u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count) {
+    return ui_dialog_ex(tone, title, body, buttons, count, NULL);
 }
 
 void ui_body_line(const char *s, char *out, int out_size) {
@@ -1124,6 +1161,8 @@ typedef struct {
     const SaveDetails *details;
     SyncAction verdict;
     const char *section;
+    bool show_hashes;      // Save details only: hash prefixes and the last-synced hash
+    bool conflict_choice;  // the conflict dialog: outcomes under the cards, choice preview
 } CompareView;
 
 static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const char **head, const char **sub) {
@@ -1146,7 +1185,7 @@ static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const cha
             *hex = HEX_ERR;
             *head = "Conflict";
             *sub = d->has_last_synced ? "Both this console and the server changed"
-                                      : "No sync history: pick which copy wins";
+                                      : "No sync record: pick which copy to keep";
             break;
         case SYNC_ACTION_SERVER_ERROR:
             *hex = HEX_ERR;
@@ -1163,41 +1202,79 @@ static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const cha
     }
 }
 
-// `error` (with an optional `error_detail` line) replaces the contents when
-// the copy couldn't be read at all. `hash` NULL leaves the hash line out;
-// `extra_label` NULL shows `extra` on its own.
-static void save_column(float x, float y, float w, const char *heading, bool exists,
-                        int files, u32 size, const char *hash, const char *extra_label,
-                        const char *extra, u32 tone, const char *error, const char *error_detail) {
-    gui_rrect(x, y, w, 76, 6, gui_rgb(HEX_BG2));
-    gui_rrect(x, y, w, 3, 1.5f, gui_rgb(error ? HEX_ERR : tone));
-    gui_text(x + 8, y + 6, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, heading);
-    float lh = gui_line_h(GUI_S_SMALL);
-    if (error) {
-        gui_text_fit(x + 8, y + 8 + lh, GUI_S_BODY, gui_rgb(HEX_ERR), GUI_LEFT, w - 16, error);
-        if (error_detail && error_detail[0])
-            gui_text_wrap(x + 8, y + 9 + 2 * lh + 2, GUI_S_SMALL, gui_rgb(HEX_DIM), w - 16, 2, error_detail);
-        return;
+// One copy of a save, drawn the same way for both sides so neither looks
+// like the one to pick: heading, then three lines (state or date, size and
+// files, device). `missing` shows "No save"; `error` replaces the lines
+// when the copy couldn't be read at all.
+typedef struct {
+    const char *heading;
+    const char *line1;
+    const char *line2;
+    const char *line3;
+    bool missing;
+    const char *error, *error_detail;
+} SaveCard;
+
+#define CARD_W 186
+#define CARD_H 92
+#define CARD_Y 70
+#define CARD_X_LEFT 8
+#define CARD_X_RIGHT (GUI_TOP_W - 8 - CARD_W)
+
+// `emphasis`: 1 = the copy a pressed choice keeps (accent outline and a
+// "Keeps" pill), -1 = the one it replaces (faded), 0 = neither
+static void ui_save_card(float x, float y, const SaveCard *c, int emphasis) {
+    float w = CARD_W, h = CARD_H;
+    if (emphasis < 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(0.4f * 255)));
+    if (emphasis > 0) gui_rrect(x - 2, y - 2, w + 4, h + 4, 8, gui_rgb(HEX_ACCENT));
+    gui_rrect(x, y, w, h, 6, gui_rgb(HEX_BG2));
+    // The same neutral stripe on both: neither copy is the warning
+    gui_rrect(x, y, w, 3, 1.5f, gui_rgb(HEX_LINE));
+    gui_text(x + 10, y + 8, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, c->heading);
+    if (emphasis > 0) {
+        float pw = gui_pill_w(15, GUI_S_TINY, "Keeps");
+        gui_pill(x + w - 8 - pw, y + 7, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Keeps");
     }
-    if (!exists) {
-        gui_text(x + 8, y + 8 + lh, GUI_S_BODY, gui_rgb(HEX_MUTED), GUI_LEFT, "No save");
-        return;
+    float lx = x + 10, lw = w - 20, ly = y + 28, step = 18;
+    if (c->error) {
+        gui_text_fit(lx, ly, GUI_S_BODY, gui_rgb(HEX_ERR), GUI_LEFT, lw, c->error);
+        if (c->error_detail && c->error_detail[0])
+            gui_text_wrap(lx, ly + step, GUI_S_SMALL, gui_rgb(HEX_DIM), lw, 3, c->error_detail);
+    } else if (c->missing) {
+        gui_text(lx, ly, GUI_S_BODY, gui_rgb(HEX_MUTED), GUI_LEFT, "No save");
+        if (c->line3) gui_text_fit(lx, ly + 2 * step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line3);
+    } else {
+        if (c->line1) gui_text_fit(lx, ly, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line1);
+        if (c->line2) gui_text_fit(lx, ly + step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line2);
+        if (c->line3) gui_text_fit(lx, ly + 2 * step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line3);
     }
-    char size_str[24], line[48];
-    format_size(size, size_str, sizeof(size_str));
-    snprintf(line, sizeof(line), "%s  \xC2\xB7  %d file%s", size_str, files, files == 1 ? "" : "s");
-    gui_text_fit(x + 8, y + 6 + lh, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - 16, line);
-    float ly = y + 9 + 2 * lh;
-    if (hash) {
-        snprintf(line, sizeof(line), "%.16s", hash);
-        gui_text_fit(x + 8, ly, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, line);
-        ly += lh;
-    }
-    if (extra && extra[0]) {
-        char e[64];
-        if (extra_label) snprintf(e, sizeof(e), "%s %s", extra_label, extra);
-        else snprintf(e, sizeof(e), "%s", extra);
-        gui_text_fit(x + 8, ly, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, e);
+    if (emphasis < 0) C2D_Fade(0);
+}
+
+// "12.0 KB · 2 files"
+static void size_files(u32 size, int files, char *out, size_t out_size) {
+    char sz[24];
+    format_size(size, sz, sizeof(sz));
+    snprintf(out, out_size, "%s \xC2\xB7 %d file%s", sz, files, files == 1 ? "" : "s");
+}
+
+// Has this console's save changed since it was last synced?
+static const char *local_change_text(const SaveDetails *d) {
+    if (!d->has_last_synced) return "No sync record";
+    return strcmp(d->local_hash, d->last_synced_hash) != 0 ? "Changed since last sync" : "Same as last sync";
+}
+
+// A local read that failed outright (the hash field then holds the reason)
+static bool local_unreadable(const SaveDetails *d) {
+    return d->local_exists && d->local_file_count == 0 && strncmp(d->local_hash, "ERROR", 5) == 0;
+}
+
+static void console_card(const SaveDetails *d, const char *heading, char *buf2, size_t size2, SaveCard *c) {
+    size_files(d->local_size, d->local_file_count, buf2, size2);
+    *c = (SaveCard){ heading, local_change_text(d), buf2, "This console", !d->local_exists, NULL, NULL };
+    if (local_unreadable(d)) {
+        c->error = "Can't read the save";
+        c->error_detail = d->local_hash;
     }
 }
 
@@ -1211,33 +1288,58 @@ static void compare_top(void *ctx) {
               "%s%s", c->title->title_id_hex,
               c->title->media_type == MEDIATYPE_GAME_CARD ? "  \xC2\xB7  game card" : "");
 
-    float y = 70, w = (GUI_TOP_W - 16 - 10) / 2.0f;
-    char date[32];
-    format_date(d->server_last_sync, date, sizeof(date));
-    char server_err[40] = "";
+    // The two copies, equal
+    char lsize[48], ssize[48], when[40], device[40], server_err[40] = "";
+    SaveCard left, right;
+    console_card(d, "This console", lsize, sizeof(lsize), &left);
+    size_files(d->server_size, d->server_file_count, ssize, sizeof(ssize));
+    ui_format_when(d->server_last_sync, when, sizeof(when));
+    ui_device_label(d->server_console_id, device, sizeof(device));
+    right = (SaveCard){ "Server", when, ssize, device, !d->server_exists, NULL, NULL };
     if (d->server_error) {
         if (d->server_status)
             snprintf(server_err, sizeof(server_err), "Server error (HTTP %lu)", (unsigned long)d->server_status);
         else
             snprintf(server_err, sizeof(server_err), "No response");
+        right.error = server_err;
+        right.error_detail = d->server_error_msg;
     }
-    save_column(8, y, w, "This console", d->local_exists, d->local_file_count, d->local_size,
-                d->local_hash, NULL, NULL, HEX_WARN, NULL, NULL);
-    save_column(8 + w + 10, y, w, "Server", d->server_exists, d->server_file_count, d->server_size,
-                d->server_hash, "Synced", d->server_exists ? date : NULL, HEX_INFO,
-                d->server_error ? server_err : NULL, d->server_error_msg);
+    // Choice preview: pressing A (keep this console) or X (keep the server)
+    // shows which copy stays before anything happens
+    int le = 0, re = 0;
+    if (c->conflict_choice) {
+        u32 keys = ui_dialog_pressed();
+        if (keys & KEY_A) { le = 1; re = -1; }
+        else if (keys & KEY_X) { le = -1; re = 1; }
+    }
+    ui_save_card(CARD_X_LEFT, CARD_Y, &left, le);
+    ui_save_card(CARD_X_RIGHT, CARD_Y, &right, re);
 
-    // Last synced hash
-    y += 82;
-    gui_text(10, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Last synced");
-    gui_text_fit(84, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 94,
-                 d->has_last_synced ? d->last_synced_hash : "never synced from this console");
+    float y = CARD_Y + CARD_H + 6, lh = gui_line_h(GUI_S_SMALL);
+    if (c->conflict_choice) {
+        // What each choice does, under its card
+        float cy = y + lh / 2;
+        float x = CARD_X_LEFT + 4;
+        x += gui_button(x, cy, "A") + 4;
+        gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Keep this one (upload)");
+        x = CARD_X_RIGHT + 4;
+        x += gui_button(x, cy, "X") + 4;
+        gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Keep this one (download)");
+    } else if (c->show_hashes) {
+        // Save details: the raw fingerprints, for whoever wants them
+        char line[160];
+        snprintf(line, sizeof(line), "Console %.16s  \xC2\xB7  Server %.16s",
+                 d->local_exists ? d->local_hash : "-", d->server_exists ? d->server_hash : "-");
+        gui_text_fit(10, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
+        snprintf(line, sizeof(line), "Last synced %s", d->has_last_synced ? d->last_synced_hash : "never");
+        gui_text_fit(10, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
+    }
 
     // Verdict banner
     u32 hex;
     const char *head, *sub;
     verdict_text(d, c->verdict, &hex, &head, &sub);
-    float by = 176, bh = 34;
+    float by = 190, bh = 32;
     gui_rrect(8, by, GUI_TOP_W - 16, bh, 7, gui_mix(HEX_BG2, hex, 0.18f));
     gui_rrect(8, by, 4, bh, 2, gui_rgb(hex));
     float icx = 28, icy = by + bh / 2;
@@ -1249,8 +1351,8 @@ static void compare_top(void *ctx) {
         case SYNC_ACTION_SERVER_ERROR: gui_text_mid(icx, by, bh, 0.6f, gui_rgb(HEX_INK), GUI_CENTER, 0, "!"); break;
         default:                   gui_icon_check(icx, icy, 11, gui_rgb(HEX_INK)); break;
     }
-    gui_text(46, by + 3, GUI_S_BODY, gui_rgb(hex), GUI_LEFT, head);
-    gui_text_fit(46, by + 3 + gui_line_h(GUI_S_BODY) - 1, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
+    gui_text(46, by + 2, GUI_S_BODY, gui_rgb(hex), GUI_LEFT, head);
+    gui_text_fit(46, by + 2 + gui_line_h(GUI_S_BODY) - 1, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
                  GUI_TOP_W - 60, sub);
 
     // Thin footer so the top screen looks finished
@@ -1262,34 +1364,58 @@ static void compare_bottom(void *ctx) {
     gui_header_bar();
 }
 
-static u32 run_compare(const TitleInfo *title, const SaveDetails *details, SyncAction verdict,
-                       const char *section, UiTone tone, const char *card_title, const char *body,
-                       const UiButton *buttons, int count) {
-    CompareView view = { title, details, verdict, section };
-    UiBackdrop prev = ui_set_backdrop(compare_top, compare_bottom, &view);
-    u32 key = ui_dialog(tone, card_title, body, buttons, count);
+static u32 run_compare_ex(const CompareView *view, UiTone tone, const char *card_title, const char *body,
+                          const UiButton *buttons, int count, const UiDialogOpts *opts) {
+    UiBackdrop prev = ui_set_backdrop(compare_top, compare_bottom, (void *)view);
+    u32 key = ui_dialog_ex(tone, card_title, body, buttons, count, opts);
     ui_restore_backdrop(prev);
     return key;
 }
 
-void ui_show_save_details(const TitleInfo *title, const SaveDetails *details) {
-    static const UiButton b[] = { { KEY_B | KEY_A, "B", "Close" } };
-    run_compare(title, details, sync_decide(details), "Save details", UI_TONE_ACCENT,
-                "Save details", UI_DIM "Local copy on the left, server copy on the right.", b, 1);
+static u32 run_compare(const TitleInfo *title, const SaveDetails *details, SyncAction verdict,
+                       const char *section, UiTone tone, const char *card_title, const char *body,
+                       const UiButton *buttons, int count) {
+    CompareView view = { title, details, verdict, section, false, false };
+    return run_compare_ex(&view, tone, card_title, body, buttons, count, NULL);
 }
 
-bool ui_confirm_sync(const TitleInfo *title, const SaveDetails *details, bool is_upload) {
+void ui_show_save_details(const TitleInfo *title, const SaveDetails *details) {
+    static const UiButton b[] = { { KEY_B | KEY_A, "B", "Close" } };
+    CompareView view = { title, details, sync_decide(details), "Save details", true, false };
+    run_compare_ex(&view, UI_TONE_ACCENT, "Save details",
+                   UI_DIM "This console's copy on the left, the server's on the right.", b, 1, NULL);
+}
+
+// A save much smaller than the server's (or with fewer files) is often a
+// fresh game or an old backup about to replace real progress
+static bool upload_looks_like_rollback(const SaveDetails *d) {
+    return d->server_exists && d->local_exists &&
+           (d->local_size < d->server_size / 2 || d->local_file_count < d->server_file_count);
+}
+
+#define ROLLBACK_LINE UI_HI "This save is much smaller than the server's: a new game or an old backup?"
+
+bool ui_confirm_sync(const TitleInfo *title, const SaveDetails *details, bool is_upload, int local_backups) {
     UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", is_upload ? "Upload" : "Download" } };
+    char body[320];
+    if (is_upload)
+        snprintf(body, sizeof(body), "This console's save replaces the server's copy. "
+                 "The server keeps its old copy in History.%s",
+                 upload_looks_like_rollback(details) ? "\n" ROLLBACK_LINE : "");
+    else
+        snprintf(body, sizeof(body), "The server's save replaces the one on this console.%s",
+                 !details->local_exists ? ""
+                 : local_backups > 0 ? " Your current save is backed up to the SD first."
+                 : "\n" UI_HI "Your current save is not backed up (Local backups is off).");
     u32 key = run_compare(title, details, is_upload ? SYNC_ACTION_UPLOAD : SYNC_ACTION_DOWNLOAD,
                           is_upload ? "Upload" : "Download", is_upload ? UI_TONE_WARN : UI_TONE_INFO,
-                          is_upload ? "Upload to the server?" : "Download from the server?",
-                          is_upload ? "This console's save replaces the server copy."
-                                    : "The server's save replaces the one on this console.",
-                          b, 2);
+                          is_upload ? "Upload to the server?" : "Download from the server?", body, b, 2);
     return (key & KEY_A) != 0;
 }
 
-SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *details, SyncAction suggested) {
+SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *details, SyncAction suggested,
+                                 int local_backups) {
+    const SaveDetails *d = details;
     if (suggested == SYNC_ACTION_SERVER_ERROR) {
         // Couldn't read the server's copy: offer nothing that would change a save
         static const UiButton b[] = { { KEY_A | KEY_B, "A", "OK" } };
@@ -1299,34 +1425,51 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
                     b, 1);
         return SYNC_ACTION_SERVER_ERROR;
     }
+    if (suggested == SYNC_ACTION_UP_TO_DATE) return SYNC_ACTION_UP_TO_DATE;   // nothing to ask
     if (suggested == SYNC_ACTION_CONFLICT) {
+        // Two equal choices mirroring the cards (A left, X right), Cancel
+        // below. The keys are v055's: A uploads, X downloads, B cancels.
         static const UiButton b[] = {
-            { KEY_B, "B", "Cancel" }, { KEY_X, "X", "Download" }, { KEY_A, "A", "Upload" },
+            { KEY_A, "A^up", "Keep this console" }, { KEY_X, "X^down", "Keep server" }, { KEY_B, "B", "Cancel" },
         };
-        u32 key = run_compare(title, details, suggested, "Smart Sync", UI_TONE_ERR,
-                              "Both copies changed",
-                              "Pick the copy to keep:\n"
-                              UI_DIM "A uploads this console's save (the server\n"
-                              UI_DIM "keeps its old copy in the history).\n"
-                              UI_DIM "X downloads the server's save to this console.",
-                              b, 3);
+        char body[320];
+        snprintf(body, sizeof(body), "%s\n" UI_DIM "%s",
+                 d->has_last_synced ? "Both changed since the last sync. Pick the copy to keep."
+                                    : "The copies differ and there's no sync record. Pick the copy to keep.",
+                 local_backups > 0 ? "The server keeps its copy in History; this console's is backed up to the SD first."
+                                   : "The server keeps its copy in History; this console's is not backed up.");
+        CompareView view = { title, details, suggested, "Smart Sync", false, true };
+        UiDialogOpts opts = { 2, false };
+        u32 key = run_compare_ex(&view, UI_TONE_ERR, "Both copies changed", body, b, 3, &opts);
         if (key & KEY_A) return SYNC_ACTION_UPLOAD;
         if (key & KEY_X) return SYNC_ACTION_DOWNLOAD;
         return SYNC_ACTION_UP_TO_DATE;
     }
-    if (suggested == SYNC_ACTION_UP_TO_DATE) {
-        static const UiButton b[] = { { KEY_A | KEY_B, "A", "OK" } };
-        run_compare(title, details, suggested, "Smart Sync", UI_TONE_OK, "Already in sync",
-                    "Nothing to do: this console and the server have the same save.", b, 1);
-        return SYNC_ACTION_UP_TO_DATE;
-    }
+    // Say what will happen and which side changed: the hashes know that,
+    // not which copy is newer
     bool up = (suggested == SYNC_ACTION_UPLOAD);
+    char body[384];
+    UiTone tone = up ? UI_TONE_WARN : UI_TONE_INFO;
+    if (up) {
+        snprintf(body, sizeof(body), "%s%s",
+                 !d->server_exists ? "This save isn't on the server yet. Send it?"
+                 : d->has_last_synced ? "Only this console changed since the last sync. Send it to the server? "
+                                        "The server keeps its old copy in History."
+                 : "Send this console's save to the server? The server keeps its old copy in History.",
+                 upload_looks_like_rollback(d) ? "\n" ROLLBACK_LINE : "");
+    } else if (!d->local_exists) {
+        snprintf(body, sizeof(body), "This console has no save for this game yet. Copy the server's save here?");
+    } else {
+        char device[40], when[40];
+        ui_device_label(d->server_console_id, device, sizeof(device));
+        ui_format_when(d->server_last_sync, when, sizeof(when));
+        snprintf(body, sizeof(body), "%s (%s, %s). Replace this console's save?%s",
+                 d->has_last_synced ? "Only the server changed" : "The server's copy is different", device, when,
+                 local_backups > 0 ? " Your current save is backed up to the SD first." : "");
+    }
     UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", up ? "Upload" : "Download" } };
-    u32 key = run_compare(title, details, suggested, "Smart Sync", up ? UI_TONE_WARN : UI_TONE_INFO,
-                          up ? "Upload this save?" : "Download this save?",
-                          up ? "This console has the newer save. Send it to the server?"
-                             : "The server has the newer save. Copy it to this console?",
-                          b, 2);
+    u32 key = run_compare(title, details, suggested, "Smart Sync", tone,
+                          up ? "Upload this save?" : "Download this save?", body, b, 2);
     return (key & KEY_A) ? suggested : SYNC_ACTION_UP_TO_DATE;
 }
 
@@ -1471,25 +1614,20 @@ static void restore_top(void *ctx) {
               "%s%s", r->title->title_id_hex,
               r->title->media_type == MEDIATYPE_GAME_CARD ? "  \xC2\xB7  game card" : "");
 
-    float y = 70, w = (GUI_TOP_W - 16 - 10) / 2.0f;
     // Left: what is on the console now, and whether it changed since the
-    // last sync (i.e. whether restoring loses progress the server never saw)
-    const char *state = !d->has_last_synced ? "No sync record"
-                      : strcmp(d->local_hash, d->last_synced_hash) != 0 ? "Changed since last sync"
-                      : "Same as last sync";
-    bool unreadable = d->local_exists && d->local_file_count == 0 && strncmp(d->local_hash, "ERROR", 5) == 0;
-    save_column(8, y, w, "Now on this console", d->local_exists, d->local_file_count, d->local_size,
-                NULL, NULL, state, HEX_LINE, unreadable ? "Can't read the save" : NULL,
-                unreadable ? d->local_hash : NULL);
-
-    // Right: the version that replaces it
-    char pos[32], when[40];
+    // last sync (i.e. whether restoring loses progress the server never saw).
+    // Right: the version that replaces it.
+    char lsize[48], vsize[48], pos[32], when[40];
+    SaveCard left, right;
+    console_card(d, "Now on this console", lsize, sizeof(lsize), &left);
     snprintf(pos, sizeof(pos), "Version %d of %d", r->index + 1, r->count);
     ui_format_when(r->version->timestamp, when, sizeof(when));
-    save_column(8 + w + 10, y, w, pos, true, r->version->file_count, r->version->size,
-                NULL, NULL, when, HEX_INFO, NULL, NULL);
+    size_files(r->version->size, r->version->file_count, vsize, sizeof(vsize));
+    right = (SaveCard){ pos, when, vsize, "Server History", false, NULL, NULL };
+    ui_save_card(CARD_X_LEFT, CARD_Y, &left, 0);
+    ui_save_card(CARD_X_RIGHT, CARD_Y, &right, 0);
 
-    gui_text_fit(10, y + 84, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20,
+    gui_text_fit(10, CARD_Y + CARD_H + 6, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20,
                  "The server keeps every version: restoring one doesn't remove any.");
 
     // Thin footer so the top screen looks finished

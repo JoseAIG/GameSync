@@ -244,6 +244,7 @@ typedef struct {
     const UiBar *bar;
     u32 held;
     bool chip_pressed;         // finger on the "N marked" chip
+    int seg_held;              // 1 + All/3DS/NDS segment under a finger, 0 = none
 } SavesView;
 
 void ui_draw_saves_top(const SavesView *v);
@@ -254,6 +255,8 @@ int ui_saves_bar(const SavesView *v, UiBarItem *items);
 // Touch target of the header's "N marked" chip (B = unmark all); w = 0
 // when nothing is marked
 GuiRect ui_saves_marked_chip(const SavesView *v);
+// Touch targets of the header's All / 3DS / NDS segments (VIEW_*); returns 3
+int ui_saves_segments(GuiRect *touch);
 
 // ---------------------------------------------------------------------------
 // Save dialogs

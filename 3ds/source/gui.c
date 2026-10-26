@@ -676,7 +676,8 @@ void gui_header_tabs(const char *const *labels, int count, int active) {
     float cy = GUI_HEADER_H / 2.0f;
     float x = 30;
     x += gui_button(x, cy, "L") + 4;
-    x = gui_tabs(x, 4, 18, labels, count, active) + 4;
+    static GuiTabsAnim anim;   // one strip, shared by every tab's header
+    x = gui_tabs(&anim, x, 4, 18, labels, count, active, NULL) + 4;
     gui_button(x, cy, "R");
     if (screen_id == GUI_TOP) {
         float left = gui_status_icons(screen_w - 8, cy);
@@ -707,17 +708,60 @@ void gui_footer(const GuiHint *hints, int count) {
     }
 }
 
-float gui_tabs(float x, float y, float h, const char *const *labels, int count, int active) {
-    float pad = 9, total = 0;
-    for (int i = 0; i < count; i++) total += gui_text_w(GUI_S_SMALL, labels[i]) + pad * 2;
-    gui_rrect(x, y, total + 4, h, h / 2, gui_rgb(HEX_BG));
+#define TAB_PAD 9
+
+float gui_tabs_layout(float x, float y, float h, const char *const *labels, int count, GuiRect *rects) {
     float cx = x + 2;
+    if (count > GUI_TABS_MAX) count = GUI_TABS_MAX;
     for (int i = 0; i < count; i++) {
-        float w = gui_text_w(GUI_S_SMALL, labels[i]) + pad * 2;
-        bool on = (i == active);
-        if (on) gui_rrect(cx, y + 2, w, h - 4, (h - 4) / 2, gui_rgb(HEX_ACCENT));
-        gui_text_mid(cx + w / 2, y, h, GUI_S_SMALL, gui_rgb(on ? HEX_INK : HEX_DIM), GUI_CENTER, 0, labels[i]);
+        float w = gui_text_w(GUI_S_SMALL, labels[i]) + TAB_PAD * 2;
+        if (rects) rects[i] = gui_rect_make(cx, y, w, h);
         cx += w;
     }
-    return x + total + 4;
+    return cx + 2;
+}
+
+float gui_tabs(GuiTabsAnim *a, float x, float y, float h, const char *const *labels, int count, int active,
+               GuiRect *rects) {
+    GuiRect seg[GUI_TABS_MAX];
+    if (count > GUI_TABS_MAX) count = GUI_TABS_MAX;
+    float right = gui_tabs_layout(x, y, h, labels, count, seg);
+    if (rects)
+        for (int i = 0; i < count; i++) rects[i] = seg[i];
+    gui_rrect(x, y, right - x, h, h / 2, gui_rgb(HEX_BG));
+    if (count <= 0) return right;
+
+    bool on = active >= 0 && active < count;
+    float tx = on ? seg[active].x - x : 0, tw = on ? seg[active].w : 0;
+    float px = tx, pw = tw;
+    if (a) {
+        if (!a->init || a->count != count) {
+            gui_spring_set(&a->x, tx);
+            gui_spring_set(&a->w, tw);
+            a->count = count;
+            a->init = true;
+        }
+        // Once a frame; a retarget mid-flight continues from where the pill is
+        if (a->frame != ticks) {
+            a->frame = ticks;
+            gui_spring(&a->x, tx, GUI_RESP_PILL, frame_dt);
+            gui_spring(&a->w, tw, GUI_RESP_PILL, frame_dt);
+        }
+        px = a->x.x;
+        pw = a->w.x;
+        // A finger on another segment: a soft press under its label
+        int held = a->held - 1;
+        if (held >= 0 && held < count && held != active)
+            gui_rrect(seg[held].x, y + 2, seg[held].w, h - 4, (h - 4) / 2, gui_mix(HEX_BG, HEX_ACCENT, 0.25f));
+    }
+    if (on && pw > 0) gui_rrect(x + px, y + 2, pw, h - 4, (h - 4) / 2, gui_rgb(HEX_ACCENT));
+    for (int i = 0; i < count; i++) {
+        // Label colour by how much of its segment the pill covers
+        float s0 = seg[i].x - x, s1 = s0 + seg[i].w;
+        float o0 = s0 > px ? s0 : px, o1 = s1 < px + pw ? s1 : px + pw;
+        float cover = on && o1 > o0 ? (o1 - o0) / seg[i].w : 0;
+        gui_text_mid(seg[i].x + seg[i].w / 2, y, h, GUI_S_SMALL, gui_mix(HEX_DIM, HEX_INK, cover), GUI_CENTER, 0,
+                     labels[i]);
+    }
+    return right;
 }

@@ -913,6 +913,19 @@ int ui_saves_bar(const SavesView *v, UiBarItem *items) {
     return SAVES_BAR_COUNT;
 }
 
+static const char *const saves_tabs[] = { "All", "3DS", "NDS" };
+
+static float saves_tabs_x(void) {
+    return 6 + gui_button_w("SELECT") + 4;
+}
+
+int ui_saves_segments(GuiRect *touch) {
+    gui_tabs_layout(saves_tabs_x(), 4, 18, saves_tabs, 3, touch);
+    // The whole header height
+    for (int i = 0; i < 3; i++) touch[i] = gui_rect_make(touch[i].x, 0, touch[i].w, GUI_HEADER_H);
+    return 3;
+}
+
 void ui_draw_saves_bottom(const SavesView *v) {
     UiListGeom g = SAVES_GEOM;
     if (v->count > 0) {
@@ -922,9 +935,11 @@ void ui_draw_saves_bottom(const SavesView *v) {
     }
 
     gui_header_bar_ex(v->count == 0 || ui_list_at_top(v->anim));
-    static const char *const tabs[] = { "All", "3DS", "NDS" };
-    float tx = 6 + gui_button(6, GUI_HEADER_H / 2.0f, "SELECT") + 4;
-    gui_tabs(tx, 4, 18, tabs, 3, v->view_mode);
+    // SELECT cycles the view; a tap on a segment picks it
+    static GuiTabsAnim tabs_anim;
+    gui_button(6, GUI_HEADER_H / 2.0f, "SELECT");
+    tabs_anim.held = v->seg_held;
+    gui_tabs(&tabs_anim, saves_tabs_x(), 4, 18, saves_tabs, 3, v->view_mode, NULL);
     char count[32], marked[24];
     GuiRect chip;
     saves_header_layout(v, count, sizeof(count), marked, sizeof(marked), &chip);

@@ -259,7 +259,24 @@ typedef struct {
 // Footer bar with button hints, laid out left to right
 void gui_footer(const GuiHint *hints, int count);
 
-// Segmented tabs; returns the right edge
-float gui_tabs(float x, float y, float h, const char *const *labels, int count, int active);
+// Segmented tabs. The pill's x and width spring toward the active segment
+// (GUI_RESP_PILL), so a change glides from wherever the pill is, and each
+// label's colour follows how much of the pill covers it. `anim` may be
+// NULL (no motion); keep one per strip, zeroed to start.
+#define GUI_TABS_MAX 6
+typedef struct {
+    GuiSpring x, w;     // pill, px from the strip's left edge
+    int count;
+    bool init;
+    u32 frame;          // last stepped frame
+    int held;           // 1 + index of the segment under a finger, 0 = none
+} GuiTabsAnim;
+// Segment rects of a strip at (x, y), height h, without drawing; returns
+// the strip's right edge
+float gui_tabs_layout(float x, float y, float h, const char *const *labels, int count, GuiRect *rects);
+// Draws the strip; `rects` (may be NULL) gets each segment's rect.
+// Returns the right edge.
+float gui_tabs(GuiTabsAnim *anim, float x, float y, float h, const char *const *labels, int count, int active,
+               GuiRect *rects);
 
 #endif // GAMESYNC_GUI_H

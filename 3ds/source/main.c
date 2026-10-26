@@ -32,6 +32,8 @@ static UiListAnim saves_anim;   // the save list's presentation state
 static UiBar saves_bar = UI_BAR_INIT;
 static UiTap saves_chip_tap = UI_TAP_INIT;
 static bool saves_chip_pressed;
+static UiTap saves_seg_tap = UI_TAP_INIT;
+static int saves_seg_held;      // 1 + segment under a finger, 0 = none
 static u32 saves_held;          // keys held, while the Saves loop itself draws
 
 #define LIST_VISIBLE SAVES_ROWS
@@ -142,6 +144,7 @@ static void refresh_view(void) {
     view.bar = &saves_bar;
     view.held = saves_held;
     view.chip_pressed = saves_chip_pressed;
+    view.seg_held = saves_seg_held;
 }
 
 static void saves_top(void *ctx) {
@@ -753,11 +756,17 @@ static UiNav saves_tab(void) {
         int pressed_chip = -1;
         bool chip_hit = ui_tap_buttons(&saves_chip_tap, &in, &chip, 1, &pressed_chip) == 0;
         saves_chip_pressed = pressed_chip == 0;
+        GuiRect seg[3];
+        int nseg = ui_saves_segments(seg), seg_pressed = -1;
+        int seg_hit = ui_tap_buttons(&saves_seg_tap, &in, seg, nseg, &seg_pressed);
+        saves_seg_held = seg_pressed + 1;
         UiBarItem items[SAVES_BAR_COUNT];
         int nitems = ui_saves_bar(&view, items);
         int hit = ui_bar_input(&saves_bar, &in, items, nitems);
 
+        // SELECT cycles All -> 3DS -> NDS; a tap on a segment picks it
         if (kDown & KEY_SELECT) saves_set_view((view_mode + 1) % 3);
+        else if (seg_hit >= 0 && seg_hit != view_mode) saves_set_view(seg_hit);
         if (hit == SAVES_BAR_Y || (kDown & KEY_Y)) saves_do_y();
         if (hit == SAVES_BAR_A || (kDown & KEY_A)) saves_do_a();
         if (hit == SAVES_BAR_X || (kDown & KEY_X)) saves_do_x();
@@ -772,6 +781,7 @@ static UiNav saves_tab(void) {
         gui_end();
         saves_held = 0;
         saves_chip_pressed = false;
+        saves_seg_held = 0;
     }
     return UI_NAV_EXIT;
 }

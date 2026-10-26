@@ -85,6 +85,8 @@ typedef struct {
     UiListAnim anim;
     UiBar bar;
     u32 held;                // keys held while the tab's own loop draws (else 0)
+    GuiTabsAnim tabs;        // the systems strip
+    UiTap seg_tap;
 
     bool installed_loaded;
     char rom_dir[MAX_PATH_LEN];  // where files of this system go
@@ -806,6 +808,21 @@ static int cat_bar(const Catalog *cat, UiBarItem *items) {
     return CAT_BAR_COUNT;
 }
 
+// Left edge of the systems strip (after the SELECT glyph when it cycles)
+static float cat_tabs_x(const Catalog *cat) {
+    return 6 + (cat->nsystems > 1 ? gui_button_w("SELECT") + 4 : 0);
+}
+
+// Touch targets of the systems strip (the whole header height)
+static int cat_segments(const Catalog *cat, GuiRect *touch) {
+    const char *labels[CAT_MAX_SYSTEMS];
+    int n = cat->nsystems < CAT_MAX_SYSTEMS ? cat->nsystems : CAT_MAX_SYSTEMS;
+    for (int i = 0; i < n; i++) labels[i] = cat->systems[i];
+    gui_tabs_layout(cat_tabs_x(cat), 4, 18, labels, n, touch);
+    for (int i = 0; i < n; i++) touch[i] = gui_rect_make(touch[i].x, 0, touch[i].w, GUI_HEADER_H);
+    return n;
+}
+
 static void draw_bottom(void *ctx) {
     Catalog *cat = ctx;
     bool has_rows = cat->ready && cat->total > 0;
@@ -824,10 +841,11 @@ static void draw_bottom(void *ctx) {
     gui_header_bar_ex(!has_rows || ui_list_at_top(&cat->anim));
     const char *labels[CAT_MAX_SYSTEMS];
     for (int i = 0; i < cat->nsystems && i < CAT_MAX_SYSTEMS; i++) labels[i] = cat->systems[i];
-    float x = 6;
-    // SELECT cycles the systems: the glyph sits before the segmented control
-    if (cat->nsystems > 1) x += gui_button(x, GUI_HEADER_H / 2.0f, "SELECT") + 4;
-    if (cat->nsystems > 0) x = gui_tabs(x, 4, 18, labels, cat->nsystems, cat->sys) + 6;
+    // SELECT cycles the systems: the glyph sits before the segmented
+    // control; a tap on a segment picks it
+    float x = cat_tabs_x(cat);
+    if (cat->nsystems > 1) gui_button(6, GUI_HEADER_H / 2.0f, "SELECT");
+    if (cat->nsystems > 0) x = gui_tabs(&cat->tabs, x, 4, 18, labels, cat->nsystems, cat->sys, NULL) + 6;
     if (cat->ra_only) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_RA), gui_rgb(HEX_INK), "RA only") + 4;
     if (cat->search[0]) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Search") + 4;
     if (cat->offline) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_WARN), gui_rgb(HEX_INK), "Offline") + 4;
@@ -1329,6 +1347,7 @@ static Catalog *get_catalog(const AppConfig *config) {
         cat->win = win;
         cat->total = -1;
         cat->bar = (UiBar)UI_BAR_INIT;
+        cat->seg_tap = (UiTap)UI_TAP_INIT;
         cat->anim.pressed_row = -1;
         g_cat = cat;
     }
@@ -1450,6 +1469,10 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
         UiBarItem items[CAT_BAR_COUNT];
         int nitems = cat_bar(cat, items);
         int hit = ui_bar_input(&cat->bar, &in, items, nitems);
+        GuiRect seg[CAT_MAX_SYSTEMS];
+        int nseg = cat->ready ? cat_segments(cat, seg) : 0, seg_pressed = -1;
+        int seg_hit = ui_tap_buttons(&cat->seg_tap, &in, seg, nseg, &seg_pressed);
+        cat->tabs.held = seg_pressed + 1;
 
         if (!cat->ready || cat->nsystems == 0) {
             if (hit == CAT_BAR_A || (down & KEY_A)) cat_do_a(cat);
@@ -1476,12 +1499,14 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
             if (hit == CAT_BAR_Y || (down & KEY_Y)) cat_search(cat);
             if (down & KEY_B) cat_clear_search(cat);
             if ((down & KEY_SELECT) && cat->nsystems > 1) cat_set_system(cat, (cat->sys + 1) % cat->nsystems);
+            else if (seg_hit >= 0) cat_set_system(cat, seg_hit);
             if (hit == CAT_BAR_A || tap_install || (down & KEY_A)) cat_do_a(cat);
         }
 
         cat->held = in.held;
         draw_frame(cat);
         cat->held = 0;
+        cat->tabs.held = 0;
     }
 
     ui_restore_backdrop(prev);

@@ -59,6 +59,8 @@ import com.savesync.android.workers.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.cancellation.CancellationException
@@ -316,6 +318,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (pending.isEmpty()) return@transformLatest
         val full = first.toMutableList()
         for (i in pending) {
+            // A newer input supersedes this run (transformLatest): stop
+            // between saves instead of hashing the rest for nothing.  What
+            // was hashed so far stays in the cache.
+            currentCoroutineContext().ensureActive()
             val entry = inputs.saves[i]
             val status = fullStatusFor(entry, inputs.syncMap[entry.titleId], inputs.saturnFormat)
             keys[i]?.let { statusCache[it] = status }

@@ -157,7 +157,43 @@ static void test_search(void) {
     CHECK_STR(small, "\xC3\xA9");
 }
 
+static void test_backup_choices(void) {
+    int values[UI_BACKUP_CHOICES_MAX], initial = -1;
+    char labels[UI_BACKUP_CHOICES_MAX][UI_BACKUP_LABEL_LEN];
+    char out[32];
+    ui_format_copies(0, out, sizeof(out));
+    CHECK_STR(out, "Off");
+    ui_format_copies(1, out, sizeof(out));
+    CHECK_STR(out, "1 copy");
+    ui_format_copies(3, out, sizeof(out));
+    CHECK_STR(out, "3 copies");
+
+    // A preset: five rows, opened on it
+    int n = ui_backup_choices(3, values, labels, &initial);
+    CHECK(n == 5 && initial == 2 && values[initial] == 3);
+    CHECK_STR(labels[0], "Off");
+    CHECK_STR(labels[4], "10 copies");
+    n = ui_backup_choices(0, values, labels, &initial);
+    CHECK(n == 5 && initial == 0);
+    n = ui_backup_choices(10, values, labels, &initial);
+    CHECK(n == 5 && initial == 4);
+
+    // Another value is inserted in order and picked: closing keeps it
+    n = ui_backup_choices(7, values, labels, &initial);
+    CHECK(n == 6 && initial == 4 && values[4] == 7);
+    CHECK_STR(labels[4], "7 copies (current)");
+    CHECK(values[3] == 5 && values[5] == 10);
+    n = ui_backup_choices(2, values, labels, &initial);
+    CHECK(n == 6 && initial == 2 && values[2] == 2 && values[1] == 1);
+    n = ui_backup_choices(50, values, labels, &initial);
+    CHECK(n == 6 && initial == 5 && values[5] == 50);
+    CHECK_STR(labels[5], "50 copies (current)");
+    // Sorted, every time
+    for (int i = 1; i < n; i++) CHECK(values[i - 1] < values[i]);
+}
+
 int main(void) {
+    test_backup_choices();
     test_search();
     test_text_entry();
     test_parse();

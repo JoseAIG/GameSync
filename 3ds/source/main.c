@@ -953,7 +953,7 @@ static bool do_update(void) {
     if (!config.update_check) {
         ui_message(UI_TONE_INFO, "Updates disabled",
                    "Update checks are turned off.\n\n"
-                   UI_DIM "Set update_check=1 in config.txt to enable them.");
+                   UI_DIM "Turn on Settings > Allow update checks to use this.");
         return false;
     }
 

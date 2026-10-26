@@ -378,6 +378,32 @@ void gui_fit(const char *s, float scale, float max_w, char *out, size_t size) {
     fit(s, scale, max_w, out, size);
 }
 
+void gui_fit_left(const char *s, float scale, float max_w, char *out, size_t size) {
+    if (!out || size == 0) return;
+    if (!s) s = "";
+    float total = gui_text_w(scale, s);
+    if (total <= max_w) {
+        snprintf(out, size, "%s", s);
+        return;
+    }
+    // Drop characters from the front until the rest fits after the
+    // ellipsis (one pass: the width left is the total minus what's dropped)
+    float limit = max_w - gui_text_w(scale, ellipsis), w = total;
+    const char *p = s;
+    while (*p && w > limit) {
+        u32 cp;
+        int n = next_cp(p, &cp);
+        w -= glyph_w(cp, scale);
+        p += n;
+    }
+    // Start at a '/' when there is one ahead (".../roms/nds")
+    if (*p != '/') {
+        const char *slash = strchr(p, '/');
+        if (slash && slash[1]) p = slash;
+    }
+    snprintf(out, size, "%s%s", ellipsis, p);
+}
+
 float gui_text_fit(float x, float y, float scale, u32 color, GuiAlign align, float max_w, const char *s) {
     if (!s || !*s) return 0;
     char buf[GUI_WRAP_LINE * 2];

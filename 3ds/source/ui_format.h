@@ -68,4 +68,20 @@ bool ui_name_matches(const char *name, const char *query);
 // when `s` was longer (the caller adds an ellipsis)
 bool ui_utf8_prefix(const char *s, int max_chars, char *out, int out_size);
 
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+// Local backups as a value: "Off", "1 copy", "3 copies"
+void ui_format_copies(int n, char *out, int out_size);
+
+// The Local backups chooser: Off, 1, 3, 5 and 10 copies. A `current` value
+// that isn't one of them (config.txt takes 0-50) is inserted in order as
+// "7 copies (current)", so opening and closing the chooser never changes
+// it. Fills values[] and labels[] and returns the count; *initial = the
+// index of `current`.
+#define UI_BACKUP_CHOICES_MAX 6
+#define UI_BACKUP_LABEL_LEN 32
+int ui_backup_choices(int current, int *values, char labels[][UI_BACKUP_LABEL_LEN], int *initial);
+
 #endif // UI_FORMAT_H

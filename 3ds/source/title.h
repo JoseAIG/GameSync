@@ -15,4 +15,9 @@ void title_id_to_hex(u64 title_id, char *out);
 // Updates title->name for each title. Returns number of names fetched.
 int titles_fetch_names(const AppConfig *config, TitleInfo *titles, int count);
 
+// Is the API key accepted? Sends the name lookup with no codes (the
+// cheapest request that needs the key). Returns the HTTP status: 200 =
+// accepted, 401 = rejected, 0 = no answer.
+u32 titles_probe_key(const AppConfig *config);
+
 #endif // TITLE_H

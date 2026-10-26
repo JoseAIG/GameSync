@@ -142,6 +142,8 @@ void ui_busy(const char *title, const char *message);
 // Pick one of `count` items from a list card (A picks, B cancels, D-pad /
 // touch moves). Returns the index, or -1 if cancelled.
 int ui_choose(UiTone tone, const char *title, const char *const *items, int count);
+// The same, opened with item `initial` highlighted (and scrolled into view)
+int ui_choose_ex(UiTone tone, const char *title, const char *const *items, int count, int initial);
 
 // ---------------------------------------------------------------------------
 // Top-level tabs (L / R cycle them, wrapping)

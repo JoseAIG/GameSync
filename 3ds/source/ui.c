@@ -3,6 +3,7 @@
 #include "config.h"
 #include "sync.h"
 #include "network.h"
+#include "title.h"
 
 // ---------------------------------------------------------------------------
 // Init
@@ -560,11 +561,14 @@ static void draw_choice(UiTone tone, const char *title, const char *const *items
                 pressed == i || (held & choice_buttons[i].keys));
 }
 
-int ui_choose(UiTone tone, const char *title, const char *const *items, int count) {
+int ui_choose_ex(UiTone tone, const char *title, const char *const *items, int count, int initial) {
     if (count <= 0) return -1;
-    int selected = 0, scroll = 0, result = -1;
+    if (initial < 0 || initial >= count) initial = 0;
+    int selected = initial, scroll = 0, result = -1;
     ChoiceGeom g;
     choice_geom(count, &g);
+    // Open on the current value, in view
+    if (selected >= g.rows) scroll = selected - g.rows + 1;
     UiListAnim anim = { 0 };
     UiTap tap = UI_TAP_INIT;
     u32 armed = 0;
@@ -599,6 +603,10 @@ int ui_choose(UiTone tone, const char *title, const char *const *items, int coun
     }
     ui_input_latch_touch();
     return result;
+}
+
+int ui_choose(UiTone tone, const char *title, const char *const *items, int count) {
+    return ui_choose_ex(tone, title, items, count, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -1829,46 +1837,100 @@ bool ui_confirm_restore(const TitleInfo *title, const SaveDetails *details,
 // Settings
 // ---------------------------------------------------------------------------
 
-#define CFG_ITEMS 7
 #define CFG_ROW_H GUI_ROW_H
-#define CFG_ACTIONS 4   // first entry that is an action, not a value
+#define CFG_ROWS GUI_LIST_ROWS
 
-static const UiListGeom cfg_geom = { 0, GUI_LIST_Y, GUI_BOT_W, GUI_LIST_ROWS, CFG_ROW_H, false, true };
+static const UiListGeom cfg_geom = { 0, GUI_LIST_Y, GUI_BOT_W, CFG_ROWS, CFG_ROW_H, false, true };
 
 enum {
-    CFG_SERVER_URL = 0, CFG_SERVER_URL_ALT, CFG_API_KEY, CFG_NDS_DIR,
-    CFG_RESCAN, CFG_REFRESH_CATALOG, CFG_UPDATE,
+    CFG_SERVER_URL = 0, CFG_SERVER_URL_ALT, CFG_API_KEY, CFG_TLS,   // Server
+    CFG_NDS_DIR, CFG_BACKUPS,                                       // Saves & ROMs
+    CFG_UPDATE_CHECK, CFG_REDUCE_MOTION,                            // App
+    CFG_RESCAN, CFG_REFRESH_CATALOG, CFG_UPDATE,                    // Maintenance
+    CFG_ITEMS
 };
 
-static const char *const cfg_labels[CFG_ITEMS] = {
-    "Server URL", "Alternate URL", "API key", "NDS ROM folder",
-    "Rescan titles", "Refresh catalog", "Check for updates",
+typedef enum { CFG_TEXT = 0, CFG_SWITCH, CFG_CHOOSE, CFG_ACTION } CfgKind;
+
+typedef struct {
+    const char *group, *label, *help;
+    CfgKind kind;
+} CfgRow;
+
+static const CfgRow cfg_rows[CFG_ITEMS] = {
+    { "Server", "Server URL", "Address of your GameSync server, e.g. http://192.168.1.100:8000", CFG_TEXT },
+    { "Server", "Alternate URL",
+      "Optional second address of the same server, tried when the first doesn't answer. Empty = off.", CFG_TEXT },
+    { "Server", "API key", "The server's SYNC_API_KEY. Sent with every request.", CFG_TEXT },
+    { "Server", "Verify TLS",
+      "For https:// addresses: check the server's certificate. Off accepts any certificate. No effect on http://.",
+      CFG_SWITCH },
+    { "Saves & ROMs", "NDS ROM folder",
+      "Where your DS ROMs and .sav files live (TWiLight Menu++ / nds-bootstrap).",
+      CFG_CHOOSE },
+    { "Saves & ROMs", "Local backups",
+      "Copies of a save kept on the SD card before a download or a restore overwrites it. Off keeps none.",
+      CFG_CHOOSE },
+    { "App", "Allow update checks",
+      "Off: the app never asks your server for a newer GameSync, so this build is never replaced.", CFG_SWITCH },
+    { "App", "Reduce motion", "Fades and jumps instead of sliding and springing. Applies right away.", CFG_SWITCH },
+    { "Maintenance", "Rescan titles", "Look for installed titles and DS saves again.", CFG_ACTION },
+    { "Maintenance", "Refresh catalog",
+      "Ask the server to rescan its ROM folder, then download the whole game catalog again.", CFG_ACTION },
+    { "Maintenance", "Check for updates now", "Download and install the latest GameSync CIA from your server.",
+      CFG_ACTION },
 };
 
-static const char *const cfg_help[CFG_ITEMS] = {
-    "Address of your GameSync server, e.g. http://192.168.1.100:8000",
-    "Optional second address of the same server, tried when the first doesn't answer. Empty = off.",
-    "The server's SYNC_API_KEY. Sent with every request.",
-    "Where your DS ROMs and .sav files live (TWiLight Menu++ / nds-bootstrap).",
-    "Look for installed titles and DS saves again.",
-    "Ask the server to rescan its ROM folder, then download the whole game catalog again.",
-    "Download and install the latest GameSync CIA from your server.",
-};
+// A divider above the first row of each group but the first
+static bool cfg_group_start(int index) {
+    return index > 0 && strcmp(cfg_rows[index].group, cfg_rows[index - 1].group) != 0;
+}
+
+static bool cfg_switch_on(const AppConfig *cfg, int index) {
+    switch (index) {
+        case CFG_TLS:           return cfg->tls_verify;
+        case CFG_UPDATE_CHECK:  return cfg->update_check;
+        case CFG_REDUCE_MOTION: return cfg->reduce_motion;
+        default:                return false;
+    }
+}
+
+// What the last server / key check said, per row, for this session only
+// (never written to config.txt): "Answered · v1.0", "Key rejected (401)"
+static char cfg_probe[CFG_ITEMS][40];
+static bool cfg_probe_ok[CFG_ITEMS];
+
+// A result shown in the help panel (e.g. the folder just picked) until the
+// highlight leaves its row or it gets old
+static char cfg_note[MAX_PATH_LEN + 64];
+static UiTone cfg_note_tone;
+static u64 cfg_note_ms;
+static int cfg_note_row = -1;
+
+// Switch knobs, 0 (off, left) .. 1 (on, right)
+static GuiSpring cfg_knob[CFG_ITEMS];
+static bool cfg_knob_init;
+static u32 cfg_knob_frame;
 
 typedef struct {
     const AppConfig *cfg;
-    int selected;
+    int selected, scroll;
     UiBar bar;
     u32 held;   // keys held (0 behind a dialog)
 } ConfigView;
 
 // What A does on a row, for the action bar
-static const char *cfg_verb(int index) {
-    return index < CFG_ACTIONS ? "Edit" : "Run";
+static const char *cfg_verb(const AppConfig *cfg, int index) {
+    switch (cfg_rows[index].kind) {
+        case CFG_TEXT:   return "Edit";
+        case CFG_SWITCH: return cfg_switch_on(cfg, index) ? "Turn off" : "Turn on";
+        case CFG_CHOOSE: return "Choose";
+        default:         return "Run";
+    }
 }
 
-static void cfg_bar_item(int index, UiBarItem *item) {
-    *item = (UiBarItem){ "A", cfg_verb(index), GUI_BTN_PRIMARY, 0, KEY_A, 140, false };
+static void cfg_bar_item(const AppConfig *cfg, int index, UiBarItem *item) {
+    *item = (UiBarItem){ "A", cfg_verb(cfg, index), GUI_BTN_PRIMARY, 0, KEY_A, 140, false };
 }
 
 static void mask_key(const char *key, char *out, size_t size) {
@@ -1881,7 +1943,7 @@ static void mask_key(const char *key, char *out, size_t size) {
 static void config_top(void *ctx) {
     const ConfigView *v = ctx;
     ui_tab_header(UI_TAB_SETTINGS);
-    gui_panel(8, 32, GUI_TOP_W - 16, 118);
+    gui_panel(8, 32, GUI_TOP_W - 16, 128);
     float lh = gui_line_h(GUI_S_BODY) + 1, y = 40;
     char key[48];
     mask_key(v->cfg->api_key, key, sizeof(key));
@@ -1899,31 +1961,97 @@ static void config_top(void *ctx) {
     kv(20, y + 4 * lh, 96, GUI_TOP_W - 40, "Console ID", v->cfg->console_id, HEX_DIM);
     kv(20, y + 5 * lh, 96, GUI_TOP_W - 40, "Config file", CONFIG_PATH, HEX_DIM);
 
-    // Help for the highlighted entry
-    gui_rrect(8, 158, GUI_TOP_W - 16, 52, 7, gui_rgb(HEX_BG2));
-    gui_rrect(8, 158, 4, 52, 2, gui_rgb(HEX_ACCENT));
-    gui_text(20, 163, GUI_S_SMALL, gui_rgb(HEX_ACCENT2), GUI_LEFT, cfg_labels[v->selected]);
-    gui_text_wrap(20, 163 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_TOP_W - 40, 2,
-                  cfg_help[v->selected]);
+    // Help for the highlighted entry, or what the last change on it did
+    const float hy = 164, hh = 50;
+    u64 now = gui_now_ms();
+    bool note = cfg_note_row == v->selected && cfg_note[0] && now >= cfg_note_ms &&
+                now - cfg_note_ms < GUI_TOAST_STALE_MS;
+    gui_rrect(8, hy, GUI_TOP_W - 16, hh, 7, gui_rgb(HEX_BG2));
+    if (note) {
+        u32 hex = ui_tone_hex(cfg_note_tone);
+        float fade_prev = gui_fade_push(1 - gui_effect_t(cfg_note_ms, now, GUI_FADE_MS * 2));
+        gui_rrect(8, hy, 4, hh, 2, gui_rgb(hex));
+        gui_text(20, hy + 5, GUI_S_SMALL, gui_rgb(hex), GUI_LEFT, cfg_rows[v->selected].label);
+        gui_text_wrap(20, hy + 5 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_TOP_W - 40, 2,
+                      cfg_note);
+        gui_fade_pop(fade_prev);
+    } else {
+        char title[64];
+        snprintf(title, sizeof(title), "%s  \xC2\xB7  %s", cfg_rows[v->selected].group, cfg_rows[v->selected].label);
+        gui_rrect(8, hy, 4, hh, 2, gui_rgb(HEX_ACCENT));
+        gui_text(20, hy + 5, GUI_S_SMALL, gui_rgb(HEX_ACCENT2), GUI_LEFT, title);
+        gui_text_wrap(20, hy + 5 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_TOP_W - 40, 2,
+                      cfg_rows[v->selected].help);
+    }
     static const GuiHint hints[] = { { "UD", "Move" }, { "START", "Exit" } };
     gui_footer(hints, 2);
+}
+
+#define SWITCH_W 28
+#define SWITCH_H 16
+
+// On: accent fill, knob right. Off: line-coloured fill, knob left. The
+// knob (and the fill with it) glides; on the bar it gets an ink outline so
+// the accent pill stays visible on the accent bar.
+static void draw_switch(float right, float cy, float t, float hl) {
+    float x = right - SWITCH_W, y = cy - SWITCH_H / 2.0f;
+    if (hl > 0.5f) gui_rrect(x - 1, y - 1, SWITCH_W + 2, SWITCH_H + 2, SWITCH_H / 2.0f + 1, gui_rgb(HEX_INK));
+    gui_rrect(x, y, SWITCH_W, SWITCH_H, SWITCH_H / 2.0f, gui_mix(HEX_LINE, HEX_ACCENT, t));
+    float r = SWITCH_H / 2.0f - 2;
+    gui_circle(x + 2 + r + t * (SWITCH_W - 4 - 2 * r), cy, r, gui_rgb(0xFFFFFF));
 }
 
 static void config_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
     (void)pressed;
     const ConfigView *v = ctx;
-    if (index == CFG_ACTIONS) gui_rect(x + 10, y, w - 20, 1, gui_rgb(HEX_LINE));
-    gui_text_mid(x + 12, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, 0, cfg_labels[index]);
-    char value[64] = "";
-    if (index == CFG_SERVER_URL) snprintf(value, sizeof(value), "%.63s", v->cfg->server_url);
-    else if (index == CFG_SERVER_URL_ALT)
-        snprintf(value, sizeof(value), "%.63s", v->cfg->server_url_alt[0] ? v->cfg->server_url_alt : "(not set)");
-    else if (index == CFG_API_KEY) mask_key(v->cfg->api_key, value, sizeof(value));
-    else if (index == CFG_NDS_DIR)
-        snprintf(value, sizeof(value), "%.63s", v->cfg->nds_dir[0] ? v->cfg->nds_dir : "(not set)");
-    else if (index == CFG_UPDATE && !v->cfg->update_check) snprintf(value, sizeof(value), "Off");
+    const AppConfig *cfg = v->cfg;
+    if (cfg_group_start(index)) gui_rect(x + 10, y, w - 20, 1, gui_rgb(HEX_LINE));
+    float lw = gui_text_mid(x + 12, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, 0,
+                            cfg_rows[index].label);
+    float right = x + w - 12, room = right - (x + 12 + lw + 12);
+    u32 dim = gui_mix(HEX_DIM, HEX_INK, hl);
+
+    if (cfg_rows[index].kind == CFG_SWITCH) {
+        draw_switch(right, y + h / 2, cfg_knob[index].x, hl);
+        return;
+    }
+    if (cfg_probe[index][0]) {
+        // The last check of this value, this session
+        u32 hex = cfg_probe_ok[index] ? HEX_OK : HEX_WARN;
+        gui_text_mid(right, y, h, GUI_S_SMALL, gui_mix(hex, HEX_INK, hl), GUI_RIGHT, room, cfg_probe[index]);
+        return;
+    }
+    char value[MAX_PATH_LEN + 8] = "";
+    u32 color = dim;
+    switch (index) {
+        case CFG_SERVER_URL:
+            snprintf(value, sizeof(value), "%s", cfg->server_url[0] ? cfg->server_url : "(not set)");
+            break;
+        case CFG_SERVER_URL_ALT:
+            snprintf(value, sizeof(value), "%s", cfg->server_url_alt[0] ? cfg->server_url_alt : "(not set)");
+            break;
+        case CFG_API_KEY:
+            mask_key(cfg->api_key, value, sizeof(value));
+            break;
+        case CFG_NDS_DIR:
+            // A path keeps its end: "...roms/nds"
+            if (cfg->nds_dir[0]) gui_fit_left(cfg->nds_dir, GUI_S_SMALL, room, value, sizeof(value));
+            else snprintf(value, sizeof(value), "(not set)");
+            break;
+        case CFG_BACKUPS:
+            ui_format_copies(cfg->local_backups, value, sizeof(value));
+            break;
+        case CFG_UPDATE:
+            if (!cfg->update_check) {
+                snprintf(value, sizeof(value), "Off");
+                color = gui_mix(HEX_MUTED, HEX_INK, hl);
+            }
+            break;
+        default:
+            break;
+    }
     if (value[0])
-        gui_text_mid(x + w - 12, y, h, GUI_S_SMALL, gui_mix(HEX_DIM, HEX_INK, hl), GUI_RIGHT, 150, value);
+        gui_text_mid(right, y, h, GUI_S_SMALL, color, GUI_RIGHT, room, value);
     else
         gui_text_mid(x + w - 14, y, h, GUI_S_BODY, gui_mix(HEX_MUTED, HEX_INK, hl), GUI_RIGHT, 0, ">");
 }
@@ -1931,13 +2059,28 @@ static void config_row(void *ctx, int index, float x, float y, float w, float h,
 // Kept across visits to the tab, like the selection
 static UiListAnim config_anim;
 
+// The switch knobs glide toward their values, once a frame (also behind a
+// dialog, so the TLS confirm doesn't freeze them)
+static void step_knobs(const AppConfig *cfg) {
+    if (cfg_knob_init && cfg_knob_frame == gui_ticks()) return;
+    for (int i = 0; i < CFG_ITEMS; i++) {
+        if (cfg_rows[i].kind != CFG_SWITCH) continue;
+        float target = cfg_switch_on(cfg, i) ? 1.0f : 0.0f;
+        if (!cfg_knob_init) gui_spring_set(&cfg_knob[i], target);
+        else gui_spring(&cfg_knob[i], target, GUI_RESP_PILL, gui_dt());
+    }
+    cfg_knob_init = true;
+    cfg_knob_frame = gui_ticks();
+}
+
 static void config_bottom(void *ctx) {
     ConfigView *v = ctx;
-    ui_list_draw(&config_anim, &cfg_geom, CFG_ITEMS, v->selected, 0, config_row, v);
+    step_knobs(v->cfg);
+    ui_list_draw(&config_anim, &cfg_geom, CFG_ITEMS, v->selected, v->scroll, config_row, v);
     gui_header_bar_ex(ui_list_at_top(&config_anim));
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Settings");
     UiBarItem item;
-    cfg_bar_item(v->selected, &item);
+    cfg_bar_item(v->cfg, v->selected, &item);
     float right = ui_bar_layout(&item, 1, &(GuiRect){ 0, 0, 0, 0 }, &(GuiRect){ 0, 0, 0, 0 });
     ui_bar_draw(&v->bar, &item, 1, v->held);
     // The rest of the bar: what LEFT / RIGHT do here
@@ -1951,13 +2094,93 @@ static void save_settings(const AppConfig *config) {
         ui_message(UI_TONE_ERR, "Settings", "Couldn't write the settings to the SD card:\n" UI_DIM CONFIG_PATH);
 }
 
-// After a server address changed: pick the primary again, or probe both
-// when an alternate is set (as at startup)
-static void select_server(AppConfig *config) {
+static void probe_answer(int row, bool ok, const char *version) {
+    cfg_probe_ok[row] = ok;
+    if (!ok) snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "No answer (saved anyway)");
+    else if (version && version[0]) snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Answered \xC2\xB7 v%.20s", version);
+    else snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Answered");
+}
+
+// After a server address was saved: does it answer (GET /status), and which
+// address do requests use from now on (the primary when it answers, else
+// the alternate if that does, as at startup). Informs, never blocks.
+static void check_server(AppConfig *config, int row) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
+    AppConfig probe = *config;
+    char version[24];
+    if (row == CFG_SERVER_URL_ALT) {
+        cfg_probe[CFG_SERVER_URL_ALT][0] = '\0';
+        config->use_alt_url = false;
+        if (!config->server_url_alt[0]) return;   // turned off: the primary only
+        ui_busy("Settings", msg);
+        probe.use_alt_url = true;
+        bool alt_ok = network_probe_status(&probe, version, sizeof(version));
+        probe_answer(CFG_SERVER_URL_ALT, alt_ok, version);
+        probe.use_alt_url = false;
+        config->use_alt_url = alt_ok && !network_probe_status(&probe, NULL, 0);
+        return;
+    }
+    ui_busy("Settings", msg);
+    probe.use_alt_url = false;
+    bool ok = network_probe_status(&probe, version, sizeof(version));
+    probe_answer(CFG_SERVER_URL, ok, version);
     config->use_alt_url = false;
-    if (!config->server_url_alt[0]) return;
-    ui_busy("Settings", "Looking for the server...");
-    network_select_server(config);
+    if (!ok && config->server_url_alt[0]) {
+        probe.use_alt_url = true;
+        config->use_alt_url = network_probe_status(&probe, NULL, 0);
+    }
+}
+
+// After the API key was saved: the cheapest request that needs it
+static void check_key(const AppConfig *config) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Checking the key%s", gui_ellipsis());
+    ui_busy("Settings", msg);
+    u32 status = titles_probe_key(config);
+    cfg_probe_ok[CFG_API_KEY] = status == 200;
+    if (status == 200) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key accepted");
+    else if (status == 401) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key rejected (401)");
+    else if (status == 0) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "No answer (saved anyway)");
+    else cfg_probe[CFG_API_KEY][0] = '\0';   // some other answer: says nothing about the key
+}
+
+// Settings > Local backups: opens on the current value
+static void choose_backups(AppConfig *config) {
+    int values[UI_BACKUP_CHOICES_MAX], initial = 0;
+    char labels[UI_BACKUP_CHOICES_MAX][UI_BACKUP_LABEL_LEN];
+    const char *items[UI_BACKUP_CHOICES_MAX];
+    int n = ui_backup_choices(config->local_backups, values, labels, &initial);
+    for (int i = 0; i < n; i++) items[i] = labels[i];
+    int pick = ui_choose_ex(UI_TONE_ACCENT, "Local backups", items, n, initial);
+    if (pick < 0 || values[pick] == config->local_backups) return;
+    config->local_backups = values[pick];
+    save_settings(config);
+}
+
+// A switch: flips and saves at once. Turning certificate checks off is the
+// one that asks (it exposes the API key on the network).
+static void toggle_switch(AppConfig *config, int index) {
+    switch (index) {
+        case CFG_TLS:
+            if (config->tls_verify &&
+                !ui_confirm(UI_TONE_WARN, "Turn off certificate checks?",
+                            "Anyone on the network could read your API key and saves.\n"
+                            UI_DIM "Only for a server on your own LAN.", "Turn off"))
+                return;
+            config->tls_verify = !config->tls_verify;
+            break;
+        case CFG_UPDATE_CHECK:
+            config->update_check = !config->update_check;
+            break;
+        case CFG_REDUCE_MOTION:
+            config->reduce_motion = !config->reduce_motion;
+            gui_set_reduce_motion(config->reduce_motion);
+            break;
+        default:
+            return;
+    }
+    save_settings(config);
 }
 
 // A on a row (or a tap on the selected row). True if the app must close.
@@ -1968,7 +2191,7 @@ static bool settings_activate(AppConfig *config, int selected, SettingsActionFn 
             UiTextField f = { "Server URL", "http://192.168.1.100:8000", "OK", false, true, false };
             if (ui_edit_text_ex(&f, config->server_url, MAX_URL_LEN)) {
                 save_settings(config);
-                select_server(config);
+                check_server(config, CFG_SERVER_URL);
             }
             break;
         }
@@ -1977,21 +2200,32 @@ static bool settings_activate(AppConfig *config, int selected, SettingsActionFn 
             UiTextField f = { "Alternate URL", "Second address of the server (empty = off)", "OK", false, true, true };
             if (ui_edit_text_ex(&f, config->server_url_alt, MAX_URL_LEN)) {
                 save_settings(config);
-                select_server(config);
+                check_server(config, CFG_SERVER_URL_ALT);
             }
             break;
         }
         case CFG_API_KEY: {
             UiTextField f = { "API key", "The server's SYNC_API_KEY", "OK", true, false, false };
-            if (ui_edit_text_ex(&f, config->api_key, MAX_API_KEY_LEN)) save_settings(config);
+            if (ui_edit_text_ex(&f, config->api_key, MAX_API_KEY_LEN)) {
+                save_settings(config);
+                check_key(config);
+            }
             break;
         }
+        case CFG_TLS:
+        case CFG_UPDATE_CHECK:
+        case CFG_REDUCE_MOTION:
+            toggle_switch(config, selected);
+            break;
         case CFG_NDS_DIR: {
             // Empty = no DS ROM folder (the scan skips DS games)
             UiTextField f = { "NDS ROM folder", "sdmc:/roms/nds", "OK", false, false, true };
             if (ui_edit_text_ex(&f, config->nds_dir, MAX_PATH_LEN)) save_settings(config);
             break;
         }
+        case CFG_BACKUPS:
+            choose_backups(config);
+            break;
         case CFG_RESCAN: action = SETTINGS_RESCAN; break;
         case CFG_REFRESH_CATALOG: action = SETTINGS_REFRESH_CATALOG; break;
         default: action = SETTINGS_UPDATE; break;
@@ -2000,11 +2234,10 @@ static bool settings_activate(AppConfig *config, int selected, SettingsActionFn 
 }
 
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
-    static int selected = 0;   // kept while the user visits other tabs
-    ConfigView v = { config, selected, UI_BAR_INIT, 0 };
+    static int selected = 0, scroll = 0;   // kept while the user visits other tabs
+    ConfigView v = { config, selected, scroll, UI_BAR_INIT, 0 };
     UiBackdrop prev = ui_set_backdrop(config_top, config_bottom, &v);
     SettingsResult result = SETTINGS_EXIT;  // the app is closing
-    int scroll = 0;   // the whole list fits: only ever dragged and rubber-banded
 
     hidScanInput();
     UiInput in;
@@ -2017,14 +2250,19 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
 
         // UP / DOWN wrap; LEFT / RIGHT are first / last (absolute moves, so
         // they never need reattaching)
-        UiListEvent ev = ui_list_input(&config_anim, &cfg_geom, CFG_ITEMS, &v.selected, &scroll, &in,
+        UiListEvent ev = ui_list_input(&config_anim, &cfg_geom, CFG_ITEMS, &v.selected, &v.scroll, &in,
                                        in.rep & (KEY_UP | KEY_DOWN));
-        if (ev.kind != UI_LIST_REATTACHED) ui_list_keys(&config_anim, in.rep, CFG_ITEMS, CFG_ITEMS, &v.selected);
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
+            ui_list_keys(&config_anim, in.rep, CFG_ITEMS, CFG_ITEMS, &v.selected);
+            if (v.selected < v.scroll) v.scroll = v.selected;
+            if (v.selected >= v.scroll + CFG_ROWS) v.scroll = v.selected - CFG_ROWS + 1;
+        }
 
         UiBarItem item;
-        cfg_bar_item(v.selected, &item);
+        cfg_bar_item(config, v.selected, &item);
         int hit = ui_bar_input(&v.bar, &in, &item, 1);
         if (hit == 0 || ev.kind == UI_LIST_TAP_SELECTED || (down & KEY_A)) {
+            ui_list_reveal(&config_anim, CFG_ITEMS, v.selected, &v.scroll);
             if (settings_activate(config, v.selected, run_action)) {
                 result = SETTINGS_EXIT;
                 break;
@@ -2041,6 +2279,7 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
         v.held = 0;
     }
     selected = v.selected;
+    scroll = v.scroll;
     ui_restore_backdrop(prev);
     return result;
 }

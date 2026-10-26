@@ -181,6 +181,9 @@ float gui_textf(float x, float y, float scale, u32 color, GuiAlign align, const 
 const char *gui_ellipsis(void);
 // Copy `s` into `out`, cut to `max_w` with an ellipsis if needed
 void gui_fit(const char *s, float scale, float max_w, char *out, size_t size);
+// The same, cutting from the front: ".../roms/nds" (a path keeps its end,
+// starting at a '/' when it can)
+void gui_fit_left(const char *s, float scale, float max_w, char *out, size_t size);
 // Cut to `max_w` with an ellipsis
 float gui_text_fit(float x, float y, float scale, u32 color, GuiAlign align, float max_w, const char *s);
 // Vertically centred in a box of height h

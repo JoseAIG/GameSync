@@ -381,11 +381,36 @@ u8 *network_post_json(const AppConfig *config, const char *path,
                      out_size, out_status);
 }
 
-static bool probe_status(const AppConfig *config) {
+// The "version" string of a GET /status answer (a flat JSON object)
+static void status_version(const u8 *body, u32 size, char *out, int out_size) {
+    out[0] = '\0';
+    char text[256];
+    u32 n = size < sizeof(text) - 1 ? size : sizeof(text) - 1;
+    memcpy(text, body, n);
+    text[n] = '\0';
+    const char *p = strstr(text, "\"version\"");
+    if (!p) return;
+    p += strlen("\"version\"");
+    while (*p == ' ' || *p == ':' || *p == '\t') p++;
+    if (*p != '"') return;
+    p++;
+    int i = 0;
+    while (*p && *p != '"' && i < out_size - 1) out[i++] = *p++;
+    out[i] = '\0';
+}
+
+bool network_probe_status(const AppConfig *config, char *version, int version_size) {
     u32 size = 0, status = 0;
+    if (version && version_size > 0) version[0] = '\0';
     u8 *resp = network_get(config, "/status", &size, &status);
+    bool ok = resp && status == 200;
+    if (ok && version && version_size > 0) status_version(resp, size, version, version_size);
     if (resp) free(resp);
-    return resp && status == 200;
+    return ok;
+}
+
+static bool probe_status(const AppConfig *config) {
+    return network_probe_status(config, NULL, 0);
 }
 
 bool network_select_server(AppConfig *config) {

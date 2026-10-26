@@ -255,3 +255,40 @@ bool ui_utf8_prefix(const char *s, int max_chars, char *out, int out_size) {
     ui_utf8_copy(s, out, i + 1);
     return s[i] != '\0';
 }
+
+// ---------------------------------------------------------------------------
+// Settings
+// ---------------------------------------------------------------------------
+
+void ui_format_copies(int n, char *out, int out_size) {
+    if (n <= 0) snprintf(out, (size_t)out_size, "Off");
+    else snprintf(out, (size_t)out_size, "%d cop%s", n, n == 1 ? "y" : "ies");
+}
+
+int ui_backup_choices(int current, int *values, char labels[][UI_BACKUP_LABEL_LEN], int *initial) {
+    static const int presets[] = { 0, 1, 3, 5, 10 };
+    const int npresets = (int)(sizeof(presets) / sizeof(presets[0]));
+    int n = 0;
+    bool placed = false;
+    *initial = 0;
+    for (int i = 0; i <= npresets; i++) {
+        // `current` goes before the first preset above it (or last)
+        if (!placed && (i == npresets || current <= presets[i])) {
+            placed = true;
+            if (i == npresets || current != presets[i]) {
+                values[n] = current;
+                char v[UI_BACKUP_LABEL_LEN - 12];
+                ui_format_copies(current, v, (int)sizeof(v));
+                snprintf(labels[n], UI_BACKUP_LABEL_LEN, "%s (current)", v);
+                *initial = n++;
+            } else {
+                *initial = n;
+            }
+        }
+        if (i == npresets) break;
+        values[n] = presets[i];
+        ui_format_copies(presets[i], labels[n], UI_BACKUP_LABEL_LEN);
+        n++;
+    }
+    return n;
+}

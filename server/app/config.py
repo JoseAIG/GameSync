@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     # logs and browser history; set False to require the X-API-Key header
     # (share links via ``?token=`` keep working).
     allow_query_api_key: bool = True
+    # Don't serve /docs, /redoc or /openapi.json (the API description is
+    # public by default).  Recommended for servers reachable from the internet.
+    disable_docs: bool = False
     # Escape hatch: allow booting with the placeholder/empty api_key.  Off by
     # default so a fresh deploy fails loudly instead of running wide open.
     allow_weak_key: bool = False

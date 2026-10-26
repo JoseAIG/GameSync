@@ -252,7 +252,14 @@ async def _periodic_rom_cleanup():
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Save Sync", version="1.0.0", lifespan=lifespan)
+    # The interactive docs and schema are served without an API key, so an
+    # internet-facing deployment can hide them with SYNC_DISABLE_DOCS=true.
+    docs_kwargs = (
+        {"docs_url": None, "redoc_url": None, "openapi_url": None}
+        if settings.disable_docs
+        else {}
+    )
+    app = FastAPI(title="Save Sync", version="1.0.0", lifespan=lifespan, **docs_kwargs)
 
     app.add_middleware(APIKeyMiddleware)
     # Added last so it runs first: oversized bodies are refused before auth

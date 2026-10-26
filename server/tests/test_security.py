@@ -449,3 +449,23 @@ class TestApiKeyAuth:
         assert r.status_code == 401
         r = client.get("/api/v1/titles", headers={"X-API-Key": api_key})
         assert r.status_code == 200
+
+
+# ── Public API docs ─────────────────────────────────────────────────────────
+
+
+class TestDisableDocs:
+    def test_docs_served_by_default(self, client):
+        assert client.get("/openapi.json").status_code == 200
+        assert client.get("/docs").status_code == 200
+
+    def test_docs_can_be_disabled(self, monkeypatch):
+        from fastapi.testclient import TestClient
+
+        from app.main import create_app
+
+        monkeypatch.setattr(settings, "disable_docs", True)
+        c = TestClient(create_app())
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            r = c.get(path, headers={"X-API-Key": settings.api_key})
+            assert r.status_code == 404, path

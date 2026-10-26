@@ -1500,7 +1500,7 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
             // A tap on the selected row installs (after the usual prompt)
             bool tap_install = ev.kind == UI_LIST_TAP_SELECTED && !cat->error[0];
             if (hit == CAT_BAR_X || (down & KEY_X)) cat_toggle_ra(cat);
-            if (hit == CAT_BAR_Y || (down & KEY_Y)) cat_search(cat);
+            if (hit == CAT_BAR_Y || (down & (KEY_Y | KEY_ZR))) cat_search(cat);
             if (down & KEY_B) cat_clear_search(cat);
             if ((down & KEY_SELECT) && cat->nsystems > 1) cat_set_system(cat, (cat->sys + 1) % cat->nsystems);
             else if (seg_hit >= 0) cat_set_system(cat, seg_hit);

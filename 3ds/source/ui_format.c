@@ -187,3 +187,59 @@ int ui_utf8_copy(const char *src, char *out, int out_size) {
     out[n] = '\0';
     return n;
 }
+
+// Base letters of U+00C0..U+00FF ("" = not a letter: kept as is)
+static const char *const latin1_fold[64] = {
+    "a", "a", "a", "a", "a", "a", "ae", "c", "e", "e", "e", "e", "i", "i", "i", "i",      // C0-CF
+    "d", "n", "o", "o", "o", "o", "o", "", "o", "u", "u", "u", "u", "y", "th", "ss",     // D0-DF
+    "a", "a", "a", "a", "a", "a", "ae", "c", "e", "e", "e", "e", "i", "i", "i", "i",      // E0-EF
+    "d", "n", "o", "o", "o", "o", "o", "", "o", "u", "u", "u", "u", "y", "th", "y",      // F0-FF
+};
+
+// Lower-case ASCII, Latin-1 letters folded to their base; any other UTF-8
+// sequence is copied as is (so it still matches itself)
+static void fold_name(const char *s, char *out, int out_size) {
+    int pos = 0;
+    while (s && *s && pos < out_size - 3) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x80) {
+            out[pos++] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : (char)c;
+            s++;
+        } else if ((c == 0xC3) && ((unsigned char)s[1] & 0xC0) == 0x80) {
+            unsigned cp = 0xC0 + ((unsigned char)s[1] & 0x3F);
+            const char *base = latin1_fold[cp - 0xC0];
+            if (base[0]) {
+                for (const char *b = base; *b && pos < out_size - 1; b++) out[pos++] = *b;
+            } else {
+                out[pos++] = s[0];
+                out[pos++] = s[1];
+            }
+            s += 2;
+        } else {
+            out[pos++] = *s++;
+        }
+    }
+    out[pos] = '\0';
+}
+
+bool ui_name_matches(const char *name, const char *query) {
+    if (!query || !query[0]) return true;
+    char n[256], q[256];
+    fold_name(name, n, sizeof(n));
+    fold_name(query, q, sizeof(q));
+    return strstr(n, q) != NULL;
+}
+
+bool ui_utf8_prefix(const char *s, int max_chars, char *out, int out_size) {
+    if (!s) s = "";
+    int i = 0, chars = 0;
+    while (s[i] && chars < max_chars) {
+        int len = 1;
+        while (((unsigned char)s[i + len] & 0xC0) == 0x80) len++;
+        if (i + len > out_size - 1) break;
+        i += len;
+        chars++;
+    }
+    ui_utf8_copy(s, out, i + 1);
+    return s[i] != '\0';
+}

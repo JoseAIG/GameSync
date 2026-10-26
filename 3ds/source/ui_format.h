@@ -51,4 +51,17 @@ const char *ui_text_field_error(const char *text, bool url, bool allow_empty);
 // Returns the bytes copied.
 int ui_utf8_copy(const char *src, char *out, int out_size);
 
+// ---------------------------------------------------------------------------
+// Search
+// ---------------------------------------------------------------------------
+
+// Does `name` contain `query`? Case-insensitive, and Latin-1 accents fold
+// to their base letter (U+00C0-U+00FF: "Pokemon" finds "Pok\xC3\xA9mon",
+// "AE" finds the ligature). An empty query matches everything.
+bool ui_name_matches(const char *name, const char *query);
+
+// The first `max_chars` UTF-8 characters of `s` into `out`; returns true
+// when `s` was longer (the caller adds an ellipsis)
+bool ui_utf8_prefix(const char *s, int max_chars, char *out, int out_size);
+
 #endif // UI_FORMAT_H

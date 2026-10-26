@@ -13,9 +13,16 @@ static void splash_bottom(void *ctx);
 
 static UiBackdrop backdrop = { splash_top, splash_bottom, NULL };
 
+static bool new3ds;
+
 void ui_init(void) {
     gui_init();
     ui_gesture_set_clock(gui_clock_ms);
+    APT_CheckNew3DS(&new3ds);
+}
+
+bool ui_is_new3ds(void) {
+    return new3ds;
 }
 
 void ui_exit(void) {
@@ -736,22 +743,47 @@ static void draw_status_toast(const char *status, UiTone tone) {
     gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
 }
 
+// "zel" in quotes, cut to 10 characters
+static void search_label(const char *search, char *out, size_t size) {
+    char q[64];
+    bool cut = ui_utf8_prefix(search, 10, q, sizeof(q));
+    snprintf(out, size, "\"%s%s\"", q, cut ? gui_ellipsis() : "");
+}
+
 void ui_draw_saves_top(const SavesView *v) {
     ui_tab_header(UI_TAB_SAVES);
-    static const GuiHint hints[] = {
-        { "SELECT", "All/3DS/NDS" }, { "LR", "Page" }, { "START", "Exit" },
-    };
+    bool searching = v->search && v->search[0];
+    GuiHint hints[5];
+    int nh = 0;
+    hints[nh++] = (GuiHint){ "SELECT", "All/3DS/NDS" };
+    hints[nh++] = (GuiHint){ "LR", "Page" };
+    if (new3ds) hints[nh++] = (GuiHint){ "ZR", "Search" };
+    // B clears the search only while nothing is marked (else it unmarks)
+    if (searching && v->marked <= 0) hints[nh++] = (GuiHint){ "B", "Clear search" };
+    hints[nh++] = (GuiHint){ "START", "Exit" };
 
     if (v->count == 0 || v->selected < 0 || v->selected >= v->count) {
         gui_panel(8, 34, GUI_TOP_W - 16, 148);
-        gui_text(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, "No saves here");
-        gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
-                 v->view_mode == VIEW_ALL ? "No titles with save data were found."
-                                          : "Nothing in this view. Press SELECT to switch.");
-        gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
-                 "L / R switch to the game catalog and the settings.");
+        if (searching && v->view_total > 0) {
+            char q[80], line[112];
+            search_label(v->search, q, sizeof(q));
+            snprintf(line, sizeof(line), "No saves match %s", q);
+            gui_text_fit(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, GUI_TOP_W - 40, line);
+            gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     v->marked > 0 ? "Clear the search with the button on the touch screen."
+                                   : "B clears the search.");
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     new3ds ? "ZR or the search chip changes it." : "The search chip changes it.");
+        } else {
+            gui_text(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, "No saves here");
+            gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     v->view_mode == VIEW_ALL ? "No titles with save data were found."
+                                              : "Nothing in this view. Press SELECT to switch.");
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     "L / R switch to the game catalog and the settings.");
+        }
         draw_status_toast(v->status, v->status_tone);
-        gui_footer(hints, 3);
+        gui_footer(hints, nh);
         return;
     }
 
@@ -834,7 +866,7 @@ void ui_draw_saves_top(const SavesView *v) {
     }
 
     draw_status_toast(v->status, v->status_tone);
-    gui_footer(hints, 3);
+    gui_footer(hints, nh);
 }
 
 static void saves_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
@@ -870,29 +902,109 @@ static void saves_row(void *ctx, int index, float x, float y, float w, float h, 
     }
 }
 
-// Right side of the Saves header: "N saves", and left of it the
-// "B N marked x" chip when something is marked (its draw rect)
+// Right side of the Saves header, right to left: the search chip (a
+// magnifier, or the active query as a pill with an x), the "B N marked x"
+// chip when something is marked, then the count ("41 saves", "3 of 41").
+// When space runs out the count goes first, then the query gets shorter.
 #define CHIP_H 18
+#define SEARCH_CHIP_W 28
+#define SEARCH_X_W 22
 
-static void saves_header_layout(const SavesView *v, char *count, size_t count_size, char *marked,
-                                size_t marked_size, GuiRect *chip) {
-    snprintf(count, count_size, "%d save%s", v->count, v->count == 1 ? "" : "s");
-    *chip = gui_rect_make(0, 0, 0, 0);
-    marked[0] = '\0';
-    if (v->marked <= 0) return;
-    snprintf(marked, marked_size, "%d marked", v->marked);
-    float w = 5 + gui_button_w("B") + 4 + gui_text_w(GUI_S_TINY, marked) + 5 + 8 + 6;
-    float right = GUI_BOT_W - 8 - gui_text_w(GUI_S_SMALL, count) - 6;
-    *chip = gui_rect_make(right - w, (GUI_HEADER_H - CHIP_H) / 2.0f, w, CHIP_H);
+typedef struct {
+    char count[32];
+    bool show_count;
+    float count_right;
+    char marked[24];
+    GuiRect chip;          // "N marked" (draw rect), w 0 = none
+    GuiRect search;        // magnifier chip or query pill (draw rect)
+    char query[96];        // the pill's text ("" = no search)
+} SavesHeader;
+
+static const char *const saves_tabs[] = { "All", "3DS", "NDS" };
+
+static float saves_tabs_x(void) {
+    return 6 + gui_button_w("SELECT") + 4;
+}
+
+static void saves_header_layout(const SavesView *v, SavesHeader *h) {
+    bool searching = v->search && v->search[0];
+    float cy0 = (GUI_HEADER_H - CHIP_H) / 2.0f;
+    float right = GUI_BOT_W - 6;
+    float left = gui_tabs_layout(saves_tabs_x(), 4, 18, saves_tabs, 3, NULL) + 6;
+
+    if (searching) snprintf(h->count, sizeof(h->count), "%d of %d", v->count, v->view_total);
+    else snprintf(h->count, sizeof(h->count), "%d save%s", v->count, v->count == 1 ? "" : "s");
+    float count_w = gui_text_w(GUI_S_SMALL, h->count);
+
+    h->marked[0] = '\0';
+    float chip_w = 0;
+    if (v->marked > 0) {
+        snprintf(h->marked, sizeof(h->marked), "%d marked", v->marked);
+        chip_w = 5 + gui_button_w("B") + 4 + gui_text_w(GUI_S_TINY, h->marked) + 5 + 8 + 6;
+    }
+
+    float search_w = SEARCH_CHIP_W;
+    h->query[0] = '\0';
+    if (searching) {
+        search_label(v->search, h->query, sizeof(h->query));
+        search_w = 8 + gui_text_w(GUI_S_TINY, h->query) + SEARCH_X_W;
+    }
+    float gap = 6;
+    float need = search_w + (chip_w > 0 ? chip_w + gap : 0) + count_w + gap;
+    h->show_count = need <= right - left;
+    if (!h->show_count) need -= count_w + gap;
+    if (searching && need > right - left) {
+        // Shorten the query to what is left (keeping at least a few characters)
+        float qw = gui_text_w(GUI_S_TINY, h->query) - (need - (right - left));
+        if (qw < 24) qw = 24;
+        char fitted[96];
+        gui_fit(h->query, GUI_S_TINY, qw, fitted, sizeof(fitted));
+        snprintf(h->query, sizeof(h->query), "%s", fitted);
+        search_w = 8 + gui_text_w(GUI_S_TINY, h->query) + SEARCH_X_W;
+    }
+
+    h->search = gui_rect_make(right - search_w, cy0, search_w, CHIP_H);
+    float x = h->search.x - gap;
+    h->chip = gui_rect_make(0, 0, 0, 0);
+    if (chip_w > 0) {
+        h->chip = gui_rect_make(x - chip_w, cy0, chip_w, CHIP_H);
+        x = h->chip.x - gap;
+    }
+    h->count_right = x;
 }
 
 GuiRect ui_saves_marked_chip(const SavesView *v) {
-    char count[32], marked[24];
-    GuiRect chip;
-    saves_header_layout(v, count, sizeof(count), marked, sizeof(marked), &chip);
-    if (chip.w <= 0) return chip;
+    SavesHeader h;
+    saves_header_layout(v, &h);
+    if (h.chip.w <= 0) return h.chip;
     // The whole header height, and a little to the sides
-    return gui_rect_make(chip.x - 4, 0, chip.w + 8, GUI_HEADER_H);
+    return gui_rect_make(h.chip.x - 3, 0, h.chip.w + 6, GUI_HEADER_H);
+}
+
+int ui_saves_search_targets(const SavesView *v, GuiRect *touch) {
+    SavesHeader h;
+    saves_header_layout(v, &h);
+    GuiRect s = h.search;
+    if (!h.query[0]) {
+        touch[0] = gui_rect_make(s.x - 3, 0, GUI_BOT_W - (s.x - 3), GUI_HEADER_H);
+        return 1;
+    }
+    float xs = s.x + s.w - SEARCH_X_W;
+    touch[0] = gui_rect_make(s.x - 3, 0, xs - (s.x - 3), GUI_HEADER_H);
+    touch[1] = gui_rect_make(xs, 0, GUI_BOT_W - xs, GUI_HEADER_H);
+    return 2;
+}
+
+// Under the "No saves match" message
+int ui_saves_empty_buttons(const SavesView *v, GuiRect *draw, GuiRect *touch) {
+    if (v->count > 0 || !v->search || !v->search[0]) return 0;
+    float w = 130, y = 116;
+    for (int i = 0; i < 2; i++) {
+        float x = i == 0 ? GUI_BOT_W / 2.0f - GUI_BTN_GAP / 2.0f - w : GUI_BOT_W / 2.0f + GUI_BTN_GAP / 2.0f;
+        draw[i] = gui_rect_make(x, y, w, GUI_BTN_H);
+        touch[i] = gui_rect_make(x - GUI_BTN_GAP / 2.0f, y - 5, w + GUI_BTN_GAP, GUI_BTN_H + 10);
+    }
+    return 2;
 }
 
 static bool title_in_conflict(const TitleInfo *t) {
@@ -916,12 +1028,6 @@ int ui_saves_bar(const SavesView *v, UiBarItem *items) {
     return SAVES_BAR_COUNT;
 }
 
-static const char *const saves_tabs[] = { "All", "3DS", "NDS" };
-
-static float saves_tabs_x(void) {
-    return 6 + gui_button_w("SELECT") + 4;
-}
-
 int ui_saves_segments(GuiRect *touch) {
     gui_tabs_layout(saves_tabs_x(), 4, 18, saves_tabs, 3, touch);
     // The whole header height
@@ -929,10 +1035,51 @@ int ui_saves_segments(GuiRect *touch) {
     return 3;
 }
 
+// The search chip: a magnifier, or the active query with an x to clear it
+static void draw_search_chip(const SavesHeader *h, int held) {
+    GuiRect s = h->search;
+    float cy = s.y + CHIP_H / 2.0f;
+    if (!h->query[0]) {
+        GuiRect r = held == 1 ? gui_rect_grow(s, -1) : s;
+        gui_rrect(r.x, r.y, r.w, r.h, r.h / 2, gui_rgb(HEX_LINE));
+        gui_rrect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, (r.h - 2) / 2,
+                  held == 1 ? gui_mix(HEX_PANEL_HI, HEX_ACCENT, 0.35f) : gui_rgb(HEX_PANEL_HI));
+        gui_icon_search(s.x + s.w / 2, cy, 12, gui_rgb(HEX_TEXT));
+        return;
+    }
+    u32 fill = gui_rgb(HEX_ACCENT), dark = gui_mix(HEX_ACCENT, 0x000000, 0.20f);
+    GuiRect r = held ? gui_rect_grow(s, -1) : s;
+    gui_rrect(r.x, r.y, r.w, r.h, r.h / 2, fill);
+    // The pressed part darkens: the query (edit) or the x (clear)
+    float xs = s.x + s.w - SEARCH_X_W;
+    if (held == 1) {
+        gui_rrect(r.x, r.y, xs - r.x + r.h / 2, r.h, r.h / 2, dark);
+        gui_rect(xs, r.y, 1, r.h, fill);
+    } else if (held == 2) {
+        gui_rrect(xs - r.h / 2, r.y, r.x + r.w - xs + r.h / 2, r.h, r.h / 2, dark);
+        gui_rect(xs - r.h / 2, r.y, r.h / 2, r.h, fill);
+    }
+    gui_text_mid(s.x + 8, s.y, CHIP_H, GUI_S_TINY, gui_rgb(HEX_INK), GUI_LEFT, 0, h->query);
+    gui_rect(xs, s.y + 4, 1, CHIP_H - 8, gui_mix(HEX_ACCENT, HEX_INK, 0.35f));
+    gui_icon_x(xs + SEARCH_X_W / 2.0f - 1, cy, 9, gui_rgb(HEX_INK));
+}
+
 void ui_draw_saves_bottom(const SavesView *v) {
     UiListGeom g = SAVES_GEOM;
+    GuiRect edraw[2], etouch[2];
+    int nempty = ui_saves_empty_buttons(v, edraw, etouch);
     if (v->count > 0) {
         ui_list_draw(v->anim, &g, v->count, v->selected, v->scroll, saves_row, (void *)v);
+    } else if (nempty > 0) {
+        char q[80], line[112];
+        search_label(v->search, q, sizeof(q));
+        snprintf(line, sizeof(line), "No saves match %s", q);
+        gui_text_fit(GUI_BOT_W / 2.0f, 86, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_CENTER, GUI_BOT_W - 24, line);
+        // Both edit and clear work by touch, so an Old 3DS (no ZR) is
+        // never stuck on an empty result
+        gui_btn(edraw[0], "B", "Clear search", GUI_BTN_TONAL, 0, v->empty_held == 1 || ((v->held & KEY_B) && v->marked <= 0));
+        gui_btn(edraw[1], new3ds ? "ZR" : "^search", "Edit search", GUI_BTN_TONAL, 0,
+                v->empty_held == 2 || (v->held & KEY_ZR));
     } else {
         gui_text(GUI_BOT_W / 2.0f, 104, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, "No saves to show");
     }
@@ -943,21 +1090,23 @@ void ui_draw_saves_bottom(const SavesView *v) {
     gui_button(6, GUI_HEADER_H / 2.0f, "SELECT");
     tabs_anim.held = v->seg_held;
     gui_tabs(&tabs_anim, saves_tabs_x(), 4, 18, saves_tabs, 3, v->view_mode, NULL);
-    char count[32], marked[24];
-    GuiRect chip;
-    saves_header_layout(v, count, sizeof(count), marked, sizeof(marked), &chip);
-    gui_text_mid(GUI_BOT_W - 8, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, count);
-    if (chip.w > 0) {
+    SavesHeader h;
+    saves_header_layout(v, &h);
+    if (h.show_count)
+        gui_text_mid(h.count_right, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, h.count);
+    if (h.chip.w > 0) {
         // "B 3 marked x": a tap on it (or B) unmarks everything
+        GuiRect chip = h.chip;
         bool down = v->chip_pressed || (v->held & KEY_B);
         GuiRect r = down ? gui_rect_grow(chip, -1) : chip;
         gui_rrect(r.x, r.y, r.w, r.h, r.h / 2,
                   down ? gui_mix(HEX_ACCENT, 0x000000, 0.20f) : gui_rgb(HEX_ACCENT));
         float x = chip.x + 5, cy = chip.y + CHIP_H / 2.0f;
         x += gui_button(x, cy, "B") + 4;
-        x += gui_text_mid(x, chip.y, CHIP_H, GUI_S_TINY, gui_rgb(HEX_INK), GUI_LEFT, 0, marked) + 5;
+        x += gui_text_mid(x, chip.y, CHIP_H, GUI_S_TINY, gui_rgb(HEX_INK), GUI_LEFT, 0, h.marked) + 5;
         gui_icon_x(x + 4, cy, 8, gui_rgb(HEX_INK));
     }
+    draw_search_chip(&h, v->search_held);
 
     UiBarItem items[SAVES_BAR_COUNT];
     int n = ui_saves_bar(v, items);

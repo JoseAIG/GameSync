@@ -501,9 +501,37 @@ float gui_button(float x, float cy, const char *b) {
     return button_glyph(x, cy, b, false);
 }
 
+// A button glyph names a key ("A"), a drawn icon ("^up", "^down",
+// "^search") or a key then an icon ("A^up")
+enum { BTN_ICON_NONE = 0, BTN_ICON_UP, BTN_ICON_DOWN, BTN_ICON_SEARCH };
+#define BTN_ICON_W 10
+
+static void split_glyph(const char *glyph, char *key, size_t key_size, int *icon) {
+    *icon = BTN_ICON_NONE;
+    key[0] = '\0';
+    if (!glyph) return;
+    const char *caret = strchr(glyph, '^');
+    size_t n = caret ? (size_t)(caret - glyph) : strlen(glyph);
+    if (n >= key_size) n = key_size - 1;
+    memcpy(key, glyph, n);
+    key[n] = '\0';
+    if (!caret) return;
+    if (!strcmp(caret + 1, "up")) *icon = BTN_ICON_UP;
+    else if (!strcmp(caret + 1, "down")) *icon = BTN_ICON_DOWN;
+    else if (!strcmp(caret + 1, "search")) *icon = BTN_ICON_SEARCH;
+}
+
+static float glyph_part_w(const char *key, int icon) {
+    float w = key[0] ? gui_button_w(key) : 0;
+    if (icon) w += (w > 0 ? 4 : 0) + BTN_ICON_W;
+    return w;
+}
+
 float gui_btn_content_w(const char *glyph, const char *label) {
-    float w = 0;
-    if (glyph && *glyph) w += gui_button_w(glyph);
+    char key[12];
+    int icon;
+    split_glyph(glyph, key, sizeof(key), &icon);
+    float w = glyph_part_w(key, icon);
     if (label && *label) w += (w > 0 ? 4 : 0) + gui_text_w(GUI_S_SMALL, label);
     return w;
 }
@@ -536,17 +564,28 @@ void gui_btn_ex(GuiRect r, const char *glyph, const char *label, GuiBtnStyle sty
             text = HEX_MUTED;
             break;
     }
-    // Glyph + label centred, never closer than 6 px to the edges
-    bool has_glyph = glyph && *glyph;
-    float gw = has_glyph ? gui_button_w(glyph) + 4 : 0;
+    // Glyph (key, icon) + label centred, never closer than 6 px to the edges
+    char key[12];
+    int icon;
+    split_glyph(glyph, key, sizeof(key), &icon);
+    float gw = glyph_part_w(key, icon);
+    if (gw > 0) gw += 4;
     char fitted[GUI_WRAP_LINE];
     gui_fit(label ? label : "", GUI_S_SMALL, r.w - 12 - gw, fitted, sizeof(fitted));
     float cw = gw + gui_text_w(GUI_S_SMALL, fitted);
-    if (!fitted[0] && has_glyph) cw -= 4;
+    if (!fitted[0] && gw > 0) cw -= 4;
     float x = r.x + (r.w - cw) / 2;
     if (x < r.x + 6) x = r.x + 6;
     float cy = r.y + r.h / 2;
-    if (has_glyph) x += button_glyph(x, cy, glyph, style == GUI_BTN_DISABLED) + 4;
+    if (key[0]) x += button_glyph(x, cy, key, style == GUI_BTN_DISABLED) + 4;
+    if (icon) {
+        u32 c = gui_rgb(text);
+        float icx = x + BTN_ICON_W / 2.0f;
+        if (icon == BTN_ICON_UP) gui_icon_up(icx, cy, 9, c);
+        else if (icon == BTN_ICON_DOWN) gui_icon_down(icx, cy, 9, c);
+        else gui_icon_search(icx, cy, 11, c);
+        x += BTN_ICON_W + 4;
+    }
     if (fitted[0]) gui_text_mid(x, r.y, r.h, GUI_S_SMALL, gui_rgb(text), GUI_LEFT, 0, fitted);
 }
 

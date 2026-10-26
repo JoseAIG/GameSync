@@ -245,6 +245,11 @@ typedef struct {
     u32 held;
     bool chip_pressed;         // finger on the "N marked" chip
     int seg_held;              // 1 + All/3DS/NDS segment under a finger, 0 = none
+    // Search by name
+    const char *search;        // the active search, "" = none
+    int view_total;            // titles in the view before the search
+    int search_held;           // finger on the search chip: 1 its query / magnifier, 2 its x, 0 none
+    int empty_held;            // finger on an empty-result button: 1 + index, 0 none
 } SavesView;
 
 void ui_draw_saves_top(const SavesView *v);
@@ -257,6 +262,15 @@ int ui_saves_bar(const SavesView *v, UiBarItem *items);
 GuiRect ui_saves_marked_chip(const SavesView *v);
 // Touch targets of the header's All / 3DS / NDS segments (VIEW_*); returns 3
 int ui_saves_segments(GuiRect *touch);
+// Touch targets of the header's search chip: [0] the magnifier (no search)
+// or the query (re-opens the keyboard), [1] the x that clears it. Returns
+// the count (1 without a search, 2 with one).
+int ui_saves_search_targets(const SavesView *v, GuiRect *touch);
+// Buttons shown when a search matches nothing: [0] B Clear search,
+// [1] ZR Edit search. Returns 2, or 0 when they aren't shown.
+int ui_saves_empty_buttons(const SavesView *v, GuiRect *draw, GuiRect *touch);
+// A New 3DS (ZR, the C-stick): only then are ZR hints shown
+bool ui_is_new3ds(void);
 
 // ---------------------------------------------------------------------------
 // Save dialogs

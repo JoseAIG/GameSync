@@ -201,7 +201,9 @@ float gui_pill_outline(float x, float y, float h, float scale, u32 color, u32 fi
 float gui_button(float x, float cy, const char *button);
 float gui_button_w(const char *button);
 
-// Pill button: the key glyph (may be NULL) then the label, centred.
+// Pill button: the key glyph (may be NULL) then the label, centred. The
+// glyph may also add a drawn icon after the key: "A^up", "X^down", or be
+// an icon alone: "^search".
 // PRIMARY is filled with the tone (0 = HEX_ACCENT), TONAL is a neutral
 // raised fill, DISABLED is flat with muted text. `pressed` (a finger on it,
 // or its key held) darkens the fill and insets it by 1 px. `r` is the drawn

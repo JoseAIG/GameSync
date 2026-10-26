@@ -111,7 +111,40 @@ static void test_text_entry(void) {
     CHECK(ui_utf8_copy(NULL, out, sizeof(out)) == 0 && out[0] == '\0');
 }
 
+static void test_search(void) {
+    CHECK(ui_name_matches("The Legend of Zelda", "zel"));
+    CHECK(ui_name_matches("The Legend of Zelda", "ZELDA"));
+    CHECK(ui_name_matches("The Legend of Zelda", ""));
+    CHECK(ui_name_matches("The Legend of Zelda", NULL));
+    CHECK(!ui_name_matches("The Legend of Zelda", "mario"));
+    // Accents fold both ways
+    CHECK(ui_name_matches("Pok\xC3\xA9mon Y", "pokemon"));
+    CHECK(ui_name_matches("Pokemon Y", "Pok\xC3\xA9"));
+    CHECK(ui_name_matches("\xC3\x89TRANGE", "etrange"));
+    CHECK(ui_name_matches("Stra\xC3\x9F" "e", "strasse"));
+    CHECK(ui_name_matches("\xC3\x86on", "aeon"));
+    CHECK(ui_name_matches("Ni\xC3\xB1o", "nino"));
+    // Other UTF-8 still matches itself
+    CHECK(ui_name_matches("\xE3\x83\x9D\xE3\x82\xB1\xE3\x83\xA2\xE3\x83\xB3", "\xE3\x82\xB1"));
+    CHECK(!ui_name_matches("abc", "abcd"));
+    CHECK(!ui_name_matches(NULL, "a"));
+
+    char out[32];
+    CHECK(!ui_utf8_prefix("zel", 10, out, sizeof(out)));
+    CHECK_STR(out, "zel");
+    CHECK(ui_utf8_prefix("abcdefghijkl", 10, out, sizeof(out)));
+    CHECK_STR(out, "abcdefghij");
+    CHECK(!ui_utf8_prefix("abcdefghij", 10, out, sizeof(out)));
+    // Characters, not bytes
+    CHECK(ui_utf8_prefix("\xC3\xA9\xC3\xA9\xC3\xA9", 2, out, sizeof(out)));
+    CHECK_STR(out, "\xC3\xA9\xC3\xA9");
+    char small[4];
+    CHECK(ui_utf8_prefix("\xC3\xA9\xC3\xA9\xC3\xA9", 10, small, sizeof(small)));
+    CHECK_STR(small, "\xC3\xA9");
+}
+
 int main(void) {
+    test_search();
     test_text_entry();
     test_parse();
     test_when();

@@ -23,6 +23,11 @@ static int view_mode = VIEW_ALL;
 static int filtered[MAX_TITLES];
 static int filtered_count = 0;
 
+// Search by name, combined with the view ("" = none). Kept across tab
+// visits and rescans.
+static char search[64];
+static int view_total = 0;   // titles in the view before the search
+
 // Last compare with the server (A), shown on the top screen for that title
 static SaveDetails last_details;
 static int last_details_idx = -1;
@@ -35,6 +40,10 @@ static bool saves_chip_pressed;
 static UiTap saves_seg_tap = UI_TAP_INIT;
 static int saves_seg_held;      // 1 + segment under a finger, 0 = none
 static u32 saves_held;          // keys held, while the Saves loop itself draws
+static UiTap saves_search_tap = UI_TAP_INIT;
+static int saves_search_held;   // 1 query / magnifier, 2 its x, 0 none
+static UiTap saves_empty_tap = UI_TAP_INIT;
+static int saves_empty_held;    // 1 + empty-result button under a finger
 
 #define LIST_VISIBLE SAVES_ROWS
 
@@ -60,9 +69,10 @@ static int title_compare(const void *a, const void *b) {
     return strcasecmp(ta->name, tb->name);
 }
 
-// Rebuild the filtered index list based on current view_mode
+// Rebuild the filtered index list from view_mode and the search
 static void rebuild_filter(void) {
     filtered_count = 0;
+    view_total = 0;
     for (int i = 0; i < title_count; i++) {
         bool include = false;
         switch (view_mode) {
@@ -70,7 +80,9 @@ static void rebuild_filter(void) {
             case VIEW_NDS: include = titles[i].is_nds; break;
             default:       include = true; break;
         }
-        if (include)
+        if (!include) continue;
+        view_total++;
+        if (ui_name_matches(titles[i].name, search))
             filtered[filtered_count++] = i;
     }
     // Reset selection (and whatever the list was doing with the old rows)
@@ -145,6 +157,10 @@ static void refresh_view(void) {
     view.held = saves_held;
     view.chip_pressed = saves_chip_pressed;
     view.seg_held = saves_seg_held;
+    view.search = search;
+    view.view_total = view_total;
+    view.search_held = saves_search_held;
+    view.empty_held = saves_empty_held;
 }
 
 static void saves_top(void *ctx) {
@@ -451,14 +467,16 @@ static void toggle_mark(int idx) {
 }
 
 // Y: what can be done with the selected save, as a list
+static void saves_edit_search(void);
+
 static void do_save_menu(void) {
     int idx = sel_title_idx();
     if (idx < 0) return;
     TitleInfo *t = &titles[idx];
-    enum { M_COMPARE, M_UPLOAD, M_DOWNLOAD, M_HISTORY, M_MARK, M_UNMARK_ALL };
-    const char *items[6];
-    int ids[6], n = 0;
-    char unmark_all[32];
+    enum { M_COMPARE, M_UPLOAD, M_DOWNLOAD, M_HISTORY, M_MARK, M_UNMARK_ALL, M_SEARCH };
+    const char *items[7];
+    int ids[7], n = 0;
+    char unmark_all[32], search_item[48];
     items[n] = "Compare with the server"; ids[n++] = M_COMPARE;
     items[n] = "Upload to the server"; ids[n++] = M_UPLOAD;
     items[n] = "Download from the server"; ids[n++] = M_DOWNLOAD;
@@ -470,6 +488,9 @@ static void do_save_menu(void) {
         items[n] = unmark_all;
         ids[n++] = M_UNMARK_ALL;
     }
+    // Last, so v055's items keep their places
+    snprintf(search_item, sizeof(search_item), "Search saves by name%s", gui_ellipsis());
+    items[n] = search_item; ids[n++] = M_SEARCH;
     int pick = ui_choose(UI_TONE_ACCENT, t->name, items, n);
     if (pick < 0) return;
 
@@ -506,6 +527,9 @@ static void do_save_menu(void) {
             break;
         case M_MARK:
             toggle_mark(idx);
+            break;
+        case M_SEARCH:
+            saves_edit_search();
             break;
         default:
             clear_marks();
@@ -702,11 +726,46 @@ static void saves_do_y(void) {
     do_save_menu();
 }
 
-// B: cancel the batch selection
+// "Search: zel · 3 of 41"
+static void search_status(void) {
+    if (search[0])
+        set_status(UI_TONE_ACCENT, "Search: %.40s \xC2\xB7 %d of %d", search, filtered_count, view_total);
+    else
+        set_status(UI_TONE_ACCENT, "Showing all %d save%s", filtered_count, filtered_count == 1 ? "" : "s");
+}
+
+// ZR, the header's search chip, or Y > Search: edit the search (pre-filled)
+static void saves_edit_search(void) {
+    char text[sizeof(search)];
+    snprintf(text, sizeof(text), "%s", search);
+    UiTextField f = { "Search saves", "Search your saves (empty = all)", "Search", false, false, true };
+    if (!ui_edit_text_ex(&f, text, sizeof(text))) return;
+    // Spaces around the query would only make it miss
+    char *p = text;
+    while (*p == ' ') p++;
+    size_t len = strlen(p);
+    while (len > 0 && p[len - 1] == ' ') p[--len] = '\0';
+    snprintf(search, sizeof(search), "%s", p);
+    rebuild_filter();
+    search_status();
+}
+
+// The search chip's x, B (with nothing marked) or the empty result's button
+static void saves_clear_search(void) {
+    if (!search[0]) return;
+    search[0] = '\0';
+    rebuild_filter();
+    search_status();
+}
+
+// B: cancel the batch selection; with nothing marked, clear the search
 static void saves_do_b(void) {
-    if (count_marked() <= 0) return;
-    clear_marks();
-    set_status(UI_TONE_ACCENT, "Marks cleared");
+    if (count_marked() > 0) {
+        clear_marks();
+        set_status(UI_TONE_ACCENT, "Marks cleared");
+    } else {
+        saves_clear_search();
+    }
 }
 
 // SELECT (next view) or a tap on a segment: show All / 3DS / NDS
@@ -714,8 +773,12 @@ static void saves_set_view(int mode) {
     view_mode = mode;
     rebuild_filter();
     const char *names[] = {"All", "3DS", "NDS"};
-    set_status(UI_TONE_ACCENT, "View: %s (%d title%s)", names[view_mode], filtered_count,
-               filtered_count == 1 ? "" : "s");
+    if (search[0])
+        set_status(UI_TONE_ACCENT, "View: %s \xC2\xB7 search %.30s: %d of %d", names[view_mode], search,
+                   filtered_count, view_total);
+    else
+        set_status(UI_TONE_ACCENT, "View: %s (%d title%s)", names[view_mode], filtered_count,
+                   filtered_count == 1 ? "" : "s");
 }
 
 // Saves tab: runs until the user switches tab or exits
@@ -760,6 +823,14 @@ static UiNav saves_tab(void) {
         int nseg = ui_saves_segments(seg), seg_pressed = -1;
         int seg_hit = ui_tap_buttons(&saves_seg_tap, &in, seg, nseg, &seg_pressed);
         saves_seg_held = seg_pressed + 1;
+        GuiRect srch[2];
+        int nsrch = ui_saves_search_targets(&view, srch), srch_pressed = -1;
+        int srch_hit = ui_tap_buttons(&saves_search_tap, &in, srch, nsrch, &srch_pressed);
+        saves_search_held = srch_pressed + 1;
+        GuiRect edraw[2], etouch[2];
+        int nempty = ui_saves_empty_buttons(&view, edraw, etouch), empty_pressed = -1;
+        int empty_hit = ui_tap_buttons(&saves_empty_tap, &in, etouch, nempty, &empty_pressed);
+        saves_empty_held = empty_pressed + 1;
         UiBarItem items[SAVES_BAR_COUNT];
         int nitems = ui_saves_bar(&view, items);
         int hit = ui_bar_input(&saves_bar, &in, items, nitems);
@@ -770,7 +841,16 @@ static UiNav saves_tab(void) {
         if (hit == SAVES_BAR_Y || (kDown & KEY_Y)) saves_do_y();
         if (hit == SAVES_BAR_A || (kDown & KEY_A)) saves_do_a();
         if (hit == SAVES_BAR_X || (kDown & KEY_X)) saves_do_x();
-        if (chip_hit || (kDown & KEY_B)) saves_do_b();
+        if (chip_hit) {
+            clear_marks();
+            set_status(UI_TONE_ACCENT, "Marks cleared");
+        } else if (kDown & KEY_B) {
+            saves_do_b();
+        }
+        // Search: ZR (New 3DS), the header chip (its x clears), or the
+        // buttons under an empty result
+        if ((kDown & KEY_ZR) || srch_hit == 0 || empty_hit == 1) saves_edit_search();
+        else if (srch_hit == 1 || empty_hit == 0) saves_clear_search();
 
         saves_held = in.held;
         gui_begin(true);
@@ -782,6 +862,8 @@ static UiNav saves_tab(void) {
         saves_held = 0;
         saves_chip_pressed = false;
         saves_seg_held = 0;
+        saves_search_held = 0;
+        saves_empty_held = 0;
     }
     return UI_NAV_EXIT;
 }

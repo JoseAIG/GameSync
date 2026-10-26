@@ -1,5 +1,6 @@
 package com.savesync.android.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -74,6 +75,9 @@ import com.savesync.android.ui.components.GsListRow
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsExpandIn
+import com.savesync.android.ui.theme.gsShrinkOut
+import androidx.compose.runtime.withFrameNanos
 import com.savesync.android.ui.components.rememberListFollower
 import com.savesync.android.ui.theme.gsDim
 import com.savesync.android.ui.theme.gsTextMuted
@@ -152,8 +156,14 @@ fun InstalledGamesScreen(
         runCatching { listFocusRequester.requestFocus() }
     }
 
+    // Focus the search field as soon as it opens, without waiting for the
+    // expand: one frame lets AnimatedVisibility compose the field, so the
+    // requester is attached.
     LaunchedEffect(searchVisible) {
-        if (searchVisible) runCatching { searchFocusRequester.requestFocus() }
+        if (searchVisible) {
+            withFrameNanos { }
+            runCatching { searchFocusRequester.requestFocus() }
+        }
     }
 
     LaunchedEffect(deleteState) {
@@ -375,7 +385,12 @@ fun InstalledGamesScreen(
                     }
                 }
         ) {
-            if (searchVisible) {
+            // Grows down from the header and shrinks back into it.
+            AnimatedVisibility(
+                visible = searchVisible,
+                enter = gsExpandIn(reduceMotion),
+                exit = gsShrinkOut(reduceMotion),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

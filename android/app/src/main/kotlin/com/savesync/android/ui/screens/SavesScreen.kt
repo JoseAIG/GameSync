@@ -2,6 +2,7 @@ package com.savesync.android.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -97,6 +98,9 @@ import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsExpandIn
+import com.savesync.android.ui.theme.gsShrinkOut
+import androidx.compose.runtime.withFrameNanos
 import com.savesync.android.ui.components.rememberListFollower
 import com.savesync.android.ui.theme.gsTextMuted
 import com.savesync.android.ui.theme.textVariantOf
@@ -176,10 +180,13 @@ fun SavesScreen(
         }
     }
 
-    // When search becomes visible, focus the text field
+    // Focus the search field as soon as it opens, without waiting for the
+    // expand: one frame lets AnimatedVisibility compose the field, so the
+    // requester is attached.
     LaunchedEffect(searchVisible) {
         if (searchVisible) {
-            searchFocusRequester.requestFocus()
+            withFrameNanos { }
+            runCatching { searchFocusRequester.requestFocus() }
         }
     }
 
@@ -477,7 +484,12 @@ fun SavesScreen(
                 }
         ) {
             Column(modifier = Modifier.fillMaxSize()) {
-                if (searchVisible) {
+                // Grows down from the header and shrinks back into it.
+                AnimatedVisibility(
+                    visible = searchVisible,
+                    enter = gsExpandIn(reduceMotion),
+                    exit = gsShrinkOut(reduceMotion),
+                ) {
                     SearchBar(
                         query = searchQuery,
                         onQueryChange = { viewModel.setSearchQuery(it) },

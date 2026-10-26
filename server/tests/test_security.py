@@ -59,6 +59,12 @@ BAD_PATHS = [
     "a//b",
     "a/",
     "dir\\..\\escape",
+    "..\\escape",
+    "a\\..",
+    "\\abs",
+    "\\\\server\\share\\x",
+    "a\\\\b",
+    "C:\\windows\\evil",
     "C:/windows/evil",
     "C:evil",
     "a\x00b",
@@ -72,7 +78,15 @@ class TestSafePath:
             validate_relative_path(path)
 
     @pytest.mark.parametrize(
-        "path", ["main", "SAVEDATA/slot0.bin", "user/80000001/save.dat", "a.b-c_d"]
+        "path",
+        [
+            "main",
+            "SAVEDATA/slot0.bin",
+            "user/80000001/save.dat",
+            "a.b-c_d",
+            # Original Xbox client: E:\\UDATA\\<tid>\\<saveid>\\<file>.
+            "A1B2C3D4E5F6\\SaveMeta.xbx",
+        ],
     )
     def test_accepts_normal_paths(self, path):
         assert validate_relative_path(path) == path
@@ -80,6 +94,8 @@ class TestSafePath:
     def test_component_rejects_separator(self):
         with pytest.raises(UnsafePathError):
             validate_path_component("GC_A/..")
+        with pytest.raises(UnsafePathError):
+            validate_path_component("GC_A\\B")
         assert validate_path_component("GC_GM8E") == "GC_GM8E"
 
     def test_safe_join_blocks_symlink_escape(self, tmp_path):
@@ -95,11 +111,23 @@ class TestSafePath:
 
 class TestBundlePathTraversal:
     @pytest.mark.parametrize("compress", [True, False])
-    @pytest.mark.parametrize("path", ["../../escape.bin", "/tmp/escape.bin", "a\\b"])
+    @pytest.mark.parametrize(
+        "path", ["../../escape.bin", "/tmp/escape.bin", "a\\..\\b", "..\\escape.bin"]
+    )
     def test_parse_rejects_traversal(self, path, compress):
         data = _bundle([(path, b"pwned")], compress=compress)
         with pytest.raises(BundleError, match="Invalid file path"):
             parse_bundle(data)
+
+    def test_xbox_backslash_path_round_trips(self, client, auth_headers):
+        """The Xbox client joins sub-folders with ``\\`` (v055 accepted it)."""
+        path = "A1B2C3D4E5F6\\SaveMeta.xbx"
+        r = _upload(client, auth_headers, _bundle([(path, b"xbox save")]))
+        assert r.status_code == 200, r.text
+        r = client.get(f"/api/v1/saves/{TITLE_HEX}", headers=auth_headers)
+        assert r.status_code == 200
+        files = parse_bundle(r.content).files
+        assert [(f.path, f.data) for f in files] == [(path, b"xbox save")]
 
     def test_parse_rejects_non_ascii_title_id(self):
         data = bytearray(_bundle([("main", b"x")]))

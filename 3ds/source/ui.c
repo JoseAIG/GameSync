@@ -925,6 +925,22 @@ void ui_tab_header(int active) {
     gui_header_tabs(tab_labels, UI_TAB_COUNT, active);
 }
 
+// The tabs' content (not their header bars or action bars) enters from the
+// side of the shoulder button that was pressed
+static GuiTransition tab_transition;
+
+void ui_tab_transition(float from_px) {
+    gui_transition_start(&tab_transition, from_px);
+}
+
+void ui_tab_content_begin(void) {
+    gui_transition_begin(&tab_transition);
+}
+
+void ui_tab_content_end(void) {
+    gui_transition_end();
+}
+
 UiNav ui_tab_nav(u32 down) {
     if (down & KEY_L) return UI_NAV_PREV;
     if (down & KEY_R) return UI_NAV_NEXT;
@@ -1226,6 +1242,7 @@ void ui_draw_saves_top(const SavesView *v) {
     // B clears the search only while nothing is marked (else it unmarks)
     if (searching && v->marked <= 0) hints[nh++] = (GuiHint){ "B", "Clear search" };
     hints[nh++] = (GuiHint){ "START", "Exit" };
+    ui_tab_content_begin();
 
     if (v->count == 0 || v->selected < 0 || v->selected >= v->count) {
         gui_panel(8, 34, GUI_TOP_W - 16, 148);
@@ -1253,6 +1270,7 @@ void ui_draw_saves_top(const SavesView *v) {
                      "L / R switch to the game catalog and the settings.");
         }
         draw_status_toast(v->status, v->status_tone, v->status_serial);
+        ui_tab_content_end();
         gui_footer(hints, nh);
         return;
     }
@@ -1338,6 +1356,7 @@ void ui_draw_saves_top(const SavesView *v) {
     }
 
     draw_status_toast(v->status, v->status_tone, v->status_serial);
+    ui_tab_content_end();
     gui_footer(hints, nh);
 }
 
@@ -1589,6 +1608,7 @@ void ui_draw_saves_bottom(const SavesView *v) {
     UiListGeom g = SAVES_GEOM;
     GuiRect edraw[2], etouch[2];
     int nempty = ui_saves_empty_buttons(v, edraw, etouch);
+    ui_tab_content_begin();
     if (v->count > 0) {
         ui_list_draw(v->anim, &g, v->count, v->selected, v->scroll, saves_row, (void *)v);
     } else if (nempty > 0) {
@@ -1604,6 +1624,7 @@ void ui_draw_saves_bottom(const SavesView *v) {
     } else {
         gui_text(GUI_BOT_W / 2.0f, 104, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, "No saves to show");
     }
+    ui_tab_content_end();
 
     gui_header_bar_ex(v->count == 0 || ui_list_at_top(v->anim));
     // SELECT cycles the view; a tap on a segment picks it
@@ -2257,6 +2278,7 @@ static void set_cfg_note(int row, UiTone tone, const char *text) {
 static void config_top(void *ctx) {
     const ConfigView *v = ctx;
     ui_tab_header(UI_TAB_SETTINGS);
+    ui_tab_content_begin();
     gui_panel(8, 32, GUI_TOP_W - 16, 128);
     float lh = gui_line_h(GUI_S_BODY) + 1, y = 40;
     char key[48];
@@ -2297,6 +2319,7 @@ static void config_top(void *ctx) {
         gui_text_wrap(20, hy + 5 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_TOP_W - 40, 2,
                       cfg_rows[v->selected].help);
     }
+    ui_tab_content_end();
     static const GuiHint hints[] = { { "UD", "Move" }, { "START", "Exit" } };
     gui_footer(hints, 2);
 }
@@ -2390,7 +2413,9 @@ static void step_knobs(const AppConfig *cfg) {
 static void config_bottom(void *ctx) {
     ConfigView *v = ctx;
     step_knobs(v->cfg);
+    ui_tab_content_begin();
     ui_list_draw(&config_anim, &cfg_geom, CFG_ITEMS, v->selected, v->scroll, config_row, v);
+    ui_tab_content_end();
     gui_header_bar_ex(ui_list_at_top(&config_anim));
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Settings");
     UiBarItem item;

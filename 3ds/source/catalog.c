@@ -720,6 +720,7 @@ static void draw_top(void *ctx) {
     hints[nhints++] = (GuiHint){ "Y", "Search" };
     hints[nhints++] = (GuiHint){ "LR", "Page" };
     hints[nhints++] = (GuiHint){ "START", "Exit" };
+    ui_tab_content_begin();
 
     float px = 8, py = 32, pw = GUI_TOP_W - 16;
     float banner_y = 190;
@@ -826,6 +827,7 @@ static void draw_top(void *ctx) {
         gui_text_mid(20, banner_y, 22, GUI_S_SMALL, gui_rgb(banner ? banner_text : HEX_TEXT), GUI_LEFT,
                      GUI_TOP_W - 40, text);
     }
+    ui_tab_content_end();
     gui_footer(hints, nhints);
 }
 
@@ -883,6 +885,7 @@ static int cat_segments(const Catalog *cat, GuiRect *touch) {
 static void draw_bottom(void *ctx) {
     Catalog *cat = ctx;
     bool has_rows = cat->ready && cat->total > 0;
+    ui_tab_content_begin();
     if (has_rows) {
         ui_list_draw(&cat->anim, &cat_geom, cat->total, cat->selected, cat->scroll, cat_row, cat);
     } else {
@@ -894,6 +897,7 @@ static void draw_bottom(void *ctx) {
             gui_text(GUI_BOT_W / 2.0f, 100, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, msg);
         }
     }
+    ui_tab_content_end();
 
     gui_header_bar_ex(!has_rows || ui_list_at_top(&cat->anim));
     const char *labels[CAT_MAX_SYSTEMS];

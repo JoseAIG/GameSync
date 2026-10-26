@@ -201,6 +201,13 @@ typedef enum {
 
 // Top screen header of a top-level screen, showing the tab strip
 void ui_tab_header(int active);
+// A tab change: the next tab's content enters from `from_px` (+16 from the
+// right after R, -16 from the left after L) with a fade, while input is
+// live. Each tab draws its content, not its header or action bar, between
+// ui_tab_content_begin() and ui_tab_content_end(), on both screens.
+void ui_tab_transition(float from_px);
+void ui_tab_content_begin(void);
+void ui_tab_content_end(void);
 // The keys every top-level screen shares: L / R switch tabs, START asks
 // to exit (over the current backdrop). UI_NAV_STAY for anything else.
 UiNav ui_tab_nav(u32 down);

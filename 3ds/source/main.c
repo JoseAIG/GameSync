@@ -1583,6 +1583,9 @@ int main(int argc, char *argv[]) {
         }
         if (nav == UI_NAV_EXIT) break;
         tab = (tab + (nav == UI_NAV_NEXT ? 1 : UI_TAB_COUNT - 1)) % UI_TAB_COUNT;
+        // The new tab's content comes in from the side of the button pressed
+        // (wrapping included: R from Settings enters Saves from the right)
+        ui_tab_transition(nav == UI_NAV_NEXT ? +16 : -16);
     }
 
     // Cleanup: no worker may outlive the network service

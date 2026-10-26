@@ -13,6 +13,10 @@
 #define STATE_DIR "sdmc:/3ds/3dssync/state"
 #define MAX_UPLOAD_SIZE 0x70000  // 448KB compressed - bundles are zlib compressed
 
+// Stringify a numeric macro for messages
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
 // HTTP status of the last request that ended in SYNC_ERR_SERVER
 static u32 last_server_status;
 
@@ -36,7 +40,8 @@ const char *sync_result_str(SyncResult result) {
             return detail;
         case SYNC_ERR_ARCHIVE:  return "Save read/write error";
         case SYNC_ERR_BUNDLE:   return "Bundle format error";
-        case SYNC_ERR_TOO_LARGE: return "Save too large";
+        case SYNC_ERR_TOO_LARGE: return "Save too large (over 448 KB compressed)";
+        case SYNC_ERR_TOO_MANY_FILES: return "Save has too many files (max " STR(MAX_SAVE_FILES) ")";
         default:                return "Unknown error";
     }
 }
@@ -185,7 +190,11 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
     else
         file_count = archive_read(title->title_id, title->media_type,
                                   files, MAX_SAVE_FILES);
-    if (file_count < 0) { free(files); return SYNC_ERR_ARCHIVE; }
+    if (file_count < 0) {
+        free(files);
+        return file_count == ARCHIVE_ERR_TOO_MANY_FILES ? SYNC_ERR_TOO_MANY_FILES
+                                                        : SYNC_ERR_ARCHIVE;
+    }
     if (file_count == 0) { free(files); return SYNC_OK; }
 
     // Compute hash if not provided
@@ -269,7 +278,7 @@ static SyncResult download_title(const AppConfig *config, const TitleInfo *title
         free(files);
         if (decompressed) free(decompressed);
         free(resp);
-        return SYNC_ERR_BUNDLE;
+        return file_count == -2 ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_BUNDLE;
     }
 
     // Compute hash of downloaded save (before write, while data is valid)
@@ -394,6 +403,17 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
             else
                 fc = archive_read(titles[i].title_id, titles[i].media_type,
                                   files, MAX_SAVE_FILES);
+            if (fc == ARCHIVE_ERR_TOO_MANY_FILES || fc == ARCHIVE_ERR_READ) {
+                // Never report a partial save: leave this title out of the
+                // sync (like a cartridge) and count it as failed.
+                snprintf(msg, sizeof(msg), "Cannot read save: %s (%s)",
+                    titles[i].title_id_hex,
+                    fc == ARCHIVE_ERR_TOO_MANY_FILES ? "too many files" : "read error");
+                if (progress) progress(msg);
+                hash_cache[i][0] = '\0';
+                local_summary.failed++;
+                continue;
+            }
             if (fc < 0) fc = 0;
 
             if (fc > 0) {
@@ -665,6 +685,14 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
             details->local_size += files[i].size;
         }
         archive_free_files(files, file_count);
+    } else if (file_count == ARCHIVE_ERR_TOO_MANY_FILES || file_count == ARCHIVE_ERR_READ) {
+        // A save exists but can't be read completely: don't let it look
+        // missing (that would suggest a download over it)
+        details->local_exists = true;
+        details->local_file_count = 0;
+        details->local_size = 0;
+        strcpy(details->local_hash, file_count == ARCHIVE_ERR_TOO_MANY_FILES
+               ? "ERROR: too many files" : "ERROR: read failed");
     } else {
         details->local_exists = (file_count == 0);  // 0 files = empty save, -1 = error/no save
         details->local_file_count = 0;
@@ -873,7 +901,7 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
         free(files);
         if (decompressed) free(decompressed);
         free(resp);
-        return SYNC_ERR_BUNDLE;
+        return file_count == -2 ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_BUNDLE;
     }
 
     snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);

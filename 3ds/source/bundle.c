@@ -48,10 +48,10 @@ static u64 read_u64_be(const u8 *buf) {
 }
 
 // Parse file table and data from payload buffer
-// Returns file count on success, -1 on error
+// Returns file count on success, -1 on error, -2 if there are too many files
 static int parse_payload(const u8 *payload, u32 payload_size,
                          u32 file_count, ArchiveFile *files, int max_files) {
-    if ((int)file_count > max_files) return -1;
+    if (file_count > (u32)max_files) return -2;
 
     u32 offset = 0;
 
@@ -76,7 +76,7 @@ static int parse_payload(const u8 *payload, u32 payload_size,
 
     // File data - point into the payload buffer
     for (u32 i = 0; i < file_count; i++) {
-        if (offset + files[i].size > payload_size) return -1;
+        if (files[i].size > payload_size - offset) return -1;
         files[i].data = (u8 *)(payload + offset);
         offset += files[i].size;
     }

@@ -12,6 +12,7 @@ typedef enum {
     SYNC_ERR_ARCHIVE,
     SYNC_ERR_BUNDLE,
     SYNC_ERR_TOO_LARGE,
+    SYNC_ERR_TOO_MANY_FILES,
 } SyncResult;
 
 // Sync action decided by smart sync

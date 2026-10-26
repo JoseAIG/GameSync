@@ -1,35 +1,38 @@
 #include "archive.h"
 
-#define MAX_ARCHIVE_FILES 64
-
 static Result open_save_archive(FS_Archive *archive, u64 title_id, FS_MediaType media_type) {
     u32 path_data[3] = {media_type, (u32)(title_id & 0xFFFFFFFF), (u32)(title_id >> 32)};
     return FSUSER_OpenArchive(archive, ARCHIVE_USER_SAVEDATA,
         (FS_Path){PATH_BINARY, sizeof(path_data), path_data});
 }
 
-// Recursively read files from a directory in the archive
+// Recursively read files from a directory in the archive.
+// Returns the number of files added, or a negative ARCHIVE_ERR_* code. On
+// error every file added by this call is freed: a partial read must never be
+// hashed or uploaded as if it were the whole save.
 static int read_dir(FS_Archive archive, const char *dir_path,
                     ArchiveFile *files, int offset, int max_files) {
     Handle dir_handle;
     int added = 0;
+    int err = 0;
 
     Result res = FSUSER_OpenDirectory(&dir_handle, archive,
         fsMakePath(PATH_ASCII, dir_path));
-    if (R_FAILED(res)) return 0;
+    if (R_FAILED(res)) return ARCHIVE_ERR_READ;
 
     FS_DirectoryEntry *entries = (FS_DirectoryEntry *)malloc(32 * sizeof(FS_DirectoryEntry));
     if (!entries) {
         FSDIR_Close(dir_handle);
-        return 0;
+        return ARCHIVE_ERR_READ;
     }
     u32 entries_read = 0;
 
-    while (true) {
+    while (err == 0) {
         res = FSDIR_Read(dir_handle, &entries_read, 32, entries);
-        if (R_FAILED(res) || entries_read == 0) break;
+        if (R_FAILED(res)) { err = ARCHIVE_ERR_READ; break; }
+        if (entries_read == 0) break;
 
-        for (u32 i = 0; i < entries_read && (offset + added) < max_files; i++) {
+        for (u32 i = 0; i < entries_read && err == 0; i++) {
             // Convert UTF-16 name to ASCII
             char name[256];
             int j;
@@ -46,45 +49,67 @@ static int read_dir(FS_Archive archive, const char *dir_path,
 
             if (entries[i].attributes & FS_ATTRIBUTE_DIRECTORY) {
                 // Recurse into subdirectory
-                added += read_dir(archive, full_path, files, offset + added, max_files);
-            } else {
-                // Read file
-                Handle file_handle;
-                res = FSUSER_OpenFile(&file_handle, archive,
-                    fsMakePath(PATH_ASCII, full_path), FS_OPEN_READ, 0);
-                if (R_FAILED(res)) continue;
-
-                u64 file_size;
-                FSFILE_GetSize(file_handle, &file_size);
-
-                u8 *buf = (u8 *)malloc((size_t)file_size);
-                if (!buf) {
-                    FSFILE_Close(file_handle);
-                    continue;
-                }
-
-                u32 bytes_read;
-                res = FSFILE_Read(file_handle, &bytes_read, 0, buf, (u32)file_size);
-                FSFILE_Close(file_handle);
-
-                if (R_FAILED(res)) {
-                    free(buf);
-                    continue;
-                }
-
-                ArchiveFile *af = &files[offset + added];
-                // Store path without leading slash for bundle format
-                strncpy(af->path, full_path + 1, MAX_PATH_LEN - 1);
-                af->path[MAX_PATH_LEN - 1] = '\0';
-                af->size = bytes_read;
-                af->data = buf;
-                added++;
+                int sub = read_dir(archive, full_path, files, offset + added, max_files);
+                if (sub < 0) err = sub;
+                else added += sub;
+                continue;
             }
+
+            if (offset + added >= max_files) {
+                err = ARCHIVE_ERR_TOO_MANY_FILES;
+                break;
+            }
+
+            // Read file
+            Handle file_handle;
+            res = FSUSER_OpenFile(&file_handle, archive,
+                fsMakePath(PATH_ASCII, full_path), FS_OPEN_READ, 0);
+            if (R_FAILED(res)) { err = ARCHIVE_ERR_READ; break; }
+
+            u64 file_size = 0;
+            res = FSFILE_GetSize(file_handle, &file_size);
+            if (R_FAILED(res) || file_size > 0xFFFFFFFFULL) {
+                FSFILE_Close(file_handle);
+                err = ARCHIVE_ERR_READ;
+                break;
+            }
+
+            // malloc(0) may return NULL; empty files are part of the save too
+            u8 *buf = (u8 *)malloc(file_size ? (size_t)file_size : 1);
+            if (!buf) {
+                FSFILE_Close(file_handle);
+                err = ARCHIVE_ERR_READ;
+                break;
+            }
+
+            u32 bytes_read = 0;
+            if (file_size > 0)
+                res = FSFILE_Read(file_handle, &bytes_read, 0, buf, (u32)file_size);
+            FSFILE_Close(file_handle);
+
+            if (R_FAILED(res) || bytes_read != (u32)file_size) {
+                free(buf);
+                err = ARCHIVE_ERR_READ;
+                break;
+            }
+
+            ArchiveFile *af = &files[offset + added];
+            // Store path without leading slash for bundle format
+            strncpy(af->path, full_path + 1, MAX_PATH_LEN - 1);
+            af->path[MAX_PATH_LEN - 1] = '\0';
+            af->size = bytes_read;
+            af->data = buf;
+            added++;
         }
     }
 
     free(entries);
     FSDIR_Close(dir_handle);
+
+    if (err) {
+        archive_free_files(files + offset, added);
+        return err;
+    }
     return added;
 }
 
@@ -151,11 +176,12 @@ int archive_read(u64 title_id, FS_MediaType media_type,
                  ArchiveFile *files, int max_files) {
     FS_Archive archive;
     Result res = open_save_archive(&archive, title_id, media_type);
-    if (R_FAILED(res)) return -1;
+    if (R_FAILED(res)) return ARCHIVE_ERR_OPEN;
 
     int count = read_dir(archive, "/", files, 0, max_files);
 
     FSUSER_CloseArchive(archive);
+    if (count < 0) return count;
 
     // FSDIR_Read order is filesystem-dependent; sort so hashes and bundles
     // are identical to what the server and other clients compute.

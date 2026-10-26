@@ -106,6 +106,7 @@ import com.savesync.android.ui.components.rememberHoldNavState
 import com.savesync.android.ui.components.LocalInputTracker
 import com.savesync.android.ui.components.isRevealGuarded
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.produceState
 
 /**
  * Label the [SystemFilterChip] shows when no specific system is
@@ -208,10 +209,12 @@ fun RomCatalogScreen(
     // view keeps its own scroll positions: its rows are a different list.
     val systemKey = (activeSystem ?: "ALL") + if (raOnly) "|RA" else ""
 
-    // Lazy first-load when the tab is opened.
+    // Lazy first-load when the tab is opened; coming back to the tab while
+    // the load failed tries again by itself.
     LaunchedEffect(Unit) {
-        if (!loaded && !loading) viewModel.fetchRomCatalog()
+        if (!loading && (!loaded || error != null)) viewModel.fetchRomCatalog()
     }
+    val settings by viewModel.settings.collectAsState()
 
     // Claim focus for the rom list on entry so the search OutlinedTextField
     // doesn't auto-focus and pop the keyboard. Search is only focused when
@@ -236,8 +239,15 @@ fun RomCatalogScreen(
     LaunchedEffect(downloadState) {
         when (val s = downloadState) {
             is MainViewModel.RomDownloadState.Downloading -> {
+                // The one confirmation; ongoing status is the Downloads tab
+                // badge.  "View" is a touch shortcut (R1 reaches the tab).
                 notifier.show(
-                    GsNotice(GsNoticeKind.Success, "Queued ${s.name} — see Downloads tab for progress")
+                    GsNotice(
+                        GsNoticeKind.Success,
+                        "Queued ${s.name}",
+                        actionLabel = "View",
+                        onAction = { onNavigateToTab(DOWNLOADS_TAB) },
+                    )
                 )
                 viewModel.resetRomDownloadState()
             }
@@ -551,10 +561,23 @@ fun RomCatalogScreen(
                     loading && catalog.isEmpty() -> {
                         CenterLoader(text = "Loading catalog…")
                     }
-                    error != null && catalog.isEmpty() -> {
+                    error != null && catalog.isEmpty() && settings.serverUrl.isBlank() -> {
                         CenterMessage(
-                            title = "Couldn't load catalog",
-                            detail = error ?: "",
+                            title = "No server set",
+                            detail = "Add your GameSync server in Settings to browse its games.",
+                            action = "Open Settings" to { onNavigateToTab(SETTINGS_TAB) },
+                        )
+                    }
+                    error != null && catalog.isEmpty() -> {
+                        // A stays "download the selected row" here (a no-op on
+                        // an empty list), so Retry is touch-only and carries no
+                        // A glyph; a pad user waits for the automatic retry or
+                        // uses Settings → Refresh catalog.
+                        CenterMessage(
+                            title = "Couldn't reach ${serverHostOf(settings.serverUrl)}",
+                            detail = "Check the server is running and on the same network.",
+                            footnotes = listOf(error ?: "", "Retrying when the server comes back"),
+                            action = "Retry" to { viewModel.fetchRomCatalog() },
                         )
                     }
                     filtered.isEmpty() && catalog.isEmpty() -> {
@@ -589,14 +612,6 @@ fun RomCatalogScreen(
                     }
                 }
 
-                // Active download overlay (the existing download
-                // pipeline is fire-and-forget on the saves tab; show a
-                // small indicator so the user knows something is
-                // happening without blocking the list).
-                if (downloadState is MainViewModel.RomDownloadState.Downloading) {
-                    val name = (downloadState as MainViewModel.RomDownloadState.Downloading).name
-                    DownloadBanner(name)
-                }
             }
 
             CatalogFooter(total = catalog.size, shown = filtered.size, raOnly = raOnly)
@@ -607,6 +622,12 @@ fun RomCatalogScreen(
         // A Wii U game's update and DLC are separate titles that are useless
         // apart, so one tap queues the whole set in install order.
         val group = rom.withRelated(catalog)
+        // The real destination and the space left there (read off the main thread).
+        val destination by produceState<MainViewModel.RomDestination?>(null, rom.system) {
+            value = viewModel.romDestination(rom.system)
+        }
+        val totalSize = group.sumOf { it.size }
+        val tooBig = destination?.freeBytes?.let { free -> totalSize > 0 && totalSize > free } == true
         GsDialog(
             title = if (group.size > 1) "Download ${group.size} titles?" else "Download ROM?",
             onDismiss = { confirmTarget = null },
@@ -614,7 +635,7 @@ fun RomCatalogScreen(
                 GsDialogChoice(GsButton.B, "Cancel", { confirmTarget = null }),
                 GsDialogChoice(
                     GsButton.A,
-                    "Download",
+                    if (tooBig) "Download anyway" else "Download",
                     {
                         group.forEach { part ->
                             val extract = part.preferredDownloadExtractFormat()
@@ -658,12 +679,21 @@ fun RomCatalogScreen(
                 if (rom.size > 0) Text("Size: ${formatBytes(rom.size)}", color = GsColors.Dim)
             }
             Spacer(Modifier.height(8.dp))
+            val dest = destination
             Text(
-                "Saves into the ROM folder configured in Settings " +
-                    "(or the system-specific override, if set).",
+                if (dest != null) "To: ${dest.dir.absolutePath}" else "To: the ROM folder set in Settings",
                 style = MaterialTheme.typography.bodySmall,
-                color = gsDim(),
+                color = gsTextMuted(),
             )
+            dest?.freeBytes?.let { free ->
+                Text(
+                    if (tooBig) "Free: ${formatBytes(free).ifEmpty { "0 B" }} — not enough for ${formatBytes(totalSize)}"
+                    else "Free: ${formatBytes(free).ifEmpty { "0 B" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (tooBig) GsColors.WarnText else gsTextMuted(),
+                    fontWeight = if (tooBig) FontWeight.Medium else null,
+                )
+            }
         }
     }
 }
@@ -746,22 +776,6 @@ private fun CatalogRomCard(
 }
 
 @Composable
-private fun DownloadBanner(name: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = GsColors.Accent)
-        // Now an enqueue confirmation — the actual transfer is running on
-        // the Downloads tab via DownloadManager.
-        Text("Queued $name — open Downloads tab", style = MaterialTheme.typography.bodyMedium)
-    }
-}
-
-@Composable
 private fun CatalogFooter(total: Int, shown: Int, raOnly: Boolean = false) {
     Row(
         modifier = Modifier
@@ -777,3 +791,11 @@ private fun CatalogFooter(total: Int, shown: Int, raOnly: Boolean = false) {
         )
     }
 }
+
+/** The Downloads tab's index. */
+internal const val DOWNLOADS_TAB = 3
+
+/** The host part of a server URL, for messages ("192.168.1.100"); the URL itself if it has none. */
+internal fun serverHostOf(serverUrl: String): String =
+    runCatching { java.net.URI(serverUrl.trim()).host }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: serverUrl.trim().ifEmpty { "the server" }

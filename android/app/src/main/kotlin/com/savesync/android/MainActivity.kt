@@ -60,6 +60,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.NavType
 import androidx.navigation.navArgument
 import com.savesync.android.ui.MainViewModel
+import com.savesync.android.ui.SaveDetailState
+import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.screens.DownloadsScreen
 import com.savesync.android.ui.screens.EmulatorsScreen
 import com.savesync.android.ui.screens.InstalledGamesScreen
@@ -681,11 +683,17 @@ private fun MainApp() {
         }
 
         if (showExitDialog) {
+            // A save sync dies with the app (downloads don't): say so.
+            val syncState by viewModel.syncState.collectAsState()
+            val detailState by viewModel.saveDetailState.collectAsState()
+            val syncRunning = syncState is SyncState.Syncing || detailState is SaveDetailState.Working
             GsConfirmDialog(
                 title = "Exit GameSync?",
-                message = "Running downloads keep going in the background.",
-                confirmLabel = "Exit",
+                message = if (syncRunning) "A save sync is still running and will stop if you exit."
+                    else "Running downloads keep going in the background.",
+                confirmLabel = if (syncRunning) "Exit anyway" else "Exit",
                 dismissLabel = "Stay",
+                destructive = syncRunning,
                 startConfirms = true,
                 onConfirm = {
                     showExitDialog = false

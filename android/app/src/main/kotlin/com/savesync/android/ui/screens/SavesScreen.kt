@@ -3,6 +3,12 @@ package com.savesync.android.ui.screens
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import com.savesync.android.ui.theme.GsShapes
+import com.savesync.android.ui.theme.LocalHighContrast
 import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.unit.IntOffset
@@ -160,6 +166,8 @@ fun SavesScreen(
     val rows by viewModel.saveRows.collectAsState()
     val saves = remember(rows) { rows.map { it.entry } }
     val checking by viewModel.savesChecking.collectAsState()
+    // The save a single-save action is working on: its row says "Syncing…".
+    val syncingTitleId by viewModel.syncingTitleId.collectAsState()
     // A save scan is running (pull-to-refresh, Settings → Rescan, startup).
     val scanning by viewModel.savesScanning.collectAsState()
     // Titles waiting on a conflict decision (banner, tab dot, filter).
@@ -338,7 +346,14 @@ fun SavesScreen(
      */
     fun smartSyncSelected() {
         val entry = saves.getOrNull(currentIndex()) ?: return
-        if (isSyncing || isSyncingOne) return
+        if (isSyncing || isSyncingOne) {
+            // Say why nothing happened, instead of ignoring the press.
+            notifier.show(
+                GsNotice(GsNoticeKind.Info, "Wait for the current sync to finish"),
+                hapticOverride = GsHaptic.Reject,
+            )
+            return
+        }
         if (entry.systemName == "SAT") {
             onNavigateToDetail(entry.titleId)
             return
@@ -635,6 +650,7 @@ fun SavesScreen(
                         syncStateEntities = syncStateEntities,
                         listState = listState,
                         selectedTitleId = { selectedTitleId },
+                        syncingTitleId = { syncingTitleId },
                         onSaveClick = onNavigateToDetail,
                         onSelectIndex = { select(it) },
                         modifier = Modifier.weight(1f)
@@ -794,6 +810,8 @@ private fun SavesList(
      * two rows that change.  Keyed by title id: the cursor follows the game.
      */
     selectedTitleId: () -> String?,
+    /** The save being synced, read lazily like the selection. */
+    syncingTitleId: () -> String?,
     onSaveClick: (String) -> Unit,
     onSelectIndex: (Int) -> Unit,
     modifier: Modifier = Modifier
@@ -814,10 +832,14 @@ private fun SavesList(
             val isSelected by remember(entry.titleId) {
                 derivedStateOf { selectedTitleId() == entry.titleId }
             }
+            val isSyncing by remember(entry.titleId) {
+                derivedStateOf { syncingTitleId() == entry.titleId }
+            }
             SaveCard(
                 entry = entry,
                 syncState = syncMap[entry.titleId],
                 syncStatus = row.status,
+                syncing = isSyncing,
                 isSelected = isSelected,
                 timeFormat = timeFormat,
                 onClick = {
@@ -842,6 +864,8 @@ private fun SaveCard(
     syncState: SyncStateEntity?,
     /** null = still checking. */
     syncStatus: SaveSyncStatus?,
+    /** A single-save action is running on this row. */
+    syncing: Boolean,
     isSelected: Boolean,
     timeFormat: SimpleDateFormat,
     onClick: () -> Unit,
@@ -886,8 +910,44 @@ private fun SaveCard(
                     )
                 }
             }
-            SyncStatusBadge(syncStatus)
+            // The pill turns into "Syncing…" while this row syncs and fades
+            // back to the result.
+            AnimatedContent(
+                targetState = syncing,
+                transitionSpec = { fadeIn(GsMotion.fade()) togetherWith fadeOut(GsMotion.fadeOut()) },
+                label = "rowPill",
+            ) { busy ->
+                if (busy) SyncingPill() else SyncStatusBadge(syncStatus)
+            }
         }
+    }
+}
+
+/** The row pill while its save syncs: a 12dp spinner and "Syncing…" in InfoText. */
+@Composable
+private fun SyncingPill() {
+    val high = LocalHighContrast.current
+    Row(
+        modifier = Modifier
+            .clip(GsShapes.Pill)
+            .background(if (high) GsColors.PanelHi else GsColors.Info.copy(alpha = 0.16f))
+            .then(if (high) Modifier.border(1.dp, GsColors.InfoText, GsShapes.Pill) else Modifier)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(12.dp),
+            strokeWidth = 1.5.dp,
+            color = GsColors.InfoText,
+        )
+        Text(
+            "Syncing…",
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            color = GsColors.InfoText,
+            maxLines = 1,
+        )
     }
 }
 

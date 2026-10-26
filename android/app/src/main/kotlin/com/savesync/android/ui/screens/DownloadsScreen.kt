@@ -25,7 +25,10 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Clear
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.LocalGsNotifier
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -157,8 +160,31 @@ fun DownloadsScreen(
     val holdNav = rememberHoldNavState()
     val inputTracker = LocalInputTracker.current
     val listFocusRequester = remember { FocusRequester() }
-    // Y asks before cancelling / removing the selected row.
+    // Y (and a row's touch Cancel) asks before cancelling / removing a row.
     var removeTarget by remember { mutableStateOf<DownloadEntity?>(null) }
+    val notifier = LocalGsNotifier.current
+
+    /**
+     * X / the header button: one press clears the finished rows, then a
+     * notice offers Undo.  Only list entries go, never a file, so the rows
+     * are simply put back; they live in that Undo action until the notice
+     * is gone.
+     */
+    fun clearFinished() {
+        scope.launch {
+            val removed = viewModel.clearFinishedDownloadsForUndo()
+            if (removed.isNotEmpty()) {
+                notifier.show(
+                    GsNotice(
+                        GsNoticeKind.Success,
+                        "Cleared ${removed.size} " + if (removed.size == 1) "download" else "downloads",
+                        actionLabel = "Undo",
+                        onAction = { viewModel.restoreDownloadRows(removed) },
+                    )
+                )
+            }
+        }
+    }
 
     LaunchedEffect(downloads.size) {
         selectedIndex = if (downloads.isEmpty()) 0
@@ -214,7 +240,7 @@ fun DownloadsScreen(
                 // Always present, so the header never shifts; disabled with
                 // nothing to clear (the component draws the disabled state).
                 TextButton(
-                    onClick = { viewModel.clearFinishedDownloads() },
+                    onClick = { clearFinished() },
                     enabled = finishedCount > 0,
                     colors = ButtonDefaults.textButtonColors(
                         contentColor = GsColors.Accent,
@@ -289,7 +315,7 @@ fun DownloadsScreen(
                         } else false
                     }
                     Key.ButtonX -> {
-                        if (finishedCount > 0) viewModel.clearFinishedDownloads()
+                        if (finishedCount > 0) clearFinished()
                         true
                     }
                     Key.ButtonY -> {
@@ -316,6 +342,7 @@ fun DownloadsScreen(
                     listState = listState,
                     selectedIndex = { selectedIndex },
                     onSelect = { selectedIndex = it },
+                    onRequestCancel = { removeTarget = it },
                     viewModel = viewModel,
                 )
             }
@@ -356,6 +383,8 @@ private fun DownloadsList(
     listState: LazyListState,
     selectedIndex: () -> Int,
     onSelect: (Int) -> Unit,
+    /** A row's touch Cancel: the same confirm as Y. */
+    onRequestCancel: (DownloadEntity) -> Unit,
     viewModel: MainViewModel,
 ) {
     val reduce = LocalReduceMotion.current
@@ -377,7 +406,7 @@ private fun DownloadsList(
                 onSelect = { onSelect(index) },
                 onPause = { viewModel.pauseDownload(download.id) },
                 onResume = { viewModel.resumeDownload(download.id) },
-                onCancel = { viewModel.cancelDownload(download.id) },
+                onCancel = { onRequestCancel(download) },
                 onRemove = { viewModel.removeDownload(download.id) },
                 onRetry = { viewModel.resumeDownload(download.id) },
             )
@@ -589,6 +618,8 @@ private fun StatusActions(
                     Icon(Icons.Filled.Cancel, contentDescription = "Cancel", tint = GsColors.Dim)
                 }
             }
+            // × removes the row only; the trash icon is kept for actions
+            // that delete files.
             DownloadEntity.Status.FAILED,
             DownloadEntity.Status.CANCELLED,
             -> {
@@ -596,72 +627,66 @@ private fun StatusActions(
                     Icon(Icons.Filled.Refresh, contentDescription = "Retry", tint = GsColors.Accent)
                 }
                 IconButton(onClick = onRemove) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = GsColors.Dim)
+                    Icon(Icons.Filled.Clear, contentDescription = "Remove from list", tint = GsColors.Dim)
                 }
             }
             DownloadEntity.Status.COMPLETED -> {
                 IconButton(onClick = onRemove) {
-                    Icon(Icons.Filled.Delete, contentDescription = "Remove from list", tint = GsColors.Dim)
+                    Icon(Icons.Filled.Clear, contentDescription = "Remove from list", tint = GsColors.Dim)
                 }
             }
         }
     }
 }
 
-private fun buildSubtitle(
+internal fun buildSubtitle(
     download: DownloadEntity,
     downloaded: Long,
     total: Long,
     bytesPerSecond: Long?,
 ): String {
+    // The status pill already says Downloading / Paused / Failed …: the
+    // subtitle carries the numbers only.
+    fun amount(): String = if (total > 0L) {
+        val pct = (downloaded.toDouble() / total.toDouble() * 100).toInt()
+        "${formatBytes(downloaded).ifEmpty { "0 B" }} of ${formatBytes(total)} · $pct%"
+    } else {
+        formatBytes(downloaded).ifEmpty { "0 B" }
+    }
     return when (download.status) {
-        DownloadEntity.Status.COMPLETED -> "Done · ${formatBytes(downloaded)}"
-        DownloadEntity.Status.PAUSED -> {
-            if (total > 0L) {
-                val pct = (downloaded.toDouble() / total.toDouble() * 100).toInt()
-                "Paused · ${formatBytes(downloaded)} / ${formatBytes(total)} ($pct%)"
-            } else {
-                "Paused · ${formatBytes(downloaded)}"
-            }
+        DownloadEntity.Status.COMPLETED -> {
+            val where = savedToLabel(download.finalFilePath)
+            val size = formatBytes(downloaded.takeIf { it > 0 } ?: total)
+            listOf("Saved to $where", size).filter { it.isNotBlank() }.joinToString(" · ")
         }
-        DownloadEntity.Status.FAILED -> "Failed · ${formatBytes(downloaded)} downloaded"
-        DownloadEntity.Status.CANCELLED -> "Cancelled"
-        DownloadEntity.Status.QUEUED -> "Queued"
+        DownloadEntity.Status.PAUSED -> amount()
+        DownloadEntity.Status.FAILED -> if (downloaded > 0L) amount() else "Nothing downloaded"
+        DownloadEntity.Status.CANCELLED -> "Partial file removed"
+        DownloadEntity.Status.QUEUED -> "Waiting to start"
         else -> {
-            // Active download.  Three sub-states:
-            //   1. Truly waiting for the server  →  "Connecting to server…"
-            //      Only when neither the total nor any downloaded bytes
-            //      are known yet. Server conversions (3DS / RVZ → ISO)
-            //      can take 10+ seconds before the first chunk arrives.
-            //   2. Bytes flowing but server didn't send Content-Length
-            //      (shouldn't happen with our nginx config, but some
-            //      proxies / chunked-encoding paths drop it)  →
-            //      show "Downloading · X MB" so the user can see motion.
-            //   3. Normal case with known total → percent + ETA.
+            // Active: waiting for the first byte (server conversions can
+            // take 10+ s), bytes without a known total, or percent + ETA.
             if (downloaded == 0L && total <= 0L) {
                 return "Connecting to server…"
             }
-            val parts = mutableListOf<String>()
-            if (total > 0L) {
-                val pct = (downloaded.toDouble() / total.toDouble() * 100).toInt()
-                parts += "${formatBytes(downloaded)} / ${formatBytes(total)} ($pct%)"
-            } else {
-                // total unknown but bytes are flowing — keep the user informed
-                parts += "Downloading · ${formatBytes(downloaded)}"
-            }
+            val parts = mutableListOf(amount())
             if (bytesPerSecond != null && bytesPerSecond > 0) {
                 parts += "${formatBytes(bytesPerSecond)}/s"
-                if (total > 0L && bytesPerSecond > 0L) {
+                if (total > 0L) {
                     val remaining = total - downloaded
-                    if (remaining > 0L) {
-                        val etaSec = remaining / bytesPerSecond
-                        parts += "ETA ${formatDuration(etaSec)}"
-                    }
+                    if (remaining > 0L) parts += "ETA ${formatDuration(remaining / bytesPerSecond)}"
                 }
             }
             parts.joinToString(" · ")
         }
     }
+}
+
+/** "ROMs/psx": the folder a finished download landed in, and its parent. */
+internal fun savedToLabel(finalFilePath: String): String {
+    val parent = java.io.File(finalFilePath).parentFile ?: return finalFilePath
+    val grand = parent.parentFile?.name?.takeIf { it.isNotEmpty() }
+    return if (grand != null) "$grand/${parent.name}" else parent.name
 }
 
 private fun formatDuration(seconds: Long): String {

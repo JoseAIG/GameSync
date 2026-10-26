@@ -121,7 +121,8 @@ enum class SaveSyncStatus(val label: String) {
 
 sealed class SaveDetailState {
     object Idle : SaveDetailState()
-    data class Working(val action: String) : SaveDetailState()
+    /** [titleId]: the save being worked on (its row shows "Syncing…"). */
+    data class Working(val action: String, val titleId: String? = null) : SaveDetailState()
     /**
      * [undoTitleId]: a download replaced this title's save and a local copy
      * was kept, so the notice offers Undo (see [MainViewModel.restoreLatestBackup]).
@@ -561,6 +562,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         scanSaves()
+        // A catalog that failed to load retries by itself once the server is
+        // back (the 30 s ping and the header dot's tap drive this), so a pad
+        // user never has to find a Retry button.
+        viewModelScope.launch {
+            var previous: Boolean? = _serverOnline.value
+            _serverOnline.collect { online ->
+                if (previous == false && online == true && _romCatalogError.value != null) {
+                    fetchRomCatalog()
+                }
+                previous = online
+            }
+        }
         viewModelScope.launch {
             settingsStore.settingsFlow
                 .map { it.saveDirOverrides }
@@ -2818,6 +2831,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * The title a single-save action (smart sync, force upload / download,
+     * restore) is working on, so its row shows "Syncing…"; null when idle.
+     * Derived from [saveDetailState], so every way an action ends clears it.
+     */
+    val syncingTitleId: StateFlow<String?> = _saveDetailState
+        .map { (it as? SaveDetailState.Working)?.titleId }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     fun syncSave(entry: SaveEntry) {
         viewModelScope.launch {
             val currentSettings = settingsStore.settingsFlow.first()
@@ -2831,7 +2854,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("sync")
+            _saveDetailState.value = SaveDetailState.Working("sync", entry.titleId)
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
@@ -2925,7 +2948,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _saveDetailState.value = SaveDetailState.Error("Server URL not configured")
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("upload")
+            _saveDetailState.value = SaveDetailState.Working("upload", entry.titleId)
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
@@ -2966,7 +2989,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("download")
+            _saveDetailState.value = SaveDetailState.Working("download", entry.titleId)
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
@@ -3034,7 +3057,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _saveDetailState.value = SaveDetailState.Error("This save isn't listed any more — rescan, then try again")
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("restore")
+            _saveDetailState.value = SaveDetailState.Working("restore", titleId)
             try {
                 val restored = withContext(Dispatchers.IO) {
                     val store = LocalBackups.store
@@ -3167,6 +3190,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearFinishedDownloads() {
         downloadManager.clearFinishedAsync()
+    }
+
+    /**
+     * Clears finished downloads and returns the removed rows, so the notice
+     * can offer Undo.  The rows live only in that Undo action; nothing on
+     * disk is deleted.
+     */
+    suspend fun clearFinishedDownloadsForUndo(): List<DownloadEntity> =
+        downloadManager.clearFinishedReturningAsync().await()
+
+    fun restoreDownloadRows(rows: List<DownloadEntity>) {
+        downloadManager.restoreRowsAsync(rows)
+    }
+
+    /** Where a catalog download for [system] will land, and the space free there. */
+    data class RomDestination(val dir: File, val freeBytes: Long?)
+
+    /** Resolves [system]'s ROM folder the way the download will (off the main thread). */
+    suspend fun romDestination(system: String): RomDestination? = withContext(Dispatchers.IO) {
+        val current = settingsStore.settingsFlow.first()
+        val scanDir = effectiveRomScanDir(current)
+        if (scanDir.isBlank()) return@withContext null
+        val dir = InstalledRomsScanner.resolveRomTargetDir(File(scanDir), system, current.romDirOverrides)
+        // The folder may not exist yet: measure the nearest one that does.
+        var probe: File? = dir
+        while (probe != null && !probe.isDirectory) probe = probe.parentFile
+        val free = probe?.let { runCatching { android.os.StatFs(it.absolutePath).availableBytes }.getOrNull() }
+        RomDestination(dir, free)
     }
 
     /**

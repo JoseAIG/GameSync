@@ -194,6 +194,22 @@ class DownloadManager(
 
     fun clearFinishedAsync(): Job = appScope.launch { clearFinished() }
 
+    /**
+     * "Clear finished" with Undo: removes the finished rows and returns them.
+     * Only list entries go — no file on disk is touched — so [restoreRowsAsync]
+     * can put them back as they were.
+     */
+    fun clearFinishedReturningAsync(): Deferred<List<DownloadEntity>> = appScope.async {
+        val finished = dao.getFinished()
+        dao.deleteFinished()
+        finished
+    }
+
+    /** Undo of [clearFinishedReturningAsync]: re-inserts the rows unchanged. */
+    fun restoreRowsAsync(rows: List<DownloadEntity>): Job = appScope.launch {
+        rows.forEach { dao.upsert(it) }
+    }
+
     // ──────────────────────────────────────────────────────────────────
     // Suspending API (kept for tests + advanced callers)
     // ──────────────────────────────────────────────────────────────────

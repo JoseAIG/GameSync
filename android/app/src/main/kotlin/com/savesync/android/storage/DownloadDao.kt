@@ -24,6 +24,10 @@ interface DownloadDao {
     @Query("DELETE FROM downloads WHERE id = :id")
     suspend fun deleteById(id: String)
 
+    /** The rows "Clear finished" removes (kept so Undo can put them back). */
+    @Query("SELECT * FROM downloads WHERE status IN ('completed', 'failed', 'cancelled')")
+    suspend fun getFinished(): List<DownloadEntity>
+
     /** Used by the "Clear finished" button on the Downloads tab. */
     @Query("DELETE FROM downloads WHERE status IN ('completed', 'failed', 'cancelled')")
     suspend fun deleteFinished()

@@ -103,6 +103,7 @@ fun GsChromeHeader(
     onTabClick: (Int) -> Unit,
     onBack: () -> Unit,
     badges: Map<Int, GsTabBadge> = emptyMap(),
+    onServerDotClick: (() -> Unit)? = null,
 ) {
     val chrome = LocalGsChrome.current
     // One strip scroll position for the session, whichever header shows.
@@ -123,6 +124,7 @@ fun GsChromeHeader(
                 onTabClick = onTabClick,
                 badges = badges,
                 stripScrollState = stripScroll,
+                onServerDotClick = onServerDotClick,
                 actions = {
                     Crossfade(targetState = tabKey, animationSpec = GsMotion.fade(), label = "chromeActions") { k ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -137,6 +139,7 @@ fun GsChromeHeader(
                 title = spec?.title ?: "",
                 onBack = spec?.onBack ?: onBack,
                 actions = spec?.actions ?: NoActions,
+                onServerDotClick = onServerDotClick,
             )
         }
     }

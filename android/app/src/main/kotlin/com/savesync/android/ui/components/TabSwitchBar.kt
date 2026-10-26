@@ -101,6 +101,8 @@ fun GsTopBar(
     badges: Map<Int, GsTabBadge> = emptyMap(),
     /** The strip's scroll position; MainApp's header keeps one for the session. */
     stripScrollState: ScrollState = rememberScrollState(),
+    /** Tapping the status dot re-checks the server (MainApp shows the answer). */
+    onServerDotClick: (() -> Unit)? = null,
 ) {
     val online = LocalServerOnline.current
     Column(
@@ -128,7 +130,7 @@ fun GsTopBar(
                     )
                     Spacer(Modifier.weight(1f))
                     actions()
-                    ServerDot(online)
+                    ServerDot(online, onServerDotClick)
                 }
             } else {
                 Column(modifier = Modifier.fillMaxWidth()) {
@@ -142,7 +144,7 @@ fun GsTopBar(
                         AppName()
                         Spacer(Modifier.weight(1f))
                         actions()
-                        ServerDot(online)
+                        ServerDot(online, onServerDotClick)
                     }
                     // No bottom padding: each pill's 48dp hit area already
                     // leaves room under the visual pill.
@@ -180,6 +182,7 @@ fun GsSubScreenBar(
     badges: Map<Int, GsTabBadge> = emptyMap(),
     /** The strip's scroll position; MainApp's header keeps one for the session. */
     stripScrollState: ScrollState = rememberScrollState(),
+    onServerDotClick: (() -> Unit)? = null,
 ) {
     val online = LocalServerOnline.current
     Column(modifier = modifier.fillMaxWidth().background(GsColors.Bg2)) {
@@ -222,7 +225,7 @@ fun GsSubScreenBar(
                 modifier = Modifier.weight(1f),
             )
             actions()
-            ServerDot(online)
+            ServerDot(online, onServerDotClick)
         }
         Box(
             Modifier
@@ -245,20 +248,58 @@ private fun AppName() {
     )
 }
 
+/**
+ * Whether a server URL is set, provided by MainApp next to
+ * [LocalServerOnline], so the status dot can say "No server configured"
+ * rather than "unknown".
+ */
+val LocalServerConfigured = compositionLocalOf { true }
+
+/** The notice after a tap on the status dot: "<host> — online" / "offline". */
+fun serverCheckMessage(serverUrl: String, online: Boolean?): String {
+    if (online == null || serverUrl.isBlank()) return "No server set — open Settings to connect"
+    val host = runCatching { java.net.URI(serverUrl.trim()).host }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: serverUrl.trim()
+    return "$host — " + if (online) "online" else "offline"
+}
+
+/** What TalkBack reads for the server status dot. */
+fun serverDotDescription(online: Boolean?, configured: Boolean): String = when {
+    !configured -> "No server configured"
+    online == true -> "Server online"
+    online == false -> "Server offline"
+    else -> "Server status unknown"
+}
+
+/**
+ * The 10dp server status dot inside a 48dp touch target.  A tap re-checks
+ * the server ([onClick]); the visual stays the same size.
+ */
 @Composable
-private fun ServerDot(online: Boolean?) {
+private fun ServerDot(online: Boolean?, onClick: (() -> Unit)?) {
     val color = when (online) {
         true -> GsColors.Ok
         false -> GsColors.Err
         null -> GsColors.Muted
     }
+    val description = serverDotDescription(online, LocalServerConfigured.current)
     Box(
         modifier = Modifier
-            .padding(start = 8.dp, end = 8.dp)
-            .size(10.dp)
-            .clip(CircleShape)
-            .background(color)
-    )
+            .size(48.dp)
+            .then(
+                if (onClick != null) Modifier.clickable(role = Role.Button, onClickLabel = "Check server", onClick = onClick)
+                else Modifier
+            )
+            .clearAndSetSemantics { contentDescription = description },
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(10.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+    }
 }
 
 /** A badge after a tab's label: Downloads' active count, Saves' conflict dot. */

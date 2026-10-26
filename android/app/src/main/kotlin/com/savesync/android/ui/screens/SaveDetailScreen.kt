@@ -96,6 +96,8 @@ import com.savesync.android.ui.SaturnArchivePickerState
 import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.SaveSyncStatus
 import com.savesync.android.ui.ServerMetaState
+import com.savesync.android.ui.components.BannerState
+import com.savesync.android.ui.components.LocalServerOnline
 import com.savesync.android.ui.ServerSide
 import com.savesync.android.ui.detailSyncStatus
 import androidx.compose.runtime.produceState
@@ -120,6 +122,7 @@ fun SaveDetailScreen(
     val allRows by viewModel.allRows.collectAsState()
     val detailState by viewModel.saveDetailState.collectAsState()
     val serverMeta by viewModel.serverMeta.collectAsState()
+    val settings by viewModel.settings.collectAsState()
     // App-wide notices: a message survives this screen leaving, so a result
     // that navigates back does so at once instead of after the snackbar.
     val notifier = LocalGsNotifier.current
@@ -545,6 +548,14 @@ fun SaveDetailScreen(
             },
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        // Server conditions that change what the statuses below mean.
+        StatusBanners(
+            state = BannerState(
+                serverUrlBlank = settings.serverUrl.isBlank(),
+                serverOnline = LocalServerOnline.current,
+            ),
+            onOpenSettings = { onNavigateToTab(SETTINGS_TAB) },
+        )
         // System badge + sync status badge + picker for RETRO
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SystemChip(entry.systemName)

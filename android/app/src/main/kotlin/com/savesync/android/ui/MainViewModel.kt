@@ -567,21 +567,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** One GET /status for the header dot. */
     fun pingServer() {
-        viewModelScope.launch {
-            val current = settingsStore.settingsFlow.first()
-            if (current.serverUrl.isBlank()) {
-                _serverOnline.value = null
-                return@launch
-            }
-            _serverOnline.value = try {
-                ApiClient.create(current.serverUrl, current.apiKey).getStatus()
-                true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                false
-            }
+        viewModelScope.launch { pingServerNow() }
+    }
+
+    /**
+     * GET /status now and return the answer: true = online, false = not,
+     * null = no server configured.  Updates the header dot too.
+     */
+    suspend fun pingServerNow(): Boolean? {
+        val current = settingsStore.settingsFlow.first()
+        if (current.serverUrl.isBlank()) {
+            _serverOnline.value = null
+            return null
         }
+        val online = try {
+            ApiClient.create(current.serverUrl, current.apiKey).getStatus()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
+        _serverOnline.value = online
+        return online
     }
 
     fun setFilter(system: String) {

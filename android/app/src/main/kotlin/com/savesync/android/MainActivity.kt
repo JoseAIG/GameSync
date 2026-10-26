@@ -67,6 +67,10 @@ import com.savesync.android.ui.screens.SavesScreen
 import com.savesync.android.ui.screens.SettingsScreen
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.LocalServerOnline
+import com.savesync.android.ui.components.LocalServerConfigured
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.serverCheckMessage
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.theme.SaveSyncTheme
 import com.savesync.android.ui.NAV_TAB_ROUTES
@@ -525,6 +529,18 @@ private fun MainApp() {
     val notifier = remember(snackbarHostState, haptics) {
         GsNotifier(snackbarHostState, appScope, haptics)
     }
+    val settings by viewModel.settings.collectAsState()
+    val serverConfigured = settings.serverUrl.isNotBlank()
+    // Tapping the header's status dot re-checks the server and says what it found.
+    val onServerDotClick: () -> Unit = remember(viewModel, notifier, appScope) {
+        {
+            appScope.launch {
+                val online = viewModel.pingServerNow()
+                val url = viewModel.settings.value.serverUrl
+                notifier.show(GsNotice(GsNoticeKind.Info, serverCheckMessage(url, online)))
+            }
+        }
+    }
     // The one header and footer (GsChrome.kt): screens publish what they
     // want in them, keyed by destination.
     val chrome = remember { GsChromeState() }
@@ -532,6 +548,7 @@ private fun MainApp() {
 
     CompositionLocalProvider(
         LocalServerOnline provides serverOnline,
+        LocalServerConfigured provides serverConfigured,
         LocalShowButtonHints provides showHints,
         LocalInputMode provides inputMode,
         LocalInputTracker provides inputTracker,
@@ -559,6 +576,7 @@ private fun MainApp() {
                     onTabClick = onNavigateToTab,
                     onBack = { navController.popBackStack() },
                     badges = badges,
+                    onServerDotClick = onServerDotClick,
                 )
             },
             bottomBar = { GsChromeFooter(chromeKey) },

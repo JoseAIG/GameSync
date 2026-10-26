@@ -104,6 +104,9 @@ import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsActionSlot
 import com.savesync.android.ui.components.BannerState
+import com.savesync.android.ui.components.GsDialog
+import com.savesync.android.ui.components.GsDialogChoice
+import com.savesync.android.ui.components.LocalServerOnline
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsSubTabRow
@@ -189,6 +192,8 @@ fun SavesScreen(
     // The saves the open Sync-all dialog will sync, captured when it opened:
     // its label and its action read this one list.
     var syncAllConfirm by remember { mutableStateOf<List<SaveEntry>?>(null) }
+    // "Connect a server first", for Sync all without a server.
+    var showConnectServer by remember { mutableStateOf(false) }
 
     // ── Manual D-pad selection state ─────────────────────────────────────
     // We track the selected index ourselves and scroll the list manually so
@@ -347,8 +352,15 @@ fun SavesScreen(
     // The header button's lambda is remembered; it reads the current list.
     val currentSaves by rememberUpdatedState(saves)
     val currentlySyncing by rememberUpdatedState(isSyncing)
+    val currentServerUrl by rememberUpdatedState(settings.serverUrl)
     fun requestSyncAll() {
         if (currentlySyncing) return
+        // No server: the same dialog for X and the header button, which
+        // stays enabled so touch and pad behave the same.
+        if (currentServerUrl.isBlank()) {
+            showConnectServer = true
+            return
+        }
         val targets = syncAllTargets(currentSaves)
         if (targets.isEmpty()) {
             notifier.show(GsNotice(GsNoticeKind.Info, "Nothing to sync in this view"))
@@ -441,9 +453,12 @@ fun SavesScreen(
         // Ongoing conditions, within the banner budget.
         StatusBanners(
             state = BannerState(
+                serverUrlBlank = settings.serverUrl.isBlank(),
+                serverOnline = LocalServerOnline.current,
                 conflictCount = conflictIds.size,
                 missingFolderCount = overrideWarnings.size,
             ),
+            onOpenSettings = { onNavigateToTab(SETTINGS_TAB) },
             folderText = missingFolderBannerText(overrideWarnings.keys.toList()),
             onReviewConflicts = { reviewConflicts() },
             // Touch only; a pad reaches it through Settings → Emulator configuration.
@@ -628,6 +643,27 @@ fun SavesScreen(
     }
 
     // ── Sync confirmation dialog ─────────────────────────────────────────
+    if (showConnectServer) {
+        GsDialog(
+            title = "Connect a server first",
+            message = "Sync all needs a GameSync server. Add its address in Settings.",
+            onDismiss = { showConnectServer = false },
+            choices = listOf(
+                GsDialogChoice(GsButton.B, "Cancel", { showConnectServer = false }),
+                GsDialogChoice(
+                    GsButton.A,
+                    "Open Settings",
+                    {
+                        showConnectServer = false
+                        onNavigateToTab(SETTINGS_TAB)
+                    },
+                    color = GsColors.Accent,
+                    textColor = GsColors.Ink,
+                ),
+            ),
+        )
+    }
+
     syncAllConfirm?.let { targets ->
         val copy = syncAllCopy(
             count = targets.size,

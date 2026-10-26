@@ -46,4 +46,19 @@ class TabSwitchBarTest {
         assertEquals(300, stripScrollTarget(560f, 600f, scroll = 0, viewport = 300, margin = 24f, max = 300))
         assertNull(stripScrollTarget(560f, 600f, scroll = 0, viewport = 0, margin = 24f, max = 300))
     }
+
+    @Test
+    fun `server dot reads its state`() {
+        assertEquals("Server online", serverDotDescription(true, configured = true))
+        assertEquals("Server offline", serverDotDescription(false, configured = true))
+        assertEquals("No server configured", serverDotDescription(null, configured = false))
+        assertEquals("Server status unknown", serverDotDescription(null, configured = true))
+    }
+
+    @Test
+    fun `server check names the host`() {
+        assertEquals("192.168.1.100 — online", serverCheckMessage("http://192.168.1.100:8000", true))
+        assertEquals("192.168.1.100 — offline", serverCheckMessage("http://192.168.1.100:8000/", false))
+        assertEquals("No server set — open Settings to connect", serverCheckMessage("", null))
+    }
 }

@@ -51,6 +51,12 @@ CFLAGS	:=	-g -Wall -O2 -mword-relocations \
 
 CFLAGS	+=	$(INCLUDE) -D__3DS__ -DAPP_VERSION=\"$(APP_VERSION_STR)\"
 
+# Development aid: `make GUI_PERF=1` (after a `make clean`) draws the last
+# frame's citro3d processing + drawing time on the top screen. Off by default.
+ifneq ($(strip $(GUI_PERF)),)
+CFLAGS	+=	-DGUI_PERF
+endif
+
 CXXFLAGS	:= $(CFLAGS) -fno-rtti -fno-exceptions -std=gnu++11
 
 ASFLAGS	:=	-g $(ARCH)

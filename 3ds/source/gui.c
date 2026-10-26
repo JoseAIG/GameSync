@@ -89,7 +89,24 @@ void gui_screen(int screen) {
     gui_vgrad(0, 0, screen_w, GUI_H, gui_rgb(0x131D29), gui_rgb(HEX_BG));
 }
 
+#ifdef GUI_PERF
+// Top-right corner of the top screen: the previous frame's citro3d time
+// (command building + GPU drawing), red past the 12 ms budget
+static void perf_overlay(void) {
+    float ms = C3D_GetProcessingTime() + C3D_GetDrawingTime();
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.1f ms", ms);
+    C2D_SceneBegin(target_top);
+    float w = gui_text_w(GUI_S_SMALL, buf) + 8;
+    gui_rect(GUI_TOP_W - w - 2, 2, w, 14, gui_rgba(0x000000, 0xC0));
+    gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(ms > 12.0f ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
+}
+#endif
+
 void gui_end(void) {
+#ifdef GUI_PERF
+    perf_overlay();
+#endif
     C3D_FrameEnd(0);
 }
 

@@ -66,6 +66,7 @@ import com.savesync.android.installed.InstalledRomsScanner
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.components.GsButton
+import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsDialog
@@ -444,6 +445,7 @@ fun InstalledGamesScreen(
                                 selectedIndex = index
                                 confirmTarget = rom
                             },
+                            modifier = Modifier.gsEdgeBump(follower),
                         )
                     }
                 }
@@ -550,10 +552,12 @@ private fun InstalledList(
     listState: LazyListState,
     selectedIndex: () -> Int,
     onRowClick: (Int, InstalledRom) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val reduce = LocalReduceMotion.current
     LazyColumn(
         state = listState,
+        modifier = modifier,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {

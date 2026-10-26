@@ -73,6 +73,7 @@ import com.savesync.android.catalog.RomCatalogFilter
 import com.savesync.android.findComponentActivity
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsButton
@@ -609,6 +610,7 @@ fun RomCatalogScreen(
                                 selectedIndex = index
                                 confirmTarget = rom
                             },
+                            modifier = Modifier.gsEdgeBump(follower),
                         )
                     }
                 }
@@ -710,9 +712,11 @@ private fun CatalogList(
     listState: LazyListState,
     selectedIndex: () -> Int,
     onRowClick: (Int, RomEntry) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     LazyColumn(
         state = listState,
+        modifier = modifier,
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {

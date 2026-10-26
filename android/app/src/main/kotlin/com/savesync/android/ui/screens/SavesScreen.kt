@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import com.savesync.android.ui.components.PullThresholdHaptic
+import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.GsDialogHost
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -673,7 +674,9 @@ fun SavesScreen(
                         syncingTitleId = { syncingTitleId },
                         onSaveClick = onNavigateToDetail,
                         onSelectIndex = { select(it) },
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .gsEdgeBump(follower)
                     )
                 }
             }

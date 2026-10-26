@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Clear
 import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsNoticeKind
 import com.savesync.android.ui.components.LocalGsNotifier
@@ -348,6 +349,7 @@ fun DownloadsScreen(
                     onSelect = { selectedIndex = it },
                     onRequestCancel = { removeTarget = it },
                     viewModel = viewModel,
+                    modifier = Modifier.gsEdgeBump(follower),
                 )
             }
         }
@@ -390,11 +392,12 @@ private fun DownloadsList(
     /** A row's touch Cancel: the same confirm as Y. */
     onRequestCancel: (DownloadEntity) -> Unit,
     viewModel: MainViewModel,
+    modifier: Modifier = Modifier,
 ) {
     val reduce = LocalReduceMotion.current
     LazyColumn(
         state = listState,
-        modifier = Modifier.fillMaxSize(),
+        modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {

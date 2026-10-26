@@ -48,28 +48,39 @@ the top-right corner of the top screen; the normal build has no overlay.
 Copy `3dssync.3dsx` to `sdmc:/3ds/3dssync/3dssync.3dsx` on the 3DS SD card.
 
 ### Home menu app (.cia)
-Install `3dssync.cia` using FBI, or update in-app from *Settings > Check for updates* (see `update_check` below).
+Install `3dssync.cia` using FBI, or update in-app from *Settings > Check for updates now* (see `update_check` below).
 
 ## Configuration
 
-On first launch a default config is created at:
+The settings live in:
 
 ```
 sdmc:/3ds/3dssync/config.txt
 ```
 
-Edit it with the details of your GameSync server:
+with at least the details of your GameSync server:
 
 ```ini
 server_url=http://192.168.1.100:8000
 api_key=your-secret-key
 ```
 
-The in-app **Settings** tab can also edit these values directly on the console using the system keyboard (or a D-pad editor if the keyboard applet can't start).
+**First run:** if the file is missing (or has no server address or API key),
+the app says so and offers **A** *Set up now* (START exits). It asks for the
+server address and then the API key with the system keyboard, writes
+`config.txt` (creating `sdmc:/3ds/3dssync/` if needed), checks that the server
+answers and accepts the key, and starts. If the check fails you can go back
+and edit (**B**) or continue anyway (**A**); the values are saved either way.
+B in the address field goes back to the first message.
+
+The in-app **Settings** tab edits these values directly on the console (system
+keyboard, or a D-pad editor if the keyboard applet can't start).
 
 ### Optional settings
 
-These keys are edited in `config.txt` on the SD card.
+These keys can be edited in `config.txt`; all but `utc_offset_minutes` are
+also rows in the Settings tab. Saving from Settings keeps every key, including
+the ones it doesn't show.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -78,7 +89,7 @@ These keys are edited in `config.txt` on the SD card.
 | `local_backups` | `3` | Before a download or history restore overwrites a save, the current save is copied to `sdmc:/3ds/3dssync/backups/<TITLEID>/<YYYYMMDD-HHMMSS>/`. This many copies are kept per title (oldest deleted first); `0` disables the copies. |
 | `tls_verify` | `1` | For `https://` server URLs, verify the server certificate. `0` accepts any certificate (the behaviour of older versions; use it for a self-signed server). Has no effect on `http://`. |
 | `reduce_motion` | `0` | `1` turns off sliding and springing: the list highlight and scrolling jump instead of gliding, and nothing nudges or bounces. The fade when a list wraps around and the progress bar's glide stay. |
-| `update_check` | `1` | Allow *Settings > Check for updates*. The server looks up the latest GitHub release; the client downloads the CIA through the server and installs it. The download must match the size the server reports, and its SHA-256 when the server publishes one (`sha256`, or GitHub's `digest` field). `0` disables update checks and installs. |
+| `update_check` | `1` | Allow *Settings > Check for updates now* (the Settings switch *Allow update checks*). The server looks up the latest GitHub release; the client downloads the CIA through the server and installs it. The download must match the size the server reports, and its SHA-256 when the server publishes one (`sha256`, or GitHub's `digest` field). `0` disables update checks and installs. |
 
 ### HTTPS
 
@@ -255,15 +266,54 @@ installing a CIA.
 
 ### Settings
 
-The action bar's A button names what A does on the highlighted entry (*Edit*
-or *Run*); tapping the highlighted entry does the same.
+The entries are grouped (Server, Saves & ROMs, App, Maintenance; a line
+separates the groups) and the list scrolls; **Left** / **Right** jump to the
+first / last entry. The action bar's A button names what A does on the
+highlighted entry (*Edit*, *Choose*, *Turn on* / *Turn off* or *Run*); tapping
+the highlighted entry does the same. The top screen shows the current values
+and help for the highlighted entry ("Group · Entry").
 
 | Entry | What A does |
 |---|---|
-| Server URL, Alternate URL, API key, NDS ROM folder | Edit (system keyboard); saved to `config.txt` right away. A URL must start with `http://` or `https://` (the keyboard says so and stays open); an empty Alternate URL turns it off. The API key is typed hidden |
+| Server URL, Alternate URL | Edit (system keyboard); saved to `config.txt` right away, then the server is asked whether it answers: the entry shows *Answered · v…* or *No answer (saved anyway)* for the rest of the session (never saved). A URL must start with `http://` or `https://` (the keyboard says so and stays open); an empty Alternate URL turns it off |
+| API key | Edit, typed hidden; saved, then checked with the cheapest request that needs the key: *Key accepted*, *Key rejected (401)* or *No answer (saved anyway)* |
+| Verify TLS | Switch (`tls_verify`). Turning it off asks first (anyone on the network could read your API key and saves); turning it on doesn't |
+| NDS ROM folder | Opens the folder picker (below) |
+| Local backups | Pick Off, 1, 3, 5 or 10 copies (`local_backups`); the list opens on the current value, and a value set in `config.txt` that isn't in the list (e.g. 7) is shown as "7 copies (current)" so closing the list never changes it |
+| Allow update checks | Switch (`update_check`). Off: *Check for updates now* only explains that update checks are off |
+| Reduce motion | Switch (`reduce_motion`), applies at once |
 | Rescan titles | Look for installed titles and DS saves again |
 | Refresh catalog | Ask the server to rescan its ROM folder, throw the cached catalog away and download it again |
-| Check for updates | Download and install the latest GameSync CIA |
+| Check for updates now | Download and install the latest GameSync CIA |
+
+Switches flip and save with A (or a tap on the highlighted entry) without a
+dialog, except turning Verify TLS off.
+
+#### Folder picker (NDS ROM folder)
+
+Browse the SD card's folders, FBI-style; only folders are listed, sorted by
+name (names starting with `.` are hidden; a folder with more than 512
+subfolders shows the first 512 and says so). It opens at the current NDS ROM
+folder, or the nearest folder above it that exists, or `sdmc:/`.
+
+| Button | Action |
+|---|---|
+| Up / Down, Left / Right | Move, page |
+| A | Open the highlighted folder (also a tap on the highlighted row) |
+| B | Up one level, from any folder (also above the one it opened at); at `sdmc:/` B cancels |
+| X / START | Use the folder shown |
+| Y | Type a path: an existing folder is opened (X still confirms it), a missing one can be used anyway; an empty path turns the NDS ROM folder off |
+| Touch | The header's back arrow and path go up; its *Cancel* chip leaves without changing anything; the action bar has **X** *Use this folder*, **A** *Open* and **Y** *Type…* |
+
+The top screen says what the folder shown holds, counted by the same rules as
+the DS scan (`.nds` files at the top of the folder, a `.sav` with the same name
+beside each or in `saves/`): e.g. "12 .nds ROMs · 10 saves (4 in saves/)", or
+"No .nds ROMs in this folder". Below it, once the highlight rests on a folder,
+what that folder holds. Counting reads a few entries per frame, so a big
+folder never freezes the screen. Using a folder with no ROMs first looks one
+level down and offers to open the subfolder with the most ROMs (**A**), use the
+empty folder anyway (**X**) or go back (**B**). The chosen folder is saved at
+once and the Settings help panel shows what it holds ("12 ROMs, 10 saves").
 
 If the system keyboard can't start, a D-pad editor takes its place (for every
 text field, including the searches): Left / Right move the cursor, Up / Down

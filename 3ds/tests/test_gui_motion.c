@@ -146,8 +146,22 @@ static void test_effects(void) {
     CHECK(NEAR(gui_check_scale(t1), 1.0f - 0.8f / 2.7182818f, 1e-4f));
 }
 
+// Nested fades toward the background compose (a toast inside a fading
+// transition stays faded), and an inner 0 changes nothing
+static void test_fade_compose(void) {
+    CHECK(gui_fade_compose(0, 0) == 0);
+    CHECK(gui_fade_compose(0.6f, 0) == 0.6f);
+    CHECK(gui_fade_compose(0, 0.4f) == 0.4f);
+    CHECK(NEAR(gui_fade_compose(0.6f, 0.4f), 0.76f, 1e-5f));
+    CHECK(gui_fade_compose(0.6f, 0.4f) >= 0.6f);
+    CHECK(gui_fade_compose(1, 0.3f) == 1);
+    CHECK(gui_fade_compose(2, -1) == 1);
+    CHECK(gui_fade_compose(-1, 0.5f) == 0.5f);
+}
+
 int main(void) {
     test_effects();
+    test_fade_compose();
     test_critically_damped();
     test_exact_in_dt();
     test_retarget_keeps_velocity();

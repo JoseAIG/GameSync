@@ -71,6 +71,15 @@ float gui_rubberband(float overshoot, float dimension, float constant) {
     return (overshoot * dimension * constant) / (dimension + constant * fabsf(overshoot));
 }
 
+float gui_fade_compose(float outer, float inner) {
+    if (!(outer > 0)) outer = 0;
+    if (!(inner > 0)) inner = 0;
+    if (outer >= 1 || inner >= 1) return 1;
+    // = 1 - (1 - outer)(1 - inner), but exact when either is 0
+    float f = outer + inner - outer * inner;
+    return f > 1 ? 1 : f;
+}
+
 float gui_effect_t(unsigned long long since_ms, unsigned long long now_ms, unsigned duration_ms) {
     if (!since_ms || duration_ms == 0) return 1.0f;
     if (now_ms < since_ms) return 0.0f;

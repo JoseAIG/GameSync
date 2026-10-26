@@ -65,9 +65,16 @@ u64 gui_clock_ms(void) {
     return (svcGetSystemTick() - tick0) / (SYSCLOCK_ARM11 / 1000);
 }
 
+// The fade on now (toward HEX_BG), see gui_fade_push()
+static float fade_now;
+static float transition_fade_prev;
+
 void gui_begin(bool vsync) {
     C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : 0);
     C2D_TextBufClear(text_buf);
+    fade_now = 0;
+    transition_fade_prev = 0;
+    C2D_Fade(0);
     ticks++;
     // Sampled after the vsync wait, so dt is the real frame-to-frame time
     u64 now = svcGetSystemTick();
@@ -127,6 +134,25 @@ void gui_transition_start(GuiTransition *t, float from_px) {
     gui_spring_set(&t->off, gui_reduce_motion() ? 0 : from_px);
 }
 
+static void fade_apply(float f) {
+    C2D_Fade(f > 0 ? gui_rgba(HEX_BG, (u8)(f * 255)) : 0);
+}
+
+float gui_fade_push(float amount) {
+    float prev = fade_now;
+    if (amount > 0) {
+        fade_now = gui_fade_compose(prev, amount);
+        fade_apply(fade_now);
+    }
+    return prev;
+}
+
+void gui_fade_pop(float previous) {
+    if (previous == fade_now) return;
+    fade_now = previous;
+    fade_apply(previous);
+}
+
 void gui_transition_begin(GuiTransition *t) {
     float fade;
     if (gui_reduce_motion()) {
@@ -144,12 +170,13 @@ void gui_transition_begin(GuiTransition *t) {
     }
     if (t->off.x != 0) C2D_ViewTranslate(t->off.x, 0);
     // citro2d has no global alpha: tint toward the background instead
-    if (fade > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(fade * 255)));
+    transition_fade_prev = gui_fade_push(fade);
 }
 
 void gui_transition_end(void) {
     C2D_ViewReset();
-    C2D_Fade(0);
+    gui_fade_pop(transition_fade_prev);
+    transition_fade_prev = 0;
 }
 
 // ---------------------------------------------------------------------------

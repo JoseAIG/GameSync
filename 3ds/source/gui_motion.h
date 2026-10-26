@@ -64,6 +64,10 @@ float gui_rubberband(float overshoot, float dimension, float constant);
 // or in the future)
 float gui_effect_t(unsigned long long since_ms, unsigned long long now_ms, unsigned duration_ms);
 
+// Two fades toward the same colour, `outer` (already applied) then `inner`
+// (0 = none, 1 = all the way), as one: 1 - (1 - outer)(1 - inner), in [0, 1]
+float gui_fade_compose(float outer, float inner);
+
 // Scale of a mark's check popping in, `t` seconds after the toggle: the
 // analytic critically damped spring from 0.6 to 1 with response 0.15 s,
 // s(t) = 1 - 0.4 (1 + wt) e^(-wt), w = 2 pi / 0.15

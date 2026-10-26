@@ -135,6 +135,14 @@ void gui_transition_start(GuiTransition *t, float from_px);
 void gui_transition_begin(GuiTransition *t);
 void gui_transition_end(void);
 
+// Fade what is drawn next toward the background by `amount` (0..1) on top
+// of any fade already on (a transition, a faded card), so nested fades
+// compose instead of the inner one clearing the outer. Returns the fade
+// that was on: hand it to gui_fade_pop() when done. Every frame starts
+// unfaded.
+float gui_fade_push(float amount);
+void gui_fade_pop(float previous);
+
 // ---------------------------------------------------------------------------
 // Shapes
 // ---------------------------------------------------------------------------

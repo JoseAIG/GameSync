@@ -656,7 +656,7 @@ void ui_list_draw(UiListAnim *a, const UiListGeom *g, int count, int selected, i
 
     // After a wrap the rows fade in from 30% (toward the background)
     float wrap = edge_fade(a->wrap_ms);
-    if (wrap > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(0.7f * wrap * 255)));
+    float fade_prev = gui_fade_push(0.7f * wrap);
 
     bool bar = count > g->rows;
     float rw = bar ? g->w - 7 : g->w;
@@ -679,7 +679,7 @@ void ui_list_draw(UiListAnim *a, const UiListGeom *g, int count, int selected, i
         if (hl < 0 || selected < 0) hl = 0;
         row(ctx, i, g->x, ry, rw, g->row_h, hl, i == pressed);
     }
-    if (wrap > 0) C2D_Fade(0);
+    gui_fade_pop(fade_prev);
     if (g->clip) gui_clip_off();
 
     // Content under the header / the action bar: a soft shadow instead of
@@ -808,11 +808,11 @@ static void draw_status_toast(const char *status, UiTone tone, u32 serial) {
 
     float y = 190 + rise.x, h = 22;
     u32 hex = ui_tone_hex(tone);
-    if (fade > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(fade * 255)));
+    float fade_prev = gui_fade_push(fade);
     gui_rrect(8, y, GUI_TOP_W - 16, h, 6, gui_mix(HEX_BG2, hex, 0.25f * flash));
     gui_rrect(8, y, 4, h, 2, stale ? gui_mix(HEX_BG2, hex, 0.4f) : gui_rgb(hex));
     gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(stale ? HEX_DIM : HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
-    if (fade > 0) C2D_Fade(0);
+    gui_fade_pop(fade_prev);
 }
 
 static void size_files(u32 size, int files, char *out, size_t out_size);
@@ -1393,7 +1393,7 @@ typedef struct {
 // "Keeps" pill), -1 = the one it replaces (faded), 0 = neither
 static void ui_save_card(float x, float y, const SaveCard *c, int emphasis) {
     float w = CARD_W, h = CARD_H;
-    if (emphasis < 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(0.4f * 255)));
+    float fade_prev = gui_fade_push(emphasis < 0 ? 0.4f : 0);
     if (emphasis > 0) gui_rrect(x - 2, y - 2, w + 4, h + 4, 8, gui_rgb(HEX_ACCENT));
     gui_rrect(x, y, w, h, 6, gui_rgb(HEX_BG2));
     // The same neutral stripe on both: neither copy is the warning
@@ -1416,7 +1416,7 @@ static void ui_save_card(float x, float y, const SaveCard *c, int emphasis) {
         if (c->line2) gui_text_fit(lx, ly + step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line2);
         if (c->line3) gui_text_fit(lx, ly + 2 * step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line3);
     }
-    if (emphasis < 0) C2D_Fade(0);
+    gui_fade_pop(fade_prev);
 }
 
 // "12.0 KB · 2 files"

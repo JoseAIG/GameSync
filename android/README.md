@@ -92,6 +92,23 @@ download offers **Retry**; both are touch shortcuts for things the controller
 reaches through the tabs. Successes and errors also give a short vibration
 when the system's touch feedback is on.
 
+Statuses are worked out, never assumed. A row first shows a neutral
+*Checking…* pill and then its real status, computed off the main thread from
+the same hash sync sends; *Never synced* means this device has no record of a
+sync yet (even if the server has a copy), *Unknown* that the save couldn't be
+read. With an L2 / R2 status filter on, rows appear as their status is known
+("Checking N saves…" above the list) instead of vanishing later, and the
+cursor stays on the game it was on even when rows move. Saves keeps
+conditions that last in banners at the top (at most two at once): no server
+set, server unreachable (statuses are then from this device only), saves with
+a conflict (tap, or L2 / R2, to filter them; the Saves tab also shows a red
+dot), and an emulator save folder that doesn't exist (tap to fix it on the
+emulator screen). Tapping the header's status dot checks the server again.
+While a save scan runs, an empty list says *Scanning emulator folders…* and a
+filled one shows a thin bar under the chips; pulling down rescans and
+re-checks the server, even on an empty list. While a save syncs its pill
+reads *Syncing…*; pressing A meanwhile says to wait.
+
 Moving between tabs slides the content the way L1 / R1 point; the save detail
 and emulator screens slide in from the right and leave the way they came. With the system's *Remove
 animations* accessibility setting on, every slide becomes a short fade and
@@ -125,19 +142,38 @@ each choice answers only to the button drawn on it.
 | Button | Action |
 |---|---|
 | A | Smart sync the selected save (upload or download, whichever it needs); a conflict, or a Saturn save, opens its detail screen |
-| X | Sync all saves in the current filter (asks first) |
+| X | Sync all: exactly the local saves the list shows, after the system filter, search and status filter (asks first; with no server set it offers Settings instead) |
 | Y | Details: compare with the server, force upload / download, download the ROM, normalize the name |
 | L2 / R2 | Step the sync-status filter (all / synced / local newer / conflict / ...) |
 | SELECT | Next system |
 | Touch | Tap a row for details; the search and web-library icons stay in the header |
 
-On the detail screen D-pad moves between the actions, A runs one, B goes back.
+On the detail screen D-pad moves between the actions, A runs one, Y shows or
+hides the technical details (title id, file, hashes), B goes back. The screen
+leads with the game, its system and status, then *This device* (modified —
+the newest file of the save, the time sync sends —, size, last synced) and
+*Server* (saved at, from which device, size and file count), with a *Newer*
+mark on the later side. After a smart sync finds a conflict the screen opens
+with both copies side by side and the cursor on the Force row of the newer
+one. *Smart Sync* is the main action; *Force Upload* and *Force Download* sit
+under *Override* and both ask first: Force Download names both copies and
+says that a copy of this device's save is kept (RetroArch users are reminded
+to close RetroArch, whose auto-loaded save state can undo it).
+
+Every download that replaces a save — smart sync, Sync all, Force Download —
+first copies the current save to the app's private storage
+(`<app files dir>/local_backups/<title>/<date-time>/`, the newest five per
+game, never in cloud backups). If that copy can't be made the save is not
+overwritten. The result offers *Undo*, and the detail screen gets a *Restore
+previous copy (<when>)* action for the same thing with the controller; the
+restore puts back the sync bookkeeping of that moment too, so the next sync
+sees what you had before rather than downloading over it again.
 
 ### Catalog
 
 | Button | Action |
 |---|---|
-| A | Download the selected game (asks first; a Wii U game queues its update and DLC too) |
+| A | Download the selected game (asks first, showing the folder it goes to and the free space there; a Wii U game queues its update and DLC too) |
 | X | Only games with RetroAchievements / all games |
 | Y | Search |
 | B | Clear and close the search |
@@ -147,7 +183,7 @@ On the detail screen D-pad moves between the actions, A runs one, B goes back.
 
 | Button | Action |
 |---|---|
-| A | The game's actions: A sync its saves, X delete it (asks again — it can't be undone), B cancel |
+| A | The game's actions: A sync its saves, X delete it (asks again — it can't be undone; a save kept next to the ROM is never deleted with it), B cancel |
 | X | Rescan the ROM folders |
 | Y | Search |
 | B | Clear and close the search |
@@ -164,7 +200,15 @@ On the detail screen D-pad moves between the actions, A runs one, B goes back.
 
 A line above the list counts active and finished downloads; the header's
 *Clear finished* button is always there and greyed out while there is
-nothing to clear. Progress bars move smoothly between updates.
+nothing to clear. Clearing (X or the button) offers *Undo*: it only removes
+list entries, never files. A row's touch cancel asks first, like Y; × removes
+a finished row from the list. Progress bars move smoothly between updates.
+
+When the catalog can't be loaded the tab says which server it tried and
+reloads by itself once the server answers again (or when you come back to
+the tab); *Retry* is a touch shortcut. Queuing a game confirms with
+*Queued <name>* and a *View* shortcut to Downloads. START's exit dialog warns
+when a save sync is still running.
 
 ### Settings
 
@@ -172,11 +216,11 @@ D-pad moves between the entries, A activates the highlighted one.
 
 | Entry | What it does |
 |---|---|
-| Rescan saves | Look for emulator saves again |
+| Rescan saves | Look for emulator saves again (reads *Rescanning…* while a scan runs) |
 | Refresh catalog | Ask the server to rescan its ROM folder (`GET /api/v1/roms/scan`; a server that refuses with 403/404/405 is fine), throw the cached catalog away and download it again |
 | Server URL / API key, Test Connection, Save | Connection settings |
 | Emudeck, Auto Sync, Saturn / Sega CD / PS2 formats, ROM folders | As before |
-| Emulator Configuration → | Per-emulator save folders (its own screen; B goes back) |
+| Emulator Configuration → | Per-emulator save folders (its own screen; B goes back). An override that points to a folder that doesn't exist shows a warning above *Change*, which then becomes the highlighted button; the warning stays until the folder exists or the override is cleared |
 
 ## Game catalog cache
 

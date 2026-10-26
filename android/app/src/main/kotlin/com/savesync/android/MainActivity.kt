@@ -39,6 +39,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -82,6 +83,7 @@ import com.savesync.android.ui.NAV_TAB_ROUTES
 import com.savesync.android.ui.enter
 import com.savesync.android.ui.exit
 import com.savesync.android.ui.navMotionFor
+import com.savesync.android.sync.heldBackNoticeText
 import com.savesync.android.ui.components.GsChromeFooter
 import com.savesync.android.ui.components.GsChromeHeader
 import com.savesync.android.ui.components.GsChromeState
@@ -490,9 +492,14 @@ private fun MainApp() {
     // Coming back to the app (e.g. after creating the folder in a file
     // manager) re-checks the emulator save-folder overrides.
     val lifecycleOwner = LocalLifecycleOwner.current
+    // Bumped on each return to the app: background-sync reports are read then.
+    var resumeTick by remember { mutableIntStateOf(0) }
     DisposableEffect(lifecycleOwner, viewModel) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshOverrideWarnings()
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshOverrideWarnings()
+                resumeTick++
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -533,6 +540,14 @@ private fun MainApp() {
     val appScope = rememberCoroutineScope()
     val notifier = remember(snackbarHostState, haptics) {
         GsNotifier(snackbarHostState, appScope, haptics)
+    }
+    // Uploads auto sync held back as suspected rollbacks (SyncWorker): said
+    // once, the next time the app opens.
+    LaunchedEffect(resumeTick, notifier) {
+        val heldBack = viewModel.takeHeldBackUploads()
+        if (heldBack.isNotEmpty()) {
+            notifier.show(GsNotice(GsNoticeKind.Warning, heldBackNoticeText(heldBack)))
+        }
     }
     // Unknown (null) until the stored settings are read: treat as configured.
     val serverConfigured = viewModel.serverConfigured.collectAsState().value != false

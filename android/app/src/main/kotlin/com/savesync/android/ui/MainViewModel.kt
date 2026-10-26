@@ -86,6 +86,19 @@ import java.util.concurrent.TimeUnit
 import com.savesync.android.emulators.impl.AetherSX2Emulator
 import com.savesync.android.emulators.Ps2EmulatorChoice
 
+/**
+ * Sync all's preview (SyncEngine.plan): the dialog shows "Checking with the
+ * server…" while [Planning], then the plan; nothing has moved until the
+ * user presses Sync.
+ */
+sealed class SyncPlanState {
+    object Idle : SyncPlanState()
+    /** Asking the server about [count] saves. */
+    data class Planning(val count: Int) : SyncPlanState()
+    data class Ready(val preview: com.savesync.android.sync.SyncPreview, val count: Int) : SyncPlanState()
+    data class Failed(val message: String, val count: Int) : SyncPlanState()
+}
+
 sealed class SyncState {
     object Idle : SyncState()
     object Syncing : SyncState()
@@ -420,6 +433,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)
     val syncState: StateFlow<SyncState> = _syncState
+
+    private val _syncPlan = MutableStateFlow<SyncPlanState>(SyncPlanState.Idle)
+    /** Sync all's preview; Idle while its dialog is closed. */
+    val syncPlan: StateFlow<SyncPlanState> = _syncPlan
+    private var syncPlanJob: Job? = null
+    /** The engine that made the plan, so it runs with the same client and console id. */
+    private var syncPlanEngine: SyncEngine? = null
 
     private val _saveDetailState = MutableStateFlow<SaveDetailState>(SaveDetailState.Idle)
     val saveDetailState: StateFlow<SaveDetailState> = _saveDetailState
@@ -2254,29 +2274,87 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Sync all: syncs exactly [entries], the local saves the Saves list
-     * shows (see [syncAllTargets]), so the count the confirm dialog names is
+     * Sync all: plans a sync of exactly [entries], the local saves the Saves
+     * list shows (see [syncAllTargets]), so the count the dialog names is
      * what runs.  It used to ignore the search and status filter and sync
      * every local save of the system, which could download over saves the
-     * user never saw listed.
+     * user never saw listed.  Nothing moves yet: [syncPlan] carries the
+     * preview the dialog shows, and [runSyncPlan] carries it out.
      */
     fun syncNow(entries: List<SaveEntry>) {
-        viewModelScope.launch {
+        val localSaves = syncAllTargets(entries)
+        if (localSaves.isEmpty() || _syncState.value is SyncState.Syncing) return
+        syncPlanJob?.cancel()
+        syncPlanEngine = null
+        _syncPlan.value = SyncPlanState.Planning(localSaves.size)
+        syncPlanJob = viewModelScope.launch {
             val currentSettings = settingsStore.settingsFlow.first()
             if (currentSettings.serverUrl.isBlank()) {
+                _syncPlan.value = SyncPlanState.Idle
                 _syncState.value = SyncState.Error("Server URL not configured")
                 return@launch
             }
-            val localSaves = syncAllTargets(entries)
-            if (localSaves.isEmpty()) return@launch
-
-            _syncState.value = SyncState.Syncing
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
-                val saveDirOverrides = currentSettings.saveDirOverrides
-                val result = engine.sync(localSaves)
+                // Hashing reads every save: off the main thread.
+                val preview = withContext(Dispatchers.IO) { engine.plan(localSaves) }
+                syncPlanEngine = engine
+                _syncPlan.value = SyncPlanState.Ready(preview, localSaves.size)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _syncPlan.value = SyncPlanState.Failed(e.message ?: "Couldn't check with the server", localSaves.size)
+            }
+        }
+    }
+
+    /** Closes Sync all's preview without syncing anything. */
+    fun cancelSyncPlan() {
+        syncPlanJob?.cancel()
+        syncPlanJob = null
+        syncPlanEngine = null
+        _syncPlan.value = SyncPlanState.Idle
+    }
+
+    /**
+     * Runs the plan the preview showed.  Suspected rollbacks stay out unless
+     * they are in [includeSuspects]; a plan the user sat on is re-checked
+     * by the engine first, so a save that changed meanwhile is skipped.
+     */
+    fun runSyncPlan(includeSuspects: Set<String>) {
+        val ready = _syncPlan.value as? SyncPlanState.Ready ?: return
+        val engine = syncPlanEngine ?: return
+        syncPlanJob = null
+        syncPlanEngine = null
+        _syncPlan.value = SyncPlanState.Idle
+        if (ready.preview.actionableCount(includeSuspects = includeSuspects) == 0) {
+            // "Done": nothing to move.  Conflicts the plan found still
+            // become findable (banner, tab dot, filter); no notice.
+            val conflicts = ready.preview.titles.filter { it.action == com.savesync.android.sync.PlannedAction.CONFLICT }
+            applyConflictOutcome(
+                SyncResult(
+                    uploaded = 0,
+                    downloaded = 0,
+                    conflicts = conflicts.map { it.displayName },
+                    errors = emptyList(),
+                    conflictTitleIds = conflicts.map { it.titleId },
+                    resolvedTitleIds = ready.preview.titles
+                        .filter { it.action == com.savesync.android.sync.PlannedAction.UP_TO_DATE }
+                        .map { it.titleId },
+                    conflictInfo = ready.preview.conflictInfo,
+                )
+            )
+            return
+        }
+        viewModelScope.launch {
+            _syncState.value = SyncState.Syncing
+            try {
+                val saveDirOverrides = settingsStore.settingsFlow.first().saveDirOverrides
+                val result = withContext(Dispatchers.IO) {
+                    engine.execute(ready.preview, emptySet(), includeSuspects)
+                }
                 applyConflictOutcome(result)
                 // A broken save-folder override silently yields "nothing to
                 // sync" for that emulator; say so — as a warning, not an error.
@@ -2284,6 +2362,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     EmulatorRegistry.saveDirOverrideWarningMap(saveDirOverrides)
                 }
                 _overrideWarnings.value = overrideWarnings
+                if (result.downloaded > 0) _backupsVersion.value++
                 _syncState.value = SyncState.Success(result, overrideWarnings.values.toList())
                 // Refresh list so downloaded server-only entries drop the isServerOnly flag
                 // and status icons reflect the new sync state
@@ -2292,6 +2371,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _syncState.value = SyncState.Error(e.message ?: "Sync failed")
             }
         }
+    }
+
+    /**
+     * Uploads the background worker held back since the app last looked
+     * (see SyncWorker), read once; empty when there were none.
+     */
+    suspend fun takeHeldBackUploads(): List<String> = withContext(Dispatchers.IO) {
+        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.take() }.getOrDefault(emptyList())
     }
 
     /** Scans romScanDir subfolders and populates [detectedSystemFolders]. */

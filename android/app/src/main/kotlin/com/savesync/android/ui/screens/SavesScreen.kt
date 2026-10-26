@@ -104,7 +104,7 @@ import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.sync.SyncResult
 import com.savesync.android.ui.SaveRow
 import com.savesync.android.ui.resolveSelection
-import com.savesync.android.ui.syncAllCopy
+import com.savesync.android.ui.SyncPlanState
 import com.savesync.android.ui.syncAllTargets
 import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.GsButton
@@ -200,9 +200,10 @@ fun SavesScreen(
 
     // Saveable, so rotation keeps the search open and the cursor in place.
     var searchVisible by rememberSaveable { mutableStateOf(false) }
-    // The saves the open Sync-all dialog will sync, captured when it opened:
-    // its label and its action read this one list.
-    var syncAllConfirm by remember { mutableStateOf<List<SaveEntry>?>(null) }
+    // Sync all's preview (planned by the view model, shown below).  Whether
+    // filters applied is captured when it opened, like the saves it plans.
+    val syncPlan by viewModel.syncPlan.collectAsState()
+    var syncAllFiltered by rememberSaveable { mutableStateOf(false) }
     // "Connect a server first", for Sync all without a server.
     var showConnectServer by remember { mutableStateOf(false) }
 
@@ -376,6 +377,7 @@ fun SavesScreen(
     val currentlySyncing by rememberUpdatedState(isSyncing)
     val serverConfigured by viewModel.serverConfigured.collectAsState()
     val currentServerConfigured by rememberUpdatedState(serverConfigured)
+    val currentFiltersApplied by rememberUpdatedState(searchQuery.isNotBlank() || statusFilter != null)
     fun requestSyncAll() {
         if (currentlySyncing) return
         // No server: the same dialog for X and the header button, which
@@ -388,7 +390,10 @@ fun SavesScreen(
         if (targets.isEmpty()) {
             notifier.show(GsNotice(GsNoticeKind.Info, "Nothing to sync in this view"))
         } else {
-            syncAllConfirm = targets
+            // The dialog opens at once ("Checking with the server…"); the
+            // count it names and the saves planned are this one list.
+            syncAllFiltered = currentFiltersApplied
+            viewModel.syncNow(targets)
         }
     }
 
@@ -688,20 +693,13 @@ fun SavesScreen(
         )
     }
 
-    GsDialogHost(syncAllConfirm) { targets, _ ->
-        val copy = syncAllCopy(
-            count = targets.size,
-            filtersApplied = searchQuery.isNotBlank() || statusFilter != null,
-        )
-        GsConfirmDialog(
-            title = copy.title,
-            message = copy.message,
-            confirmLabel = "Sync",
-            onConfirm = {
-                syncAllConfirm = null
-                viewModel.syncNow(targets)
-            },
-            onDismiss = { syncAllConfirm = null },
+    // Sync all: the preview, then the plan runs (or nothing, on Cancel).
+    GsDialogHost(syncPlan.takeIf { it !is SyncPlanState.Idle }) { plan, _ ->
+        SyncAllDialog(
+            state = plan,
+            filtersApplied = syncAllFiltered,
+            onCancel = { viewModel.cancelSyncPlan() },
+            onRun = { included -> viewModel.runSyncPlan(included) },
         )
     }
 }

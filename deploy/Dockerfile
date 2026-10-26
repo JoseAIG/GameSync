@@ -1,6 +1,19 @@
 # GameSync server: imagen de despliegue (fork JoseAIG/GameSync).
 # Contexto de build: raíz del repo (el servidor importa ../shared).
 #   docker compose -f deploy/compose.yaml build
+
+# mcr2vmp (PS1 card -> VMP) se compila aquí: la imagen final no trae
+# compilador y su raíz es de solo lectura, así que el servidor no puede
+# compilarlo al vuelo. Sin él, toda subida de tarjeta PS1 da 500.
+FROM python:3.12-slim AS mcr2vmp
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY server/third_party/mcr2vmp/ ./
+RUN rm -f mcr2vmp mcr2vmp.exe \
+    && gcc -O2 -I include -o mcr2vmp mcr2vmp.c aes.c sha1.c
+
 FROM python:3.12-slim AS base
 
 COPY --from=ghcr.io/astral-sh/uv:0.9 /uv /usr/local/bin/uv
@@ -24,6 +37,10 @@ COPY shared/ /app/shared/
 COPY server/app/ ./app/
 COPY server/data/ ./data/
 COPY server/third_party/ ./third_party/
+# Binario Linux recién compilado; el touch lo deja más nuevo que las fuentes
+# para que mcr2vmp_tool no intente recompilarlo.
+COPY --from=mcr2vmp /src/mcr2vmp ./third_party/mcr2vmp/mcr2vmp
+RUN touch ./third_party/mcr2vmp/mcr2vmp
 
 # Usuario sin privilegios; /data es el único volumen escribible.
 RUN useradd --system --uid 10001 --home-dir /nonexistent --shell /usr/sbin/nologin gamesync \

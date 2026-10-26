@@ -1297,6 +1297,7 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
         gui_end();
         v.held = 0;
     }
+    ui_input_latch_touch();
     ui_restore_backdrop(prev);
     return result;
 }

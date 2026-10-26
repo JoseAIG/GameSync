@@ -665,8 +665,13 @@ fun GsDialog(
                 }
                 if (body != null) {
                     Spacer(Modifier.height(8.dp))
+                    // weight(fill = false): the title, message and choices
+                    // are measured first, so on a short window the body
+                    // shrinks and scrolls instead of pushing the buttons
+                    // out of the dialog.
                     Column(
                         modifier = Modifier
+                            .weight(1f, fill = false)
                             .heightIn(max = 360.dp)
                             .verticalScroll(rememberScrollState()),
                         content = body,

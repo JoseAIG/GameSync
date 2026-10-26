@@ -32,8 +32,11 @@ make clean
 ```
 
 For performance work, `make clean && make GUI_PERF=1` builds a version that
-shows the last frame's GPU time (citro3d processing + drawing, in ms) in
-the top-right corner of the top screen; the normal build has no overlay.
+shows, in the top-right corner of the top screen, the last frame's citro3d
+time (processing + drawing, in ms) and `cpu`, the loop's own CPU time that
+frame (input, springs and row drawing, from the input scan to the end of
+the frame, without the vsync wait). Either one over the 12 ms budget turns
+red. The normal build has no overlay.
 
 ### Output files
 
@@ -88,7 +91,7 @@ the ones it doesn't show.
 | `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. |
 | `local_backups` | `3` | Before a download or history restore overwrites a save, the current save is copied to `sdmc:/3ds/3dssync/backups/<TITLEID>/<YYYYMMDD-HHMMSS>/`. This many copies are kept per title (oldest deleted first); `0` disables the copies. |
 | `tls_verify` | `1` | For `https://` server URLs, verify the server certificate. `0` accepts any certificate (the behaviour of older versions; use it for a self-signed server). Has no effect on `http://`. |
-| `reduce_motion` | `0` | `1` turns off sliding and springing: the list highlight and scrolling jump instead of gliding, and nothing nudges or bounces. The fade when a list wraps around and the progress bar's glide stay. |
+| `reduce_motion` | `0` | `1` turns off sliding and springing: the list highlight and scrolling jump instead of gliding, nothing nudges or bounces, and tabs and dialogs fade in instead of sliding or rising. The fade when a list wraps around, the dimming fading out after a dialog and the progress bar's glide stay. |
 | `update_check` | `1` | Allow *Settings > Check for updates now* (the Settings switch *Allow update checks*). The server looks up the latest GitHub release; the client downloads the CIA through the server and installs it. The download must match the size the server reports, and its SHA-256 when the server publishes one (`sha256`, or GitHub's `digest` field). `0` disables update checks and installs. |
 
 ### HTTPS
@@ -151,7 +154,19 @@ key that does the same thing.
   the local backup.
 - **Progress**: syncs, restores, updates and catalog installs show a card with
   a progress bar (with speed, elapsed and remaining time for downloads).
-  Downloads that can be stopped have a **B Cancel** button.
+  Downloads that can be stopped have a **B Cancel** button. Talking to the
+  server (comparing a save, uploads, downloads, *Sync all*, History, game
+  names, the update check, *Refresh catalog* and catalog pages) runs in the
+  background, so the screen never freezes: the spinner keeps turning and the
+  list underneath keeps moving. If the server hasn't answered for 5 seconds
+  the card says "Waiting for the server… 0:07", and where stopping is safe
+  (anything that only reads: comparing, History, names, the update check,
+  *Refresh catalog*, catalog pages) it offers **B Cancel**, which leaves
+  everything as it was. Uploads, downloads and *Sync all* can't be cancelled
+  once they have started. A cancelled request may still be running on the
+  server; the next thing that needs the server waits for it ("Finishing the
+  request you cancelled…"). A catalog page that loads quickly shows no card
+  at all, only the list's own loading rows.
 - **Catalog**, **Settings** and **History** use the same layout: a list on the
   bottom screen, details of the highlighted entry on the top.
 - **History restore**: before a saved version is written, the top screen shows
@@ -159,6 +174,13 @@ key that does the same thing.
   last sync) beside the chosen version (date, size, files), and the card says
   whether the current save is backed up to the SD first. Only **A** (or
   tapping **Restore**) writes it; **B** or **Cancel** leaves the save alone.
+
+Switching tabs slides the new tab's content in from the side of the
+shoulder button you pressed (R from the right, L from the left); the header
+and the action bar stay put, and the keys work from the first frame. A
+dialog rises into place over a dimmed bottom screen (the Y menu grows out of
+the row it is about); when it closes, it goes at once and the dimming fades
+out while the screen underneath already responds.
 
 Holding the D-pad repeats, and after a second Up / Down speed up. The
 highlight glides between rows; when a list wraps around it jumps to the other
@@ -216,6 +238,9 @@ never reaches the screen underneath.
 | Drag / flick a list | Scroll it; a touch stops a flick |
 | Tap a sub-tab segment | Show it (same as cycling to it with SELECT) |
 | Tap a button | The same as its key |
+
+On a progress card that offers it, **B** or tapping **Cancel** (on release)
+stops a request that only reads from the server; see *Progress* above.
 
 ### Saves
 
@@ -380,7 +405,9 @@ The plain-C parts have host tests: the catalog's parsing and planning
 the springs (`source/gui_motion.c`), the `config.txt` reader/writer
 (`source/config_file.c`), the date/size formatting (`source/ui_format.c`) and
 the touch and list gestures (`source/ui_gesture.c`: tap and drag recognition,
-the touch filter, momentum, rubber band):
+the touch filter, momentum, rubber band) and the background-job helpers
+(`source/ui_job.c`: the copied progress reports, when a card starts waiting,
+the wait clock), plus the dialog entry transform in `source/gui_motion.c`:
 
 ```bash
 sh tests/run_host_tests.sh          # needs a host gcc (Linux / WSL)

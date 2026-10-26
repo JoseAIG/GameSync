@@ -23,6 +23,22 @@
 #define GUI_FOOTER_H 22
 #define GUI_FOOTER_Y (GUI_H - GUI_FOOTER_H)
 
+// Bottom-screen layout of the list screens (Saves, Catalog, History,
+// Settings): header 0-26, a list of 8 rows x 22 px at 26-202, then a 38 px
+// action bar of 30 px buttons. The header and the bar are opaque and drawn
+// after the list, so they hide the rows sliding under them.
+#define GUI_LIST_Y GUI_HEADER_H
+#define GUI_LIST_ROWS 8
+#define GUI_ROW_H 22
+#define GUI_BAR_Y 202
+#define GUI_BAR_H (GUI_H - GUI_BAR_Y)
+
+// Buttons (gui_btn)
+#define GUI_BTN_H 30
+#define GUI_BTN_R 8
+#define GUI_BTN_GAP 8
+#define GUI_BTN_MIN_W 64
+
 // Text scales. The system font has one weight, so colour carries the rest
 // of the hierarchy: titles and values in HEX_TEXT, labels, captions and
 // hints in HEX_DIM.
@@ -126,6 +142,16 @@ void gui_circle(float cx, float cy, float r, u32 color);
 void gui_icon_up(float cx, float cy, float s, u32 color);
 void gui_icon_down(float cx, float cy, float s, u32 color);
 void gui_icon_check(float cx, float cy, float s, u32 color);
+// A cross (close / clear), a "<" chevron and a magnifier, drawn as shapes
+// (the system font isn't guaranteed to have these symbols)
+void gui_icon_x(float cx, float cy, float s, u32 color);
+void gui_icon_chevron_left(float cx, float cy, float s, u32 color);
+void gui_icon_search(float cx, float cy, float s, u32 color);
+
+// Clip what's drawn next to a rectangle of the current screen, until
+// gui_clip_off(). Flushes what was drawn before.
+void gui_clip(float x, float y, float w, float h);
+void gui_clip_off(void);
 
 // ---------------------------------------------------------------------------
 // Text (system font, UTF-8)
@@ -164,10 +190,24 @@ float gui_pill(float x, float y, float h, float scale, u32 bg, u32 fg, const cha
 // Outlined variant (for low-emphasis tags)
 float gui_pill_outline(float x, float y, float h, float scale, u32 color, u32 fill, const char *label);
 
-// Button glyph: "A" "B" "X" "Y" "L" "R" "START" "SELECT" "DPAD" "UD" "LR".
-// (x, y) is the left edge and the vertical centre. Returns the width.
+// Button glyph: "A" "B" "X" "Y" "L" "R" "ZR" "START" "SELECT" "DPAD" "UD"
+// "LR". (x, y) is the left edge and the vertical centre. Returns the width.
 float gui_button(float x, float cy, const char *button);
 float gui_button_w(const char *button);
+
+// Pill button: the key glyph (may be NULL) then the label, centred.
+// PRIMARY is filled with the tone (0 = HEX_ACCENT), TONAL is a neutral
+// raised fill, DISABLED is flat with muted text. `pressed` (a finger on it,
+// or its key held) darkens the fill and insets it by 1 px. `r` is the drawn
+// rect; touch targets are usually larger.
+typedef enum {
+    GUI_BTN_PRIMARY = 0,
+    GUI_BTN_TONAL,
+    GUI_BTN_DISABLED,
+} GuiBtnStyle;
+void gui_btn(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex, bool pressed);
+// Width of the glyph + label inside a button (without padding)
+float gui_btn_content_w(const char *glyph, const char *label);
 
 // Progress bar; frac < 0 draws an animated indeterminate bar
 void gui_bar(float x, float y, float w, float h, float frac, u32 color);
@@ -188,6 +228,13 @@ void gui_dim(void);
 void gui_header(const char *section);
 // Header bar background only (for custom headers, e.g. tabs)
 void gui_header_bar(void);
+// The same; `line` = draw the 1 px divider under it (left out while list
+// content is scrolled under the header, see gui_scroll_edges)
+void gui_header_bar_ex(bool line);
+// Scroll-edge shadows of a list: 6 px fading down from `top_y` when rows
+// are scrolled under the header (`above`), 6 px fading up to `bottom_y`
+// when more rows continue under the action bar (`below`)
+void gui_scroll_edges(float x, float w, float top_y, float bottom_y, bool above, bool below);
 // Header of a top-level screen: logo, then the L / R shoulder glyphs around
 // the segmented tab strip (the active tab highlighted); WiFi, server dot and
 // version on the right of the top screen.

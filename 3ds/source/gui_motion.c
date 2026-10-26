@@ -1,6 +1,6 @@
-// Spring response/damping parameterisation from Apple's "Designing Fluid
-// Interfaces" (WWDC 2018). Written from the talk's description; no code
-// copied.
+// Spring response/damping parameterisation and the rubber-band formula from
+// Apple's "Designing Fluid Interfaces" (WWDC 2018). Written from the talk's
+// description; no code copied.
 #include "gui_motion.h"
 #include <math.h>
 
@@ -62,4 +62,11 @@ void gui_spring_bouncy(GuiSpring *s, float target, float response, float damping
         s->x += s->v * h;
     }
     if (gui_spring_resting(s, target)) gui_spring_set(s, target);
+}
+
+// (o * d * c) / (d + c * |o|): follows 1:1 near the bound (slope c), then
+// ever less, approaching d * c
+float gui_rubberband(float overshoot, float dimension, float constant) {
+    if (dimension <= 0) return 0;
+    return (overshoot * dimension * constant) / (dimension + constant * fabsf(overshoot));
 }

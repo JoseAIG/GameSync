@@ -50,4 +50,27 @@ bool gui_reduce_motion(void);
 // network call between frames) can't make anything jump
 float gui_dt_clamp(float seconds);
 
+// Rubber band: how far content follows a drag `overshoot` past a bound,
+// for a viewport of `dimension` (same units). Resists more the further it
+// goes and never reaches `dimension * constant`. Apple uses constant 0.55.
+float gui_rubberband(float overshoot, float dimension, float constant);
+
+// Screen rectangle (also used as a touch target)
+typedef struct {
+    float x, y, w, h;
+} GuiRect;
+
+static inline GuiRect gui_rect_make(float x, float y, float w, float h) {
+    GuiRect r = { x, y, w, h };
+    return r;
+}
+// `r` grown by `d` px on every side
+static inline GuiRect gui_rect_grow(GuiRect r, float d) {
+    GuiRect g = { r.x - d, r.y - d, r.w + 2 * d, r.h + 2 * d };
+    return g;
+}
+static inline bool gui_rect_contains(GuiRect r, float x, float y) {
+    return r.w > 0 && r.h > 0 && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
+}
+
 #endif // GUI_MOTION_H

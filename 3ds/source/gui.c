@@ -85,6 +85,8 @@ void gui_screen(int screen) {
     screen_w = (screen == GUI_TOP) ? GUI_TOP_W : GUI_BOT_W;
     C2D_TargetClear(t, gui_rgb(HEX_BG));
     C2D_SceneBegin(t);
+    // A clip left on by mistake must not hide the next screen
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     // Soft vertical gradient behind everything
     gui_vgrad(0, 0, screen_w, GUI_H, gui_rgb(0x131D29), gui_rgb(HEX_BG));
 }
@@ -196,6 +198,58 @@ void gui_icon_check(float cx, float cy, float s, u32 color) {
     if (t < 1.5f) t = 1.5f;
     C2D_DrawLine(cx - s * 0.42f, cy, color, cx - s * 0.12f, cy + s * 0.3f, color, t, 0.5f);
     C2D_DrawLine(cx - s * 0.12f, cy + s * 0.3f, color, cx + s * 0.45f, cy - s * 0.32f, color, t, 0.5f);
+}
+
+static float icon_stroke(float s) {
+    float t = s * 0.18f;
+    return t < 1.5f ? 1.5f : t;
+}
+
+void gui_icon_x(float cx, float cy, float s, u32 color) {
+    float h = s * 0.35f, t = icon_stroke(s);
+    C2D_DrawLine(cx - h, cy - h, color, cx + h, cy + h, color, t, 0.5f);
+    C2D_DrawLine(cx - h, cy + h, color, cx + h, cy - h, color, t, 0.5f);
+}
+
+void gui_icon_chevron_left(float cx, float cy, float s, u32 color) {
+    float t = icon_stroke(s);
+    C2D_DrawLine(cx + s * 0.22f, cy - s * 0.42f, color, cx - s * 0.22f, cy, color, t, 0.5f);
+    C2D_DrawLine(cx - s * 0.22f, cy, color, cx + s * 0.22f, cy + s * 0.42f, color, t, 0.5f);
+}
+
+void gui_icon_search(float cx, float cy, float s, u32 color) {
+    // Ring of short segments (citro2d has no ring) and a handle at 45 degrees
+    float t = icon_stroke(s) * 0.8f, r = s * 0.3f;
+    float rx = cx - s * 0.1f, ry = cy - s * 0.1f;
+    const int n = 12;
+    for (int i = 0; i < n; i++) {
+        float a0 = (float)i / n * 2 * (float)M_PI, a1 = (float)(i + 1) / n * 2 * (float)M_PI;
+        C2D_DrawLine(rx + cosf(a0) * r, ry + sinf(a0) * r, color, rx + cosf(a1) * r, ry + sinf(a1) * r, color,
+                     t, 0.5f);
+    }
+    float d = r * 0.7071f;
+    C2D_DrawLine(rx + d, ry + d, color, cx + s * 0.42f, cy + s * 0.42f, color, t * 1.3f, 0.5f);
+}
+
+// The screens are rotated 90 degrees in the framebuffer: x on screen runs
+// down the framebuffer from its far end, y on screen runs across it from
+// its far end. Coordinates are clamped to the screen.
+void gui_clip(float x, float y, float w, float h) {
+    C2D_Flush();
+    float W = screen_w;
+    float left = GUI_H - (y + h), top = W - (x + w), right = GUI_H - y, bottom = W - x;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > GUI_H) right = GUI_H;
+    if (bottom > W) bottom = W;
+    if (right < left) right = left;
+    if (bottom < top) bottom = top;
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)left, (u32)top, (u32)right, (u32)bottom);
+}
+
+void gui_clip_off(void) {
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -394,27 +448,35 @@ static u32 button_hex(const char *b) {
     return 0xAAB8C5;
 }
 
+static bool is_shoulder(const char *b) {
+    return !strcmp(b, "L") || !strcmp(b, "R") || !strcmp(b, "ZR");
+}
+
 float gui_button_w(const char *b) {
+    if (!strcmp(b, "ZR")) return 21;
     if (strlen(b) == 1) return (*b == 'L' || *b == 'R') ? 17 : 13;
     if (!strcmp(b, "DPAD") || !strcmp(b, "UD") || !strcmp(b, "LR")) return 13;
     return gui_text_w(0.32f, b) + 8;
 }
 
-float gui_button(float x, float cy, const char *b) {
-    u32 ink = gui_rgb(HEX_INK);
-    if (strlen(b) == 1 && (*b == 'L' || *b == 'R')) {
+// `muted`: the glyph of a disabled button (flat, no key colour)
+static float button_glyph(float x, float cy, const char *b, bool muted) {
+    u32 ink = gui_rgb(muted ? HEX_MUTED : HEX_INK);
+    u32 fill = gui_rgb(muted ? HEX_LINE : button_hex(b));
+    if (is_shoulder(b)) {
         // Shoulder button: rounded tab
-        gui_rrect(x, cy - 6.5f, 17, 13, 4, gui_rgb(button_hex(b)));
-        gui_text_mid(x + 8.5f, cy - 6.5f, 13, 0.38f, ink, GUI_CENTER, 0, b);
-        return 17;
+        float w = gui_button_w(b);
+        gui_rrect(x, cy - 6.5f, w, 13, 4, fill);
+        gui_text_mid(x + w / 2, cy - 6.5f, 13, 0.38f, ink, GUI_CENTER, 0, b);
+        return w;
     }
     if (strlen(b) == 1) {
-        gui_circle(x + 6.5f, cy, 6.5f, gui_rgb(button_hex(b)));
+        gui_circle(x + 6.5f, cy, 6.5f, fill);
         gui_text_mid(x + 6.6f, cy - 6.5f, 13, 0.38f, ink, GUI_CENTER, 0, b);
         return 13;
     }
     if (!strcmp(b, "DPAD") || !strcmp(b, "UD") || !strcmp(b, "LR")) {
-        u32 base = gui_rgb(0x6F8295), hi = gui_rgb(HEX_TEXT);
+        u32 base = gui_rgb(muted ? HEX_LINE : 0x6F8295), hi = gui_rgb(muted ? HEX_MUTED : HEX_TEXT);
         bool ud = !strcmp(b, "UD"), lr = !strcmp(b, "LR"), all = !ud && !lr;
         // Cross: vertical arm, horizontal arm, then highlighted halves
         gui_rect(x + 4.5f, cy - 6.5f, 4, 13, (ud || all) ? hi : base);
@@ -425,9 +487,57 @@ float gui_button(float x, float cy, const char *b) {
     }
     // START / SELECT
     float w = gui_text_w(0.32f, b) + 8;
-    gui_rrect(x, cy - 5.5f, w, 11, 5.5f, gui_rgb(button_hex(b)));
+    gui_rrect(x, cy - 5.5f, w, 11, 5.5f, fill);
     gui_text_mid(x + w / 2, cy - 5.5f, 11, 0.32f, ink, GUI_CENTER, 0, b);
     return w;
+}
+
+float gui_button(float x, float cy, const char *b) {
+    return button_glyph(x, cy, b, false);
+}
+
+float gui_btn_content_w(const char *glyph, const char *label) {
+    float w = 0;
+    if (glyph && *glyph) w += gui_button_w(glyph);
+    if (label && *label) w += (w > 0 ? 4 : 0) + gui_text_w(GUI_S_SMALL, label);
+    return w;
+}
+
+void gui_btn(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex, bool pressed) {
+    if (r.w <= 0 || r.h <= 0) return;
+    if (style == GUI_BTN_DISABLED) pressed = false;
+    if (!tone_hex) tone_hex = HEX_ACCENT;
+    if (pressed) r = gui_rect_grow(r, -1);   // the 0.97-scale equivalent at this size
+    u32 text;
+    switch (style) {
+        case GUI_BTN_PRIMARY:
+            gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R,
+                      pressed ? gui_mix(tone_hex, 0x000000, 0.20f) : gui_rgb(tone_hex));
+            text = HEX_INK;
+            break;
+        case GUI_BTN_TONAL:
+            gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R, gui_rgb(HEX_LINE));
+            gui_rrect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, GUI_BTN_R - 1,
+                      pressed ? gui_mix(HEX_PANEL_HI, tone_hex, 0.35f) : gui_rgb(HEX_PANEL_HI));
+            text = HEX_TEXT;
+            break;
+        default:
+            gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R, gui_rgb(HEX_BG2));
+            text = HEX_MUTED;
+            break;
+    }
+    // Glyph + label centred, never closer than 6 px to the edges
+    bool has_glyph = glyph && *glyph;
+    float gw = has_glyph ? gui_button_w(glyph) + 4 : 0;
+    char fitted[GUI_WRAP_LINE];
+    gui_fit(label ? label : "", GUI_S_SMALL, r.w - 12 - gw, fitted, sizeof(fitted));
+    float cw = gw + gui_text_w(GUI_S_SMALL, fitted);
+    if (!fitted[0] && has_glyph) cw -= 4;
+    float x = r.x + (r.w - cw) / 2;
+    if (x < r.x + 6) x = r.x + 6;
+    float cy = r.y + r.h / 2;
+    if (has_glyph) x += button_glyph(x, cy, glyph, style == GUI_BTN_DISABLED) + 4;
+    if (fitted[0]) gui_text_mid(x, r.y, r.h, GUI_S_SMALL, gui_rgb(text), GUI_LEFT, 0, fitted);
 }
 
 void gui_bar(float x, float y, float w, float h, float frac, u32 color) {
@@ -501,9 +611,18 @@ void gui_dim(void) {
     gui_rect(0, 0, screen_w, GUI_H, gui_rgba(0x05090D, 0xB4));
 }
 
-void gui_header_bar(void) {
+void gui_header_bar_ex(bool line) {
     gui_rect(0, 0, screen_w, GUI_HEADER_H, gui_rgb(HEX_BG2));
-    gui_rect(0, GUI_HEADER_H - 1, screen_w, 1, gui_rgb(HEX_LINE));
+    if (line) gui_rect(0, GUI_HEADER_H - 1, screen_w, 1, gui_rgb(HEX_LINE));
+}
+
+void gui_header_bar(void) {
+    gui_header_bar_ex(true);
+}
+
+void gui_scroll_edges(float x, float w, float top_y, float bottom_y, bool above, bool below) {
+    if (above) gui_vgrad(x, top_y, w, 6, gui_rgba(HEX_BG2, 0xFF), gui_rgba(HEX_BG2, 0x00));
+    if (below) gui_vgrad(x, bottom_y - 6, w, 6, gui_rgba(HEX_BG2, 0x00), gui_rgba(HEX_BG2, 0xFF));
 }
 
 float gui_status_icons(float x_right, float cy) {

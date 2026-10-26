@@ -469,3 +469,39 @@ class TestDisableDocs:
         for path in ("/docs", "/redoc", "/openapi.json"):
             r = c.get(path, headers={"X-API-Key": settings.api_key})
             assert r.status_code == 404, path
+
+
+# ── /roms/scan admin check ──────────────────────────────────────────────────
+
+
+class TestRomScanAdmin:
+    @pytest.fixture(autouse=True)
+    def _no_rom_dir(self, monkeypatch):
+        monkeypatch.setattr(settings, "rom_dir", None)
+        monkeypatch.setattr(settings, "admin_users", "admin")
+
+    def _scan(self, client, auth_headers, user=None):
+        headers = dict(auth_headers)
+        if user is not None:
+            headers["X-Remote-User"] = user
+        return client.get("/api/v1/roms/scan", headers=headers)
+
+    def test_api_key_client_without_proxy_user_can_scan(self, client, auth_headers):
+        assert self._scan(client, auth_headers).status_code == 200
+
+    def test_untrusted_header_is_ignored(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(settings, "trust_proxy_auth", False)
+        assert self._scan(client, auth_headers, "bob").status_code == 200
+
+    def test_trusted_non_admin_is_refused(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(settings, "trust_proxy_auth", True)
+        assert self._scan(client, auth_headers, "bob").status_code == 403
+
+    def test_trusted_admin_can_scan(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(settings, "trust_proxy_auth", True)
+        assert self._scan(client, auth_headers, "admin").status_code == 200
+
+    def test_scan_still_needs_api_key(self, client, monkeypatch):
+        monkeypatch.setattr(settings, "trust_proxy_auth", True)
+        r = client.get("/api/v1/roms/scan", headers={"X-Remote-User": "admin"})
+        assert r.status_code == 401

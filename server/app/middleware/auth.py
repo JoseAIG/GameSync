@@ -11,6 +11,18 @@ from app.services import share_token
 _OPEN_PATHS = {"/", "/docs", "/openapi.json", "/api/v1/status"}
 
 
+def trusted_remote_user(request: Request) -> str:
+    """Username forwarded by the reverse proxy, or "" when it isn't trusted.
+
+    ``X-Remote-User`` is only meaningful when nginx (Basic Auth) sets it, so
+    it is ignored unless ``SYNC_TRUST_PROXY_AUTH=true`` — otherwise any client
+    could forge it.
+    """
+    if not settings.trust_proxy_auth:
+        return ""
+    return request.headers.get("X-Remote-User", "").strip()
+
+
 def _key_matches(candidate: str | None) -> bool:
     """Constant-time comparison so response timing doesn't leak the key."""
     if not candidate:

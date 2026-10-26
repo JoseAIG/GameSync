@@ -452,6 +452,22 @@ def _prune_history(title_id: str) -> None:
         shutil.rmtree(oldest)
 
 
+def _parse_history_dir_name(name: str) -> tuple[str, int]:
+    """Turn a history dir name back into (ISO string, unix seconds).
+
+    Dir names are ``last_sync`` with ``:`` and ``+`` replaced by ``_``, e.g.
+    ``2026-01-02T03_04_05.123456_00_00``.  Returns unix 0 if unparseable.
+    """
+    ts_str = name.replace("_", ":")
+    if ts_str.endswith(":00:00"):
+        ts_str = ts_str[:-6] + "+00:00"
+    try:
+        return ts_str, int(datetime.fromisoformat(ts_str).timestamp())
+    except Exception as e:
+        print(f"Failed to parse timestamp '{ts_str}': {e}")
+        return ts_str, 0
+
+
 def list_history(title_id: str, console_id: str = "") -> list[dict]:
     """List all history versions for a title. console_id is ignored (flat layout)."""
     history = _history_dir(title_id)
@@ -463,15 +479,7 @@ def list_history(title_id: str, console_id: str = "") -> list[dict]:
         if not ts_dir.is_dir():
             continue
 
-        ts_str = ts_dir.name.replace("_", ":")
-        if ts_str.endswith(":00:00"):
-            ts_str = ts_str[:-6] + "+00:00"
-        try:
-            dt = datetime.fromisoformat(ts_str)
-            unix_ts = int(dt.timestamp())
-        except Exception as e:
-            print(f"Failed to parse timestamp '{ts_str}': {e}")
-            unix_ts = 0
+        ts_str, unix_ts = _parse_history_dir_name(ts_dir.name)
 
         total_size = 0
         file_count = 0
@@ -500,12 +508,15 @@ def load_history_version_by_unix_ts(
     if not history.exists():
         return None
 
-    dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
-    iso_ts = dt.isoformat()
-    ts_dir_name = iso_ts.replace(":", "_").replace("+", "_")
-
-    history_path = history / ts_dir_name
-    if not history_path.exists():
+    # Dir names carry microseconds (they come from ``last_sync``) while the
+    # listed timestamp is whole seconds, so match on the parsed value rather
+    # than rebuilding the name.  Newest first, like ``list_history``.
+    history_path = None
+    for ts_dir in sorted(history.iterdir(), reverse=True):
+        if ts_dir.is_dir() and _parse_history_dir_name(ts_dir.name)[1] == unix_timestamp:
+            history_path = ts_dir
+            break
+    if history_path is None:
         return None
 
     files = []

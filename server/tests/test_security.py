@@ -585,3 +585,30 @@ class TestAtomicStore:
         storage._recover_interrupted_swap(title_dir)
         assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
         assert sorted(p.name for p in title_dir.iterdir()) == ["current"]
+
+
+# ── History download by timestamp ───────────────────────────────────────────
+
+
+class TestHistoryByTimestamp:
+    def test_listed_version_can_be_downloaded(self, client, auth_headers):
+        assert _upload(client, auth_headers, _bundle([("main", b"v1")], timestamp=1)).status_code == 200
+        assert _upload(client, auth_headers, _bundle([("main", b"v2")], timestamp=2)).status_code == 200
+
+        versions = client.get(
+            f"/api/v1/saves/{TITLE_HEX}/history", headers=auth_headers
+        ).json()["versions"]
+        assert len(versions) == 1
+        ts = versions[0]["timestamp"]
+        assert ts > 0
+
+        r = client.get(f"/api/v1/saves/{TITLE_HEX}/history/{ts}", headers=auth_headers)
+        assert r.status_code == 200
+        parsed = parse_bundle(r.content)
+        assert [(f.path, f.data) for f in parsed.files] == [("main", b"v1")]
+
+    def test_unknown_timestamp_is_404(self, client, auth_headers):
+        _upload(client, auth_headers, _bundle([("main", b"v1")], timestamp=1))
+        _upload(client, auth_headers, _bundle([("main", b"v2")], timestamp=2))
+        r = client.get(f"/api/v1/saves/{TITLE_HEX}/history/12345", headers=auth_headers)
+        assert r.status_code == 404

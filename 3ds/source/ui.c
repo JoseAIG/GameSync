@@ -88,6 +88,9 @@ static UiRepeat key_repeat;
 bool ui_input_scan(UiInput *in) {
     memset(in, 0, sizeof(*in));
     if (!aptMainLoop()) return false;
+#ifdef GUI_PERF
+    gui_perf_loop_mark();
+#endif
     hidScanInput();
     in->down = hidKeysDown();
     in->held = hidKeysHeld();

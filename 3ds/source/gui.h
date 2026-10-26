@@ -101,6 +101,9 @@ void gui_begin(bool vsync);
 // Frames in which a list coast ran faster than its release velocity
 // (drawn in red by the overlay; must stay 0)
 extern u32 gui_perf_coast_overspeed;
+// Start of a frame's loop work (ui_input_scan calls it): the overlay then
+// shows that frame's CPU time up to gui_end(), without the vsync wait
+void gui_perf_loop_mark(void);
 #endif
 // Select and clear a screen (GUI_TOP / GUI_BOTTOM), draws the background
 void gui_screen(int screen);

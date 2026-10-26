@@ -89,8 +89,24 @@ static GuiSpring scrim;
 static int scrim_depth;
 static bool scrim_drawn;    // a modal drew it this frame
 
+#ifdef GUI_PERF
+// Loop CPU time of the frame: from ui_input_scan() to gui_end(), minus
+// the vsync wait inside gui_begin()
+static u64 perf_loop_tick, perf_wait_ticks;
+void gui_perf_loop_mark(void) {
+    perf_loop_tick = svcGetSystemTick();
+    perf_wait_ticks = 0;
+}
+#endif
+
 void gui_begin(bool vsync) {
+#ifdef GUI_PERF
+    u64 wait0 = svcGetSystemTick();
+#endif
     C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : 0);
+#ifdef GUI_PERF
+    perf_wait_ticks += svcGetSystemTick() - wait0;
+#endif
     C2D_TextBufClear(text_buf);
     fade_now = 0;
     transition_fade_prev = 0;
@@ -137,20 +153,31 @@ void gui_screen(int screen) {
 u32 gui_perf_coast_overspeed;
 
 // Top-right corner of the top screen: the previous frame's citro3d time
-// (command building + GPU drawing), red past the 12 ms budget
+// (command building + GPU drawing) and this frame's loop CPU time (input
+// scan, springs, row callbacks: from ui_input_scan() to here, without the
+// vsync wait), red past the 12 ms budget
 static void perf_overlay(void) {
     float ms = C3D_GetProcessingTime() + C3D_GetDrawingTime();
-    char buf[48];
+    float cpu = -1;
+    if (perf_loop_tick) {
+        u64 spent = svcGetSystemTick() - perf_loop_tick;
+        spent = spent > perf_wait_ticks ? spent - perf_wait_ticks : 0;
+        cpu = (float)spent * 1000.0f / (float)SYSCLOCK_ARM11;
+        perf_loop_tick = 0;
+    }
+    char buf[64], loop[24] = "";
+    if (cpu >= 0) snprintf(loop, sizeof(loop), "  cpu %.1f", cpu);
     if (gui_perf_coast_overspeed)
-        snprintf(buf, sizeof(buf), "%.1f ms  coast>v %lu", ms, (unsigned long)gui_perf_coast_overspeed);
+        snprintf(buf, sizeof(buf), "%.1f ms%s  coast>v %lu", ms, loop, (unsigned long)gui_perf_coast_overspeed);
     else
-        snprintf(buf, sizeof(buf), "%.1f ms", ms);
+        snprintf(buf, sizeof(buf), "%.1f ms%s", ms, loop);
     C2D_SceneBegin(target_top);
     view_set(GUI_XF_IDENTITY);
     C2D_Fade(0);
     float w = gui_text_w(GUI_S_SMALL, buf) + 8;
     gui_rect(GUI_TOP_W - w - 2, 2, w, 14, gui_rgba(0x000000, 0xC0));
-    gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(ms > 12.0f || gui_perf_coast_overspeed ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
+    bool over = ms > 12.0f || cpu > 12.0f || gui_perf_coast_overspeed;
+    gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(over ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
 }
 #endif
 

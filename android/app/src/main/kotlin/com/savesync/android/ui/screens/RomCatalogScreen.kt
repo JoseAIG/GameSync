@@ -215,6 +215,7 @@ fun RomCatalogScreen(
         if (!loading && (!loaded || error != null)) viewModel.fetchRomCatalog()
     }
     val settings by viewModel.settings.collectAsState()
+    val serverConfigured by viewModel.serverConfigured.collectAsState()
 
     // Claim focus for the rom list on entry so the search OutlinedTextField
     // doesn't auto-focus and pop the keyboard. Search is only focused when
@@ -561,7 +562,7 @@ fun RomCatalogScreen(
                     loading && catalog.isEmpty() -> {
                         CenterLoader(text = "Loading catalog…")
                     }
-                    error != null && catalog.isEmpty() && settings.serverUrl.isBlank() -> {
+                    error != null && catalog.isEmpty() && serverConfigured == false -> {
                         CenterMessage(
                             title = "No server set",
                             detail = "Add your GameSync server in Settings to browse its games.",

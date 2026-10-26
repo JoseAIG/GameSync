@@ -163,7 +163,8 @@ fun SaveDetailScreen(
     val allRows by viewModel.allRows.collectAsState()
     val detailState by viewModel.saveDetailState.collectAsState()
     val serverMeta by viewModel.serverMeta.collectAsState()
-    val settings by viewModel.settings.collectAsState()
+    // null until the stored settings are read: no "No server" flash.
+    val serverConfigured by viewModel.serverConfigured.collectAsState()
     // App-wide notices: a message survives this screen leaving, so a result
     // that navigates back does so at once instead of after the snackbar.
     val notifier = LocalGsNotifier.current
@@ -683,7 +684,7 @@ fun SaveDetailScreen(
         // Server conditions that change what the statuses below mean.
         StatusBanners(
             state = BannerState(
-                serverUrlBlank = settings.serverUrl.isBlank(),
+                serverUrlBlank = serverConfigured == false,
                 serverOnline = LocalServerOnline.current,
             ),
             onOpenSettings = { onNavigateToTab(SETTINGS_TAB) },
@@ -764,7 +765,7 @@ fun SaveDetailScreen(
             is ServerMetaState.NotFound -> FactsGroup("Server", note = "No save on the server yet")
             is ServerMetaState.Error -> FactsGroup("Server", note = "Couldn't reach the server: ${meta.message}", noteIsError = true)
             is ServerMetaState.Loading -> FactsGroup("Server", note = "Checking the server…")
-            is ServerMetaState.Idle -> if (settings.serverUrl.isBlank()) FactsGroup("Server", note = "No server set")
+            is ServerMetaState.Idle -> if (serverConfigured == false) FactsGroup("Server", note = "No server set")
         }
 
         // ── Gamepad-navigable actions ───────────────────────────────

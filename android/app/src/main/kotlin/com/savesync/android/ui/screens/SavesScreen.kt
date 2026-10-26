@@ -369,12 +369,13 @@ fun SavesScreen(
     // The header button's lambda is remembered; it reads the current list.
     val currentSaves by rememberUpdatedState(saves)
     val currentlySyncing by rememberUpdatedState(isSyncing)
-    val currentServerUrl by rememberUpdatedState(settings.serverUrl)
+    val serverConfigured by viewModel.serverConfigured.collectAsState()
+    val currentServerConfigured by rememberUpdatedState(serverConfigured)
     fun requestSyncAll() {
         if (currentlySyncing) return
         // No server: the same dialog for X and the header button, which
         // stays enabled so touch and pad behave the same.
-        if (currentServerUrl.isBlank()) {
+        if (currentServerConfigured == false) {
             showConnectServer = true
             return
         }
@@ -470,7 +471,7 @@ fun SavesScreen(
         // Ongoing conditions, within the banner budget.
         StatusBanners(
             state = BannerState(
-                serverUrlBlank = settings.serverUrl.isBlank(),
+                serverUrlBlank = serverConfigured == false,
                 serverOnline = LocalServerOnline.current,
                 conflictCount = conflictIds.size,
                 missingFolderCount = overrideWarnings.size,

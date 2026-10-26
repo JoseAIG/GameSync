@@ -545,6 +545,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
     /**
+     * Whether a server URL is set: null until the stored settings have been
+     * read.  [settings] starts as an empty Settings(), so checking its URL
+     * would flash "No server set" on every launch.
+     */
+    val serverConfigured: StateFlow<Boolean?> = settingsStore.settingsFlow
+        .map { it.serverUrl.isNotBlank() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
      * Auto-detected system → folder path, derived by scanning the romScanDir subfolders.
      * Not persisted — refreshed on demand via [detectSystemFolders].
      */
@@ -597,6 +607,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** One GET /status for the header dot. */
     fun pingServer() {
         viewModelScope.launch { pingServerNow() }
+    }
+
+    /** What a server check found: the URL it used and the answer. */
+    data class ServerCheck(val serverUrl: String, val online: Boolean?)
+
+    /** [pingServerNow] plus the URL it checked, for the header dot's notice. */
+    suspend fun checkServer(): ServerCheck {
+        val online = pingServerNow()
+        return ServerCheck(settingsStore.settingsFlow.first().serverUrl, online)
     }
 
     /**

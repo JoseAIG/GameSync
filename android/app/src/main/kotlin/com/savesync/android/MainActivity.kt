@@ -533,15 +533,14 @@ private fun MainApp() {
     val notifier = remember(snackbarHostState, haptics) {
         GsNotifier(snackbarHostState, appScope, haptics)
     }
-    val settings by viewModel.settings.collectAsState()
-    val serverConfigured = settings.serverUrl.isNotBlank()
+    // Unknown (null) until the stored settings are read: treat as configured.
+    val serverConfigured = viewModel.serverConfigured.collectAsState().value != false
     // Tapping the header's status dot re-checks the server and says what it found.
     val onServerDotClick: () -> Unit = remember(viewModel, notifier, appScope) {
         {
             appScope.launch {
-                val online = viewModel.pingServerNow()
-                val url = viewModel.settings.value.serverUrl
-                notifier.show(GsNotice(GsNoticeKind.Info, serverCheckMessage(url, online)))
+                val check = viewModel.checkServer()
+                notifier.show(GsNotice(GsNoticeKind.Info, serverCheckMessage(check.serverUrl, check.online)))
             }
         }
     }

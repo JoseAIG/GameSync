@@ -885,11 +885,10 @@ static void draw_progress(Download *dl, u64 done, u64 total) {
     ui_progress(&p);
 }
 
-// Read the keys; true if the user wants out (B held, or the app closing)
+// Read the input; true if the user wants out (B held or the Cancel pill
+// touched, or the app closing)
 static bool cancel_requested(void) {
-    if (!aptMainLoop()) return true;
-    hidScanInput();
-    return (hidKeysHeld() & KEY_B) != 0;
+    return ui_progress_cancel_poll();
 }
 
 static bool download_wait(u32 seconds, void *user) {
@@ -1328,11 +1327,11 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
 
     UiNav nav = UI_NAV_EXIT;  // the app is closing unless a key says otherwise
     hidScanInput();
-    while (aptMainLoop()) {
-        draw_frame(cat);
-        hidScanInput();
-        u32 down = hidKeysDown();
-        u32 rep = hidKeysDownRepeat();
+    UiInput in;
+    for (bool first = true; ui_input_scan(&in); first = false) {
+        if (!first) draw_frame(cat);
+        u32 down = in.down;
+        u32 rep = in.rep;
 
         UiNav n = ui_tab_nav(down);
         if (n != UI_NAV_STAY) {
@@ -1349,8 +1348,8 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
         if (rep & KEY_UP) move_to(cat, cat->selected - 1, true);
         if (rep & KEY_RIGHT) move_to(cat, cat->selected + CAT_ROWS, false);
         if (rep & KEY_LEFT) move_to(cat, cat->selected - CAT_ROWS, false);
-        if ((down & KEY_TOUCH) && cat->total > 0) {
-            int i = ui_list_touch(CAT_LIST_Y, CAT_ROWS, CAT_ROW_H, cat->total, cat->scroll);
+        if (in.t_down && cat->total > 0) {
+            int i = ui_list_touch(in.ty, CAT_LIST_Y, CAT_ROWS, CAT_ROW_H, cat->total, cat->scroll);
             if (i >= 0) move_to(cat, i, false);
         }
 

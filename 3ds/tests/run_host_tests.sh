@@ -36,4 +36,7 @@ gcc $CFLAGS $HOST_INC -o "$out/test_config_file" tests/test_config_file.c source
 gcc $CFLAGS -o "$out/test_ui_format" tests/test_ui_format.c source/ui_format.c
 "$out/test_ui_format"
 
+gcc $CFLAGS $HOST_INC -o "$out/test_ui_gesture" tests/test_ui_gesture.c source/ui_gesture.c source/gui_motion.c -lm
+"$out/test_ui_gesture"
+
 rm -rf "$out"

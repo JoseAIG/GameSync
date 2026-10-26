@@ -12,9 +12,22 @@
 #include "gui.h"
 #include "sync.h"
 #include "ui_format.h"
+#include "ui_gesture.h"
 
 void ui_init(void);
 void ui_exit(void);
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+// One snapshot per frame: aptMainLoop() + hidScanInput(), the keys, the
+// accelerated repeat and the filtered touch (see ui_gesture.h). False when
+// the app is closing. Every interactive loop reads its input through this.
+bool ui_input_scan(UiInput *in);
+// Ignore the finger on the screen (if any) until it lifts. Every modal
+// calls it when it opens and before it returns.
+void ui_input_latch_touch(void);
 
 // What the formatting helpers need to know about this console (set once
 // the config is loaded)
@@ -71,7 +84,11 @@ typedef struct {
 } UiButton;
 
 // Modal card on the bottom screen. Returns the key that closed it (one of the
-// buttons' keys), 0 if the app is closing. With count == 0 any button closes it.
+// buttons' keys), 0 if the app is closing. Every button is also a touch
+// target (commits on touch-up; the button with A, else the last, is the
+// filled one). With count == 0 it is a message with one "A Continue":
+// A/B/X/Y/START/SELECT/L/R close it, and so does a touch-up anywhere
+// (returns KEY_TOUCH).
 u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count);
 // Copy `s` cut to one line of dialog body text (for lists of names)
 void ui_body_line(const char *s, char *out, int out_size);
@@ -89,12 +106,19 @@ typedef struct {
     const char *right;    // under the bar, right ("18%")
     const char *info1;    // extra lines (speed, time)
     const char *info2;
-    bool cancel_hint;     // "Hold B to cancel"
+    bool cancel_hint;     // a "B Cancel" pill (see ui_progress_cancel_poll)
     UiTone tone;
 } UiProgress;
 
 // Draw one frame: backdrop + progress card. Doesn't wait for vsync.
 void ui_progress(const UiProgress *p);
+// For work that polls between progress frames: reads the input and returns
+// true once B is held or a finger is on the card's Cancel pill (or the app
+// is closing). It stays true for the rest of that operation, whose next
+// frames then say "Cancelling..." with the pill pressed. Downloads poll a
+// few times a second and can't see a release reliably, so touching the
+// pill commits right away, like holding B.
+bool ui_progress_cancel_poll(void);
 // Indeterminate progress card with a message
 void ui_busy(const char *title, const char *message);
 
@@ -173,8 +197,8 @@ typedef void (*UiRowFn)(void *ctx, int index, float x, float y, float w, float h
 void ui_list(UiListAnim *anim, float x, float y, float w, int rows, float row_h,
              int count, int selected, int scroll, UiRowFn row, void *ctx);
 
-// Row under a touch on the bottom screen, or -1
-int ui_list_touch(float y, int rows, float row_h, int count, int scroll);
+// Row of a list at (_, y) under a touch at height `ty`, or -1
+int ui_list_touch(float ty, float y, int rows, float row_h, int count, int scroll);
 
 // ---------------------------------------------------------------------------
 // Save list (main screen)

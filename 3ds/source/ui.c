@@ -15,6 +15,7 @@ static UiBackdrop backdrop = { splash_top, splash_bottom, NULL };
 
 void ui_init(void) {
     gui_init();
+    ui_gesture_set_clock(gui_clock_ms);
 }
 
 void ui_exit(void) {
@@ -67,12 +68,33 @@ void ui_device_label(const char *console_id, char *out, int out_size) {
     ui_device_label_for(console_id, local_console_id, out, out_size);
 }
 
-// Wait for the next frame's input; false if the app is closing
-static bool next_input(u32 *down) {
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+static UiTouchTrack touch_track;
+static UiRepeat key_repeat;
+
+bool ui_input_scan(UiInput *in) {
+    memset(in, 0, sizeof(*in));
     if (!aptMainLoop()) return false;
     hidScanInput();
-    *down = hidKeysDown();
+    in->down = hidKeysDown();
+    in->held = hidKeysHeld();
+    in->up = hidKeysUp();
+    in->t_ms = gui_clock_ms();
+    in->rep = ui_repeat_accel(&key_repeat, in->held, hidKeysDownRepeat(), in->t_ms);
+    // hidTouchRead() reads (0, 0) on the release frame: only sample while held
+    bool raw = (in->held & KEY_TOUCH) != 0;
+    touchPosition tp = { 0, 0 };
+    if (raw) hidTouchRead(&tp);
+    ui_touch_update(&touch_track, raw, tp.px, tp.py, in);
     return true;
+}
+
+void ui_input_latch_touch(void) {
+    // hidKeysHeld() is the last scan: callers drain with hidScanInput() first
+    ui_touch_latch(&touch_track, (hidKeysHeld() & KEY_TOUCH) != 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,82 +182,130 @@ static void layout_body(const char *body, float width, DialogLines *out) {
     }
 }
 
-static float buttons_width(const UiButton *b, int count) {
-    float w = 0;
-    for (int i = 0; i < count; i++)
-        w += gui_button_w(b[i].button) + 4 + gui_text_w(GUI_S_SMALL, b[i].label) + (i ? 12 : 0);
-    return w;
+#define DLG_MAX_BUTTONS 4
+#define DLG_BTN_AREA 40   // the card's bottom: 30 px buttons, 10 px margin below
+
+static float body_height(const DialogLines *lines) {
+    float lh = gui_line_h(GUI_S_BODY), h = 0;
+    for (int i = 0; i < lines->count; i++) h += lines->text[i][0] ? lh : lh / 2;
+    return h;
 }
 
+// Buttons split the card's inner width equally, 8 px apart. The touch
+// rects reach 5 px above and below each pill and halfway into the gaps,
+// so the row has no dead strips.
+static void card_buttons(float card_y, float card_h, int n, GuiRect *draw, GuiRect *touch) {
+    float by = card_y + card_h - 10 - GUI_BTN_H;
+    float avail = DLG_W - 24;
+    float bw = (avail - GUI_BTN_GAP * (n - 1)) / (n > 0 ? n : 1);
+    for (int i = 0; i < n; i++) {
+        float x = DLG_X + 12 + i * (bw + GUI_BTN_GAP);
+        draw[i] = gui_rect_make(x, by, bw, GUI_BTN_H);
+        touch[i] = gui_rect_make(x - GUI_BTN_GAP / 2.0f, by - 5, bw + GUI_BTN_GAP, GUI_BTN_H + 10);
+    }
+}
+
+// The button that confirms (has A) is the filled one; with none, the last
+static int primary_button(const UiButton *b, int n) {
+    for (int i = 0; i < n; i++)
+        if (b[i].keys & KEY_A) return i;
+    return n - 1;
+}
+
+typedef struct {
+    float y, h;
+    GuiRect draw[DLG_MAX_BUTTONS], touch[DLG_MAX_BUTTONS];
+    int n, primary;
+} DialogGeom;
+
+static void dialog_geom(const DialogLines *lines, const UiButton *b, int n, DialogGeom *g) {
+    g->h = 24 + 10 + body_height(lines) + 10 + DLG_BTN_AREA;
+    if (g->h > GUI_H - 12) g->h = GUI_H - 12;
+    g->y = (GUI_H - g->h) / 2;
+    g->n = n;
+    g->primary = primary_button(b, n);
+    card_buttons(g->y, g->h, n, g->draw, g->touch);
+}
+
+// `pressed`: index a finger is on, or -1; `held`: keys held down
 static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines,
-                        const UiButton *buttons, int count) {
+                        const UiButton *buttons, const DialogGeom *g, int pressed, u32 held) {
     float lh = gui_line_h(GUI_S_BODY);
-    float body_h = 0;
-    for (int i = 0; i < lines->count; i++) body_h += lines->text[i][0] ? lh : lh / 2;
-    float h = 24 + 10 + body_h + 10 + 24;
-    if (h > GUI_H - 12) h = GUI_H - 12;
-    float y = (GUI_H - h) / 2;
     u32 hex = ui_tone_hex(tone);
 
     gui_dim();
-    gui_card(DLG_X, y, DLG_W, h, title, hex);
+    gui_card(DLG_X, g->y, DLG_W, g->h, title, hex);
 
-    float ty = y + 24 + 9;
+    float ty = g->y + 24 + 9;
     for (int i = 0; i < lines->count; i++) {
         if (!lines->text[i][0]) {
             ty += lh / 2;
             continue;
         }
-        // Too long for the screen: stop above the button row
-        if (ty + lh > y + h - 24 - 4) break;
+        // Too long for the screen: stop above the buttons
+        if (ty + lh > g->y + g->h - DLG_BTN_AREA - 2) break;
         u32 color = lines->style[i] == 1 ? HEX_DIM : (lines->style[i] == 2 ? hex : HEX_TEXT);
         gui_text(DLG_X + 12, ty, GUI_S_BODY, gui_rgb(color), GUI_LEFT, lines->text[i]);
         ty += lh;
     }
 
-    // Button row, right-aligned
-    float by = y + h - 24;
-    gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
-    float x = DLG_X + DLG_W - 12 - buttons_width(buttons, count);
-    for (int i = 0; i < count; i++) {
-        if (i) x += 12;
-        x += gui_button(x, by + 12.5f, buttons[i].button) + 4;
-        x += gui_text_mid(x, by, 24, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, 0, buttons[i].label);
+    for (int i = 0; i < g->n; i++) {
+        bool down = pressed == i || (held & buttons[i].keys) != 0;
+        gui_btn(g->draw[i], buttons[i].button, buttons[i].label,
+                i == g->primary ? GUI_BTN_PRIMARY : GUI_BTN_TONAL, hex, down);
     }
 }
 
+static bool progress_cancelling;
+
 u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count) {
     static const UiButton any = { 0, "A", "Continue" };
-    bool any_key = (count == 0);
+    bool any_key = (count <= 0);
     if (any_key) {
         buttons = &any;
         count = 1;
     }
+    if (count > DLG_MAX_BUTTONS) count = DLG_MAX_BUTTONS;
     DialogLines lines;
     layout_body(body, DLG_W - 24, &lines);
+    DialogGeom g;
+    dialog_geom(&lines, buttons, count, &g);
+    progress_cancelling = false;   // whatever was cancelling has been answered
 
-    // Ignore keys still held from whatever opened the dialog
+    // Ignore keys still held from whatever opened the dialog, and the
+    // finger that opened it
     hidScanInput();
-    while (aptMainLoop()) {
+    ui_input_latch_touch();
+    UiTap tap = UI_TAP_INIT;
+    u32 armed = 0, result = 0;   // keys pressed since the dialog opened
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        int pressed = -1;
+        armed = (armed | in.down) & in.held;
+        if (any_key) {
+            u32 keys = in.down & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_START | KEY_SELECT | KEY_L | KEY_R);
+            if (keys) { result = keys; break; }
+            // A tap anywhere closes a message, on release
+            if (in.t_up) { result = KEY_TOUCH; break; }
+            if (in.t_held) pressed = 0;
+        } else {
+            int hit = ui_tap_buttons(&tap, &in, g.touch, count, &pressed);
+            if (hit >= 0) { result = buttons[hit].keys; break; }
+            for (int i = 0; i < count && !result; i++)
+                if (in.down & buttons[i].keys) result = in.down & buttons[i].keys;
+            if (result) break;
+        }
+
         gui_begin(true);
         gui_screen(GUI_TOP);
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_dialog(tone, title, &lines, buttons, count);
+        draw_dialog(tone, title, &lines, buttons, &g, pressed, any_key ? 0 : (in.held & armed));
         gui_end();
-
-        u32 down;
-        if (!next_input(&down)) break;
-        if (any_key) {
-            u32 keys = down & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_START | KEY_SELECT | KEY_L | KEY_R | KEY_TOUCH);
-            if (keys) return keys;
-            continue;
-        }
-        for (int i = 0; i < count; i++)
-            if (down & buttons[i].keys) return down & buttons[i].keys;
     }
-    return 0;
+    ui_input_latch_touch();
+    return result;
 }
 
 void ui_body_line(const char *s, char *out, int out_size) {
@@ -291,7 +361,12 @@ static float smooth_progress(const UiProgress *p) {
     return shown.x;
 }
 
+static GuiRect progress_cancel_rect;   // touch rect of the last card's Cancel pill
+static bool progress_cancel_shown;
+
 void ui_progress(const UiProgress *p) {
+    if (!p->cancel_hint) progress_cancelling = false;   // another operation
+    bool cancelling = p->cancel_hint && progress_cancelling;
     float bar_frac = smooth_progress(p);
     gui_begin(false);
     gui_screen(GUI_TOP);
@@ -308,7 +383,7 @@ void ui_progress(const UiProgress *p) {
     if (p->frac <= 1) h += 14 + lh_small + 6;
     if (p->info1) h += lh_small;
     if (p->info2) h += lh_small;
-    if (p->cancel_hint) h += 22;
+    if (p->cancel_hint) h += DLG_BTN_AREA;
     h += 6;
     float y = (GUI_H - h) / 2;
     gui_card(DLG_X, y, DLG_W, h, p->title ? p->title : "Working", hex);
@@ -319,16 +394,22 @@ void ui_progress(const UiProgress *p) {
         ty += gui_line_h(GUI_S_BODY) + 2;
     }
     if (p->status) {
+        char cancel_status[32];
+        const char *status = p->status;
+        if (cancelling) {
+            snprintf(cancel_status, sizeof(cancel_status), "Cancelling%s", gui_ellipsis());
+            status = cancel_status;
+        }
         if (p->frac < 0) {
-            gui_spinner(x + 5, ty + lh_small / 2 + 1, 5, gui_rgb(hex));
-            gui_text_fit(x + 16, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, p->status);
+            gui_spinner(x + 5, ty + lh_small / 2 + 1, 5, gui_rgb(cancelling ? HEX_MUTED : hex));
+            gui_text_fit(x + 16, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, status);
         } else {
-            gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->status);
+            gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, status);
         }
         ty += lh_small + 4;
     }
     if (p->frac <= 1) {
-        gui_bar(x, ty, w, 10, bar_frac, gui_rgb(hex));
+        gui_bar(x, ty, w, 10, bar_frac, gui_rgb(cancelling ? HEX_MUTED : hex));
         ty += 14;
         if (p->left) gui_text(x, ty, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, p->left);
         if (p->right) gui_text(x + w, ty, GUI_S_SMALL, gui_rgb(hex), GUI_RIGHT, p->right);
@@ -342,15 +423,26 @@ void ui_progress(const UiProgress *p) {
         gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info2);
         ty += lh_small;
     }
+    progress_cancel_shown = p->cancel_hint;
     if (p->cancel_hint) {
-        float by = y + h - 22;
-        gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
-        float bx = DLG_X + 12;
-        bx += gui_text_mid(bx, by, 22, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, 0, "Hold ") ;
-        bx += gui_button(bx, by + 11.5f, "B") + 4;
-        gui_text_mid(bx, by, 22, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, 0, "to cancel");
+        GuiRect draw;
+        card_buttons(y, h, 1, &draw, &progress_cancel_rect);
+        gui_btn(draw, "B", "Cancel", GUI_BTN_TONAL, hex, cancelling);
     }
     gui_end();
+}
+
+bool ui_progress_cancel_poll(void) {
+    if (progress_cancelling) return true;
+    UiInput in;
+    if (!ui_input_scan(&in)) {
+        progress_cancelling = true;   // the app is closing
+        return true;
+    }
+    if ((in.held & KEY_B) ||
+        (progress_cancel_shown && in.t_held && gui_rect_contains(progress_cancel_rect, in.tx, in.ty)))
+        progress_cancelling = true;
+    return progress_cancelling;
 }
 
 void ui_busy(const char *title, const char *message) {
@@ -381,59 +473,72 @@ static void choice_row(void *ctx, int index, float x, float y, float w, float h,
     gui_text_mid(x + 13, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, w - 26, c->items[index]);
 }
 
+static const UiButton choice_buttons[2] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", "Select" } };
+
+typedef struct {
+    int rows;
+    float y, h, list_y;
+    GuiRect draw[2], touch[2];
+} ChoiceGeom;
+
+static void choice_geom(int count, ChoiceGeom *g) {
+    g->rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
+    g->h = 24 + 4 + g->rows * CHOICE_ROW_H + 2 + DLG_BTN_AREA;
+    g->y = (GUI_H - g->h) / 2;
+    g->list_y = g->y + 24 + 4;
+    card_buttons(g->y, g->h, 2, g->draw, g->touch);
+}
+
 static void draw_choice(UiTone tone, const char *title, const char *const *items, int count,
-                        int selected, int scroll, UiListAnim *anim, float *list_y) {
-    int rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
-    float h = 24 + 6 + rows * CHOICE_ROW_H + 6 + 24;
-    float y = (GUI_H - h) / 2;
+                        int selected, int scroll, UiListAnim *anim, const ChoiceGeom *g,
+                        int pressed, u32 held) {
     u32 hex = ui_tone_hex(tone);
     gui_dim();
-    gui_card(DLG_X, y, DLG_W, h, title, hex);
-    float ly = y + 24 + 6;
-    *list_y = ly;
+    gui_card(DLG_X, g->y, DLG_W, g->h, title, hex);
     ChoiceView c = { items };
-    list_draw(anim, DLG_X + 3, ly, DLG_W - 6, rows, CHOICE_ROW_H, count, selected, scroll, choice_row, &c, true);
-    static const UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", "Select" } };
-    float by = y + h - 24;
-    gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
-    float x = DLG_X + DLG_W - 12 - buttons_width(b, 2);
-    for (int i = 0; i < 2; i++) {
-        if (i) x += 12;
-        x += gui_button(x, by + 12.5f, b[i].button) + 4;
-        x += gui_text_mid(x, by, 24, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, 0, b[i].label);
-    }
+    list_draw(anim, DLG_X + 3, g->list_y, DLG_W - 6, g->rows, CHOICE_ROW_H, count, selected, scroll, choice_row, &c, true);
+    for (int i = 0; i < 2; i++)
+        gui_btn(g->draw[i], choice_buttons[i].button, choice_buttons[i].label,
+                i == 1 ? GUI_BTN_PRIMARY : GUI_BTN_TONAL, hex,
+                pressed == i || (held & choice_buttons[i].keys));
 }
 
 int ui_choose(UiTone tone, const char *title, const char *const *items, int count) {
     if (count <= 0) return -1;
-    int selected = 0, scroll = 0;
-    int rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
+    int selected = 0, scroll = 0, result = -1;
+    ChoiceGeom g;
+    choice_geom(count, &g);
     UiListAnim anim = { 0 };
+    UiTap tap = UI_TAP_INIT;
+    u32 armed = 0;
     hidScanInput();
-    while (aptMainLoop()) {
-        float list_y = 0;
+    ui_input_latch_touch();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        armed = (armed | in.down) & in.held;
+        ui_list_keys(&anim, in.rep, count, g.rows, &selected);
+        if (selected < scroll) scroll = selected;
+        if (selected >= scroll + g.rows) scroll = selected - g.rows + 1;
+        if (in.t_down) {
+            // A tap picks the row right away
+            int i = ui_list_touch(in.ty, g.list_y, g.rows, CHOICE_ROW_H, count, scroll);
+            if (i >= 0) { result = i; break; }
+        }
+        int pressed = -1;
+        int hit = ui_tap_buttons(&tap, &in, g.touch, 2, &pressed);
+        if (hit == 0 || (in.down & KEY_B)) break;
+        if (hit == 1 || (in.down & KEY_A)) { result = selected; break; }
+
         gui_begin(true);
         gui_screen(GUI_TOP);
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_choice(tone, title, items, count, selected, scroll, &anim, &list_y);
+        draw_choice(tone, title, items, count, selected, scroll, &anim, &g, pressed, in.held & armed);
         gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        ui_list_keys(&anim, rep, count, rows, &selected);
-        if (selected < scroll) scroll = selected;
-        if (selected >= scroll + rows) scroll = selected - rows + 1;
-        if (down & KEY_TOUCH) {
-            // A tap picks the row right away
-            int i = ui_list_touch(list_y, rows, CHOICE_ROW_H, count, scroll);
-            if (i >= 0) return i;
-        }
-        if (down & KEY_B) return -1;
-        if (down & KEY_A) return selected;
     }
-    return -1;
+    ui_input_latch_touch();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -567,11 +672,9 @@ void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected) {
     *selected = s;
 }
 
-int ui_list_touch(float y, int rows, float row_h, int count, int scroll) {
-    touchPosition t;
-    hidTouchRead(&t);
-    if (t.py < y || t.py >= y + rows * row_h) return -1;
-    int i = scroll + (int)((t.py - y) / row_h);
+int ui_list_touch(float ty, float y, int rows, float row_h, int count, int scroll) {
+    if (ty < y || ty >= y + rows * row_h) return -1;
+    int i = scroll + (int)((ty - y) / row_h);
     return (i >= 0 && i < count) ? i : -1;
 }
 
@@ -1077,19 +1180,13 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
     UiBackdrop prev = ui_set_backdrop(history_top, history_bottom, &v);
     char *result = NULL;
     hidScanInput();
-    while (aptMainLoop()) {
-        gui_begin(true);
-        gui_screen(GUI_TOP);
-        history_top(&v);
-        gui_screen(GUI_BOTTOM);
-        history_bottom(&v);
-        gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        ui_list_keys(&v.anim, rep, v.count, HIST_ROWS, &v.selected);
-        if (down & KEY_TOUCH) {
-            int i = ui_list_touch(GUI_HEADER_H, HIST_ROWS, HIST_ROW_H, v.count, v.scroll);
+    ui_input_latch_touch();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 down = in.down;
+        ui_list_keys(&v.anim, in.rep, v.count, HIST_ROWS, &v.selected);
+        if (in.t_down) {
+            int i = ui_list_touch(in.ty, GUI_HEADER_H, HIST_ROWS, HIST_ROW_H, v.count, v.scroll);
             if (i >= 0) v.selected = i;
         }
         if (v.selected < v.scroll) v.scroll = v.selected;
@@ -1103,6 +1200,13 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
             }
             break;
         }
+
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        history_top(&v);
+        gui_screen(GUI_BOTTOM);
+        history_bottom(&v);
+        gui_end();
     }
     ui_restore_backdrop(prev);
     return result;
@@ -1298,16 +1402,17 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
     SettingsResult result = SETTINGS_EXIT;  // the app is closing
 
     hidScanInput();
-    while (aptMainLoop()) {
-        gui_begin(true);
-        gui_screen(GUI_TOP);
-        config_top(&v);
-        gui_screen(GUI_BOTTOM);
-        config_bottom(&v);
-        gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
+    UiInput in;
+    for (bool first = true; ui_input_scan(&in); first = false) {
+        if (!first) {
+            gui_begin(true);
+            gui_screen(GUI_TOP);
+            config_top(&v);
+            gui_screen(GUI_BOTTOM);
+            config_bottom(&v);
+            gui_end();
+        }
+        u32 down = in.down, rep = in.rep;
         if (rep & KEY_UP) {
             if (v.selected == 0) ui_list_edge(&config_anim, UI_EDGE_WRAP);
             v.selected = (v.selected - 1 + CFG_ITEMS) % CFG_ITEMS;
@@ -1325,8 +1430,8 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
             if (v.selected == CFG_ITEMS - 1) ui_list_edge(&config_anim, UI_EDGE_CLAMP_BOTTOM);
             v.selected = CFG_ITEMS - 1;
         }
-        if (down & KEY_TOUCH) {
-            int i = ui_list_touch(GUI_HEADER_H + 4, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, 0);
+        if (in.t_down) {
+            int i = ui_list_touch(in.ty, GUI_HEADER_H + 4, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, 0);
             if (i >= 0) v.selected = i;
         }
 
@@ -1452,16 +1557,10 @@ static bool dpad_editor(const char *title, const char *hint, char *buffer, int m
     bool confirmed = false;
 
     hidScanInput();
-    while (aptMainLoop()) {
-        gui_begin(true);
-        gui_screen(GUI_TOP);
-        edit_top(&e);
-        gui_screen(GUI_BOTTOM);
-        edit_bottom(&e);
-        gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
+    ui_input_latch_touch();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 down = in.down, rep = in.rep;
         if (rep & KEY_LEFT && e.cursor > 0) e.cursor--;
         if (rep & KEY_RIGHT && e.cursor < e.len) e.cursor++;
         if (rep & (KEY_UP | KEY_DOWN)) {
@@ -1488,7 +1587,15 @@ static bool dpad_editor(const char *title, const char *hint, char *buffer, int m
             break;
         }
         if (down & KEY_B) break;
+
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        edit_top(&e);
+        gui_screen(GUI_BOTTOM);
+        edit_bottom(&e);
+        gui_end();
     }
+    ui_input_latch_touch();
     ui_restore_backdrop(prev);
     if (confirmed) snprintf(buffer, max_len, "%s", temp);
     return confirmed;

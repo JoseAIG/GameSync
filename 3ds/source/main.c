@@ -668,17 +668,10 @@ static UiNav saves_tab(void) {
     }
 
     hidScanInput();
-    while (aptMainLoop()) {
-        gui_begin(true);
-        gui_screen(GUI_TOP);
-        saves_top(NULL);
-        gui_screen(GUI_BOTTOM);
-        saves_bottom(NULL);
-        gui_end();
-
-        hidScanInput();
-        u32 kDown = hidKeysDown();
-        u32 kRep = hidKeysDownRepeat();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 kDown = in.down;
+        u32 kRep = in.rep;
 
         UiNav nav = ui_tab_nav(kDown);
         if (nav != UI_NAV_STAY) return nav;
@@ -690,13 +683,11 @@ static UiNav saves_tab(void) {
         }
 
         // Tap a row to select it; a tap on its mark box toggles the mark
-        if (kDown & KEY_TOUCH && filtered_count > 0) {
-            int i = ui_list_touch(SAVES_LIST_Y, SAVES_ROWS, SAVES_ROW_H, filtered_count, scroll_offset);
+        if (in.t_down && filtered_count > 0) {
+            int i = ui_list_touch(in.ty, SAVES_LIST_Y, SAVES_ROWS, SAVES_ROW_H, filtered_count, scroll_offset);
             if (i >= 0) {
-                touchPosition touch;
-                hidTouchRead(&touch);
                 selected = i;
-                if (touch.px < SAVES_MARK_W) toggle_mark(filtered[i]);
+                if (in.tx < SAVES_MARK_W) toggle_mark(filtered[i]);
             }
         }
 
@@ -736,6 +727,13 @@ static UiNav saves_tab(void) {
             clear_marks();
             set_status(UI_TONE_ACCENT, "Marks cleared");
         }
+
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        saves_top(NULL);
+        gui_screen(GUI_BOTTOM);
+        saves_bottom(NULL);
+        gui_end();
     }
     return UI_NAV_EXIT;
 }

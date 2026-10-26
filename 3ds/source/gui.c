@@ -267,6 +267,14 @@ static bool fit(const char *s, float scale, float max_w, char *out, size_t size)
     return true;
 }
 
+const char *gui_ellipsis(void) { return ellipsis; }
+
+void gui_fit(const char *s, float scale, float max_w, char *out, size_t size) {
+    if (!out || size == 0) return;
+    if (!s) s = "";
+    fit(s, scale, max_w, out, size);
+}
+
 float gui_text_fit(float x, float y, float scale, u32 color, GuiAlign align, float max_w, const char *s) {
     if (!s || !*s) return 0;
     char buf[GUI_WRAP_LINE * 2];

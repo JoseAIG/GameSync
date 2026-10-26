@@ -238,6 +238,10 @@ u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *
     return 0;
 }
 
+void ui_body_line(const char *s, char *out, int out_size) {
+    gui_fit(s, GUI_S_BODY, DLG_W - 24, out, (size_t)out_size);
+}
+
 void ui_message(UiTone tone, const char *title, const char *body) {
     ui_dialog(tone, title, body, NULL, 0);
 }

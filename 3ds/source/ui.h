@@ -73,6 +73,8 @@ typedef struct {
 // Modal card on the bottom screen. Returns the key that closed it (one of the
 // buttons' keys), 0 if the app is closing. With count == 0 any button closes it.
 u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count);
+// Copy `s` cut to one line of dialog body text (for lists of names)
+void ui_body_line(const char *s, char *out, int out_size);
 // Message closed by any button
 void ui_message(UiTone tone, const char *title, const char *body);
 // A = yes, B = no

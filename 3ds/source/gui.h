@@ -137,6 +137,10 @@ float gui_text_w(float scale, const char *s);
 float gui_text(float x, float y, float scale, u32 color, GuiAlign align, const char *s);
 float gui_textf(float x, float y, float scale, u32 color, GuiAlign align, const char *fmt, ...)
     __attribute__((format(printf, 6, 7)));
+// The ellipsis in use: U+2026 when the system font has it, else "..."
+const char *gui_ellipsis(void);
+// Copy `s` into `out`, cut to `max_w` with an ellipsis if needed
+void gui_fit(const char *s, float scale, float max_w, char *out, size_t size);
 // Cut to `max_w` with an ellipsis
 float gui_text_fit(float x, float y, float scale, u32 color, GuiAlign align, float max_w, const char *s);
 // Vertically centred in a box of height h

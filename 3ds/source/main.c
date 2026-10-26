@@ -280,10 +280,58 @@ static void do_history(void) {
     }
 }
 
+static bool is_conflict(const TitleInfo *t) {
+    return t->in_conflict || t->sync_state == TSTATE_CONFLICT;
+}
+
+// Append up to 3 names of titles[] passing `pick` as UI_HI lines (one line
+// each), then "...and N more" for the rest of `total`
+static int append_names(char *body, int size, int pos, bool (*pick)(const TitleInfo *), int total,
+                        const char *style) {
+    int listed = 0;
+    for (int i = 0; i < title_count && listed < 3 && pos < size; i++) {
+        if (!pick(&titles[i])) continue;
+        char name[GUI_WRAP_LINE];
+        ui_body_line(titles[i].name, name, sizeof(name));
+        pos += snprintf(body + pos, size - pos, "%s%s\n", style, name);
+        listed++;
+    }
+    if (total > listed && pos < size)
+        pos += snprintf(body + pos, size - pos, "%s%sand %d more\n", style, gui_ellipsis(), total - listed);
+    return pos < size ? pos : size - 1;
+}
+
+static bool is_marked(const TitleInfo *t) { return t->marked; }
+static bool is_marked_conflict(const TitleInfo *t) { return t->marked && is_conflict(t); }
+
 static void do_batch_upload(int marked) {
-    char body[96];
-    snprintf(body, sizeof(body), "Upload %d marked save%s to the server?", marked, marked == 1 ? "" : "s");
-    if (!ui_confirm(UI_TONE_WARN, "Upload marked saves", body, "Upload")) {
+    // Say plainly when an upload replaces a server copy that changed too
+    int conflicts = 0;
+    for (int i = 0; i < title_count; i++)
+        if (is_marked_conflict(&titles[i])) conflicts++;
+
+    char body[640], title[64], yes[24];
+    int pos;
+    UiTone tone;
+    snprintf(yes, sizeof(yes), "Upload %d", marked);
+    if (conflicts > 0) {
+        tone = UI_TONE_ERR;
+        snprintf(title, sizeof(title), "Replace %d server cop%s?", conflicts, conflicts == 1 ? "y" : "ies");
+        pos = append_names(body, sizeof(body), 0, is_marked_conflict, conflicts, UI_HI);
+        pos += snprintf(body + pos, sizeof(body) - pos,
+                        "These changed on the server too. Uploading replaces the server's copies; "
+                        "the server keeps them in History.");
+        if (marked > conflicts && pos < (int)sizeof(body))
+            snprintf(body + pos, sizeof(body) - pos, "\n" UI_DIM "%d other marked save%s upload%s too.",
+                     marked - conflicts, marked - conflicts == 1 ? "" : "s", marked - conflicts == 1 ? "s" : "");
+    } else {
+        tone = UI_TONE_WARN;
+        snprintf(title, sizeof(title), "Upload %d marked save%s?", marked, marked == 1 ? "" : "s");
+        pos = append_names(body, sizeof(body), 0, is_marked, marked, UI_HI);
+        snprintf(body + pos, sizeof(body) - pos,
+                 UI_DIM "The server keeps its current copies in History.");
+    }
+    if (!ui_confirm(tone, title, body, yes)) {
         set_status(UI_TONE_ACCENT, "Batch upload cancelled");
         return;
     }
@@ -508,25 +556,18 @@ static void do_sync_all(void) {
     if (summary.conflicts > 0) {
         // Auto-mark conflicting titles for batch resolve
         for (int i = 0; i < title_count; i++)
-            if (titles[i].in_conflict || titles[i].sync_state == TSTATE_CONFLICT)
+            if (is_conflict(&titles[i]))
                 titles[i].marked = true;
 
+        // The instruction first, so it can never be cut off by a long list
         char body[640];
         int pos = snprintf(body, sizeof(body),
-                           UI_DIM "Up %d \xC2\xB7 Down %d \xC2\xB7 OK %d \xC2\xB7 Failed %d\n\n",
-                           summary.uploaded, summary.downloaded, summary.up_to_date, summary.failed);
-        int listed = 0;
-        for (int i = 0; i < title_count && pos < (int)sizeof(body) - 80 && listed < 5; i++) {
-            if (titles[i].in_conflict) {
-                pos += snprintf(body + pos, sizeof(body) - pos, UI_HI "%.40s\n", titles[i].name);
-                listed++;
-            }
-        }
-        if (summary.conflicts > listed)
-            pos += snprintf(body + pos, sizeof(body) - pos, UI_HI "...and %d more\n",
-                            summary.conflicts - listed);
+                           UI_HI "Marked for upload: A uploads them all (this console wins). "
+                           "To choose per game, press B to unmark, then A on each one.\n");
+        pos = append_names(body, sizeof(body), pos, is_conflict, summary.conflicts, "");
         snprintf(body + pos, sizeof(body) - pos,
-                 "\nThey are marked: press A on the list to upload them all, or resolve each one.");
+                 UI_DIM "Up %d \xC2\xB7 Down %d \xC2\xB7 OK %d \xC2\xB7 Failed %d",
+                 summary.uploaded, summary.downloaded, summary.up_to_date, summary.failed);
         char title[64];
         snprintf(title, sizeof(title), "%d conflict%s", summary.conflicts, summary.conflicts == 1 ? "" : "s");
         ui_message(UI_TONE_WARN, title, body);

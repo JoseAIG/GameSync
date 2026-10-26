@@ -34,18 +34,27 @@ Configuration is done via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
-| `SYNC_API_KEY` | `dev-key-change-me` | API key required by all clients |
+| `SYNC_API_KEY` | *(none — must be set)* | API key required by all clients; at least 16 characters, placeholders are refused (e.g. `openssl rand -hex 32`) |
 | `SYNC_SAVE_DIR` | `./saves` | Directory where saves are stored |
 | `SYNC_HOST` | `0.0.0.0` | Bind address |
 | `SYNC_PORT` | `8000` | Server port |
-| `SYNC_MAX_HISTORY_VERSIONS` | `5` | Number of previous save versions to keep |
+| `SYNC_MAX_HISTORY_VERSIONS` | `10` | Number of previous save versions to keep |
+| `SYNC_RELOAD` | `true` | Auto-reload on code changes (`run.py`); set `false` in production |
+| `SYNC_DISABLE_DOCS` | `false` | Hide `/docs`, `/redoc` and `/openapi.json` |
+| `SYNC_ALLOW_QUERY_API_KEY` | `true` | Accept `?api_key=` in URLs (web UI download links) |
+| `SYNC_MAX_UPLOAD_BYTES` | `67108864` | Largest accepted request body (64 MiB) |
+| `SYNC_MAX_DECOMPRESSED_BYTES` | `268435456` | Largest uncompressed bundle payload (256 MiB) |
+| `SYNC_UPDATE_REPO` | `pepasjc/GameSync` | GitHub repo used by the 3DS/NDS update proxy |
+| `SYNC_UPDATE_PROXY_ENABLED` | `true` | Disable the update proxy entirely with `false` |
+
+See [server/README.md](server/README.md#configuration) for the full list.
 
 ```bash
 # Linux / macOS
-SYNC_API_KEY=your-secret-key uv run python run.py
+SYNC_API_KEY="$(openssl rand -hex 32)" uv run python run.py
 
-# Windows
-set SYNC_API_KEY=your-secret-key
+# Windows (use any random string of 16+ characters)
+set SYNC_API_KEY=<your-random-key>
 uv run python run.py
 ```
 

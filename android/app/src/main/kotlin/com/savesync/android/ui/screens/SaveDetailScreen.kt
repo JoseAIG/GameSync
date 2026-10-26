@@ -29,6 +29,13 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.GsBanner
+import com.savesync.android.ui.components.GsListRow
+import com.savesync.android.ui.components.GsDialogChoice
+import com.savesync.android.ui.components.GsDialog
+import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material.icons.filled.CheckBox
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.RadioButtonChecked
 import com.savesync.android.ui.components.GsInputMode
 import com.savesync.android.ui.components.GsPill
 import com.savesync.android.ui.components.LocalInputMode
@@ -59,8 +66,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
@@ -71,10 +76,8 @@ import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Sync
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -85,9 +88,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -208,150 +209,23 @@ fun SaveDetailScreen(
         }
     }
 
-    // Normalize name picker dialog
+    // Normalize name and Saturn archive pickers: GsDialogs with their own
+    // cursor (Up/Down through onNavigate), A applies, B cancels.
     val pickerState = normalizePickerState
     if (pickerState is NormalizePickerState.Visible) {
-        var selectedIndex by remember(pickerState) { mutableStateOf(0) }
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissNormalizePicker() },
-            title = { Text("Choose canonical name") },
-            text = {
-                Column {
-                    Text(
-                        text = "Select the correct version. " +
-                               "USA releases are listed first; demos and protos last.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    // Scrollable list so long regional variant lists don't overflow
-                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
-                        itemsIndexed(pickerState.options) { index, name ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { selectedIndex = index }
-                                    .padding(vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(
-                                    selected = selectedIndex == index,
-                                    onClick = { selectedIndex = index }
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Column {
-                                    Text(name, style = MaterialTheme.typography.bodyMedium)
-                                    when {
-                                        index == 0 ->
-                                            Text(
-                                                "★ Recommended",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.primary
-                                            )
-                                        name == pickerState.entry.displayName ->
-                                            Text(
-                                                "current name",
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                                            )
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.applyNormalizationChoice(
-                        pickerState.entry,
-                        pickerState.options[selectedIndex]
-                    )
-                }) { Text("Apply") }
-            },
-            dismissButton = {
-                TextButton(onClick = { viewModel.dismissNormalizePicker() }) { Text("Cancel") }
-            }
+        NormalizePickerDialog(
+            state = pickerState,
+            onApply = { name -> viewModel.applyNormalizationChoice(pickerState.entry, name) },
+            onDismiss = { viewModel.dismissNormalizePicker() },
         )
     }
 
     val saturnPickerState = saturnArchivePickerState
     if (saturnPickerState is SaturnArchivePickerState.Visible) {
-        var selectedArchives by remember(saturnPickerState) {
-            mutableStateOf<Set<String>>(
-                saturnPickerState.options
-                    .filter { it.preselected }
-                    .mapTo(linkedSetOf()) { it.archiveFamily }
-            )
-        }
-        AlertDialog(
-            onDismissRequest = { viewModel.dismissSaturnArchivePicker() },
-            title = { Text("Choose Saturn save archives") },
-            text = {
-                Column {
-                    Text(
-                        text = "Pick the archive names in YabaSanshiro's backup memory that belong to this game.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(bottom = 8.dp)
-                    )
-                    if (saturnPickerState.hiddenSelectedArchives.isNotEmpty()) {
-                        Text(
-                            text = "Auto-selected: ${saturnPickerState.hiddenSelectedArchives.joinToString(", ")}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(bottom = 8.dp)
-                        )
-                    }
-                    LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
-                        itemsIndexed(saturnPickerState.options) { _, option ->
-                            val checked = option.archiveFamily in selectedArchives
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        selectedArchives = selectedArchives.toMutableSet().apply {
-                                            if (checked) remove(option.archiveFamily) else add(option.archiveFamily)
-                                        }
-                                    }
-                                    .padding(vertical = 2.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Checkbox(
-                                    checked = checked,
-                                    onCheckedChange = { isChecked ->
-                                        selectedArchives = selectedArchives.toMutableSet().apply {
-                                            if (isChecked) add(option.archiveFamily) else remove(option.archiveFamily)
-                                        }
-                                    }
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Column {
-                                    Text(option.archiveFamily, style = MaterialTheme.typography.bodyMedium)
-                                    Text(
-                                        option.archiveNames.joinToString(", "),
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        option.detail,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.applySaturnArchiveSelection(selectedArchives)
-                }) { Text("Use Selection") }
-            },
-            dismissButton = {
-                TextButton(onClick = { viewModel.dismissSaturnArchivePicker() }) { Text("Cancel") }
-            }
+        SaturnArchivePickerDialog(
+            state = saturnPickerState,
+            onApply = { selected -> viewModel.applySaturnArchiveSelection(selected) },
+            onDismiss = { viewModel.dismissSaturnArchivePicker() },
         )
     }
 
@@ -1223,4 +1097,184 @@ private fun formatSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${"%.1f".format(bytes / 1024.0)} KB"
     else -> "${"%.2f".format(bytes / (1024.0 * 1024))} MB"
+}
+
+// ── Pickers ────────────────────────────────────────────────────────────────
+
+/** Where a picker's cursor starts: the first current/selected option, else the first. */
+internal fun <T> pickerCursorStart(options: List<T>, isCurrent: (T) -> Boolean): Int =
+    options.indexOfFirst(isCurrent).coerceAtLeast(0)
+
+/** One Up/Down step of a picker cursor, held at the ends (no wrap). */
+internal fun movePickerCursor(cursor: Int, dy: Int, size: Int): Int =
+    if (size <= 0) 0 else (cursor + dy).coerceIn(0, size - 1)
+
+/**
+ * "Choose canonical name": one choice from the server's candidates.  The
+ * cursor starts on the current name (else the recommended first entry),
+ * Up/Down move it, A applies it, B cancels.  A tap moves the cursor and
+ * doesn't apply, so touch and pad pick the same way.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun NormalizePickerDialog(
+    state: NormalizePickerState.Visible,
+    onApply: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val options = state.options
+    var cursor by remember(state) {
+        mutableIntStateOf(pickerCursorStart(options) { it == state.entry.displayName })
+    }
+    val requesters = remember(state) { List(options.size) { BringIntoViewRequester() } }
+    GsDialog(
+        title = "Choose canonical name",
+        message = "Select the correct version. USA releases are listed first; demos and protos last.",
+        onDismiss = onDismiss,
+        onNavigate = { dy -> cursor = movePickerCursor(cursor, dy, options.size) },
+        choices = listOf(
+            GsDialogChoice(GsButton.B, "Cancel", onDismiss),
+            GsDialogChoice(
+                GsButton.A,
+                "Apply",
+                { options.getOrNull(cursor)?.let(onApply) },
+                color = GsColors.Accent,
+                textColor = GsColors.Ink,
+            ),
+        ),
+        body = {
+            // Inside the dialog's composition, where the rows are laid out.
+            LaunchedEffect(cursor) { requesters.getOrNull(cursor)?.bringIntoView() }
+            options.forEachIndexed { index, name ->
+                val chosen = index == cursor
+                GsListRow(
+                    isSelected = chosen,
+                    onClick = { cursor = index },
+                    modifier = Modifier
+                        .padding(vertical = 2.dp)
+                        .bringIntoViewRequester(requesters[index]),
+                ) {
+                    // The chosen value shows in both input modes; the row
+                    // highlight is the pad cursor.
+                    Icon(
+                        if (chosen) Icons.Filled.RadioButtonChecked else Icons.Filled.RadioButtonUnchecked,
+                        contentDescription = null,
+                        tint = if (chosen) GsColors.Accent else gsTextMuted(),
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(name, style = MaterialTheme.typography.bodyMedium, color = GsColors.Text)
+                        when {
+                            index == 0 -> Text(
+                                "Recommended",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = GsColors.Accent2,
+                            )
+                            name == state.entry.displayName -> Text(
+                                "Current name",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = gsTextMuted(),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+    )
+}
+
+/**
+ * "Choose Saturn save archives": several choices.  Up/Down move the
+ * cursor, X includes or leaves out the archive under it (X = secondary,
+ * dialog-internal; A never toggles because A = "Use selection"), B
+ * cancels.  A tap toggles that row and moves the cursor there.  The cursor
+ * starts on the first archive already selected.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun SaturnArchivePickerDialog(
+    state: SaturnArchivePickerState.Visible,
+    onApply: (Set<String>) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val options = state.options
+    var selected by remember(state) {
+        mutableStateOf<Set<String>>(options.filter { it.preselected }.mapTo(linkedSetOf()) { it.archiveFamily })
+    }
+    var cursor by remember(state) {
+        mutableIntStateOf(pickerCursorStart(options) { it.preselected })
+    }
+    val requesters = remember(state) { List(options.size) { BringIntoViewRequester() } }
+    fun toggle(index: Int) {
+        val family = options.getOrNull(index)?.archiveFamily ?: return
+        selected = if (family in selected) selected - family else selected + family
+    }
+    val cursorChecked = options.getOrNull(cursor)?.archiveFamily in selected
+    val pad = LocalInputMode.current == GsInputMode.Pad
+    GsDialog(
+        title = "Choose Saturn save archives",
+        message = "Pick the archive names in YabaSanshiro's backup memory that belong to this game.",
+        onDismiss = onDismiss,
+        onNavigate = { dy -> cursor = movePickerCursor(cursor, dy, options.size) },
+        choices = buildList {
+            add(GsDialogChoice(GsButton.B, "Cancel", onDismiss))
+            // The pad toggle; touch toggles by tapping the row instead.
+            if (pad && options.isNotEmpty()) {
+                add(GsDialogChoice(GsButton.X, if (cursorChecked) "Leave out" else "Include", { toggle(cursor) }))
+            }
+            add(
+                GsDialogChoice(
+                    GsButton.A,
+                    "Use selection",
+                    { onApply(selected) },
+                    color = GsColors.Accent,
+                    textColor = GsColors.Ink,
+                )
+            )
+        },
+        body = {
+            LaunchedEffect(cursor) { requesters.getOrNull(cursor)?.bringIntoView() }
+            if (state.hiddenSelectedArchives.isNotEmpty()) {
+                Text(
+                    text = "Auto-selected: ${state.hiddenSelectedArchives.joinToString(", ")}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = GsColors.Accent2,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+            }
+            options.forEachIndexed { index, option ->
+                val checked = option.archiveFamily in selected
+                GsListRow(
+                    isSelected = index == cursor,
+                    onClick = {
+                        cursor = index
+                        toggle(index)
+                    },
+                    modifier = Modifier
+                        .padding(vertical = 2.dp)
+                        .bringIntoViewRequester(requesters[index]),
+                ) {
+                    Icon(
+                        if (checked) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
+                        contentDescription = null,
+                        tint = if (checked) GsColors.Accent else gsTextMuted(),
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(option.archiveFamily, style = MaterialTheme.typography.bodyMedium, color = GsColors.Text)
+                        Text(
+                            option.archiveNames.joinToString(", "),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = GsColors.Accent2,
+                        )
+                        Text(
+                            option.detail,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = gsTextMuted(),
+                        )
+                    }
+                }
+            }
+        },
+    )
 }

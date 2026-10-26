@@ -74,6 +74,10 @@ import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.max
 import androidx.compose.animation.Crossfade
@@ -105,6 +109,16 @@ enum class GsButton(val label: String, val color: Color?, val round: Boolean) {
     SELECT("SELECT", null, false),
     START("START", null, false),
     DPAD("D-pad", null, false),
+    ;
+
+    /** How TalkBack says this input in a hint ("A: Sync", "L2 or R2: Filter"). */
+    val spoken: String
+        get() = when (this) {
+            L2R2 -> "L2 or R2"
+            SELECT -> "Select"
+            START -> "Start"
+            else -> label
+        }
 }
 
 /** Coloured round A/B/X/Y glyph, or a grey rounded-rect shoulder/menu glyph. */
@@ -115,6 +129,8 @@ fun ButtonGlyph(button: GsButton, modifier: Modifier = Modifier) {
         val diameter = max(20.dp, with(LocalDensity.current) { (11.sp * 1.8f).toDp() })
         Box(
             modifier = modifier
+                // Decorative: the hint or choice it sits in carries the words.
+                .clearAndSetSemantics {}
                 .size(diameter)
                 .clip(CircleShape)
                 .background(button.color ?: GsColors.PanelHi),
@@ -130,6 +146,7 @@ fun ButtonGlyph(button: GsButton, modifier: Modifier = Modifier) {
     } else {
         Box(
             modifier = modifier
+                .clearAndSetSemantics {}
                 .heightIn(min = 18.dp)
                 .clip(RoundedCornerShape(5.dp))
                 .background(GsColors.PanelHi)
@@ -223,7 +240,13 @@ fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             hints.forEach { hint ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // One node per hint, read as "A: Sync".
+                Row(
+                    modifier = Modifier.clearAndSetSemantics {
+                        contentDescription = "${hint.button.spoken}: ${hint.label}"
+                    },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     ButtonGlyph(hint.button)
                     Spacer(Modifier.width(5.dp))
                     Text(
@@ -318,6 +341,10 @@ fun GsListRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     containerColor: Color = GsColors.Panel,
+    /** TalkBack's name for a tap on the row ("Download", "Manage", "Open details"). */
+    clickLabel: String? = null,
+    /** The row's state as TalkBack reads it — normally its status pill's text. */
+    stateDescription: String? = null,
     content: @Composable RowScope.() -> Unit,
 ) {
     val shape = GsShapes.Row
@@ -327,6 +354,7 @@ fun GsListRow(
     val scale = rememberPressScale(pressed, GS_ROW_PRESS_SCALE)
     // High contrast: the selection border goes from Accent@55% to solid.
     val selectedBorder = if (LocalHighContrast.current) GsColors.Accent else GsColors.Accent.copy(alpha = 0.55f)
+    val rowState = rowStateDescription(stateDescription, selected)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -342,7 +370,17 @@ fun GsListRow(
                 if (selected) Modifier.border(1.dp, selectedBorder, shape)
                 else Modifier
             )
-            .clickable(interactionSource = source, indication = rememberRipple(), onClick = onClick),
+            // One TalkBack node per row: its texts, then its state ("Synced,
+            // selected"), then the named action.
+            .semantics(mergeDescendants = true) {
+                if (rowState != null) this.stateDescription = rowState
+            }
+            .clickable(
+                interactionSource = source,
+                indication = rememberRipple(),
+                onClickLabel = clickLabel,
+                onClick = onClick,
+            ),
     ) {
         Box(
             modifier = Modifier
@@ -360,6 +398,15 @@ fun GsListRow(
         )
     }
 }
+
+/**
+ * What TalkBack says for a row's state: its status, plus "selected" when it
+ * is the pad cursor.  Null when there is nothing to say.
+ */
+internal fun rowStateDescription(status: String?, selected: Boolean): String? =
+    listOfNotNull(status?.takeIf { it.isNotBlank() }, if (selected) "selected" else null)
+        .joinToString(", ")
+        .ifEmpty { null }
 
 /** Press scale of a list row. */
 const val GS_ROW_PRESS_SCALE = 0.98f
@@ -395,11 +442,25 @@ fun GsPill(
     modifier: Modifier = Modifier,
     filled: Boolean = false,
     textColor: Color = textVariantOf(color),
+    /**
+     * Inside a merged row whose stateDescription already says it: hidden
+     * from TalkBack.  Standalone (the detail header) it stays a text node.
+     */
+    decorative: Boolean = false,
+    /** What TalkBack reads instead of [text] (e.g. without a leading glyph). */
+    spokenText: String? = null,
 ) {
     val high = LocalHighContrast.current
     val shape = GsShapes.Pill
     Box(
         modifier = modifier
+            .then(
+                when {
+                    decorative -> Modifier.clearAndSetSemantics {}
+                    spokenText != null -> Modifier.clearAndSetSemantics { contentDescription = spokenText }
+                    else -> Modifier
+                }
+            )
             .clip(shape)
             .background(
                 when {
@@ -437,6 +498,8 @@ fun GsBanner(
     onClick: (() -> Unit)? = null,
     /** A 16dp icon before the text, tinted like it (e.g. Warning). */
     leadingIcon: ImageVector? = null,
+    /** TalkBack's name for the tap ("Review conflicts", "Fix emulator folder"). */
+    clickLabel: String? = null,
 ) {
     val high = LocalHighContrast.current
     val textColor = textVariantOf(color)
@@ -451,8 +514,12 @@ fun GsBanner(
             .background(GsColors.Panel)
             .then(if (high) Modifier.border(1.dp, textColor, shape) else Modifier)
             .then(
-                if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick)
-                else Modifier
+                if (onClick != null) {
+                    Modifier.clickable(role = Role.Button, onClickLabel = clickLabel, onClick = onClick)
+                } else {
+                    // Read as one sentence, not word groups.
+                    Modifier.semantics(mergeDescendants = true) {}
+                }
             ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -708,7 +775,13 @@ private fun DialogChoice(
             }
             .clip(GsShapes.Choice)
             .background(background)
-            .clickable(interactionSource = source, indication = rememberRipple(), onClick = onClick)
+            // Read as its label with Role.Button (the glyph is decorative).
+            .clickable(
+                interactionSource = source,
+                indication = rememberRipple(),
+                role = Role.Button,
+                onClick = onClick,
+            )
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

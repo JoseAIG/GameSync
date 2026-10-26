@@ -1,5 +1,8 @@
 package com.savesync.android.ui.screens
 
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.VisibilityThreshold
@@ -484,7 +487,13 @@ private fun DownloadRow(
         }
     }
 
-    GsListRow(isSelected = isSelected, onClick = onSelect, modifier = modifier) {
+    GsListRow(
+        isSelected = isSelected,
+        onClick = onSelect,
+        modifier = modifier,
+        clickLabel = "Select",
+        stateDescription = downloadStatusLabel(download.status),
+    ) {
         Column(modifier = Modifier.weight(1f)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(modifier = Modifier.weight(1f)) {
@@ -505,7 +514,7 @@ private fun DownloadRow(
                     )
                 }
                 Spacer(Modifier.size(8.dp))
-                StatusPill(download.status)
+                StatusPill(download.status, decorative = true)
                 StatusActions(
                     status = download.status,
                     onPause = onPause,
@@ -523,7 +532,10 @@ private fun DownloadRow(
                 // — the older Float form is deprecated and gone in 1.3.
                 LinearProgressIndicator(
                     progress = { progress.value },
-                    modifier = Modifier.fillMaxWidth(),
+                    // TalkBack reads the real fraction, not the gliding one.
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .semantics { progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f) },
                     color = statusColor(download.status),
                     trackColor = GsColors.Line,
                 )
@@ -566,16 +578,19 @@ private fun statusColor(status: String): Color = when (status) {
     else -> GsColors.Info
 }
 
+/** The status pill's word, also the row's TalkBack state. */
+internal fun downloadStatusLabel(status: String): String = when (status) {
+    DownloadEntity.Status.COMPLETED -> "Done"
+    DownloadEntity.Status.FAILED -> "Failed"
+    DownloadEntity.Status.PAUSED -> "Paused"
+    DownloadEntity.Status.CANCELLED -> "Cancelled"
+    DownloadEntity.Status.QUEUED -> "Queued"
+    else -> "Downloading"
+}
+
 @Composable
-private fun StatusPill(status: String) {
-    val label = when (status) {
-        DownloadEntity.Status.COMPLETED -> "Done"
-        DownloadEntity.Status.FAILED -> "Failed"
-        DownloadEntity.Status.PAUSED -> "Paused"
-        DownloadEntity.Status.CANCELLED -> "Cancelled"
-        DownloadEntity.Status.QUEUED -> "Queued"
-        else -> "Downloading"
-    }
+private fun StatusPill(status: String, decorative: Boolean = false) {
+    val label = downloadStatusLabel(status)
     val base = statusColor(status)
     // Muted / Dim are not legible on a tint (or on a lifted row): their pill
     // text steps up to TextMuted.
@@ -583,7 +598,7 @@ private fun StatusPill(status: String) {
     // A status change tints over rather than flipping.
     val color by animateColorAsState(base, GsMotion.standard(), label = "downloadPill")
     val textColor by animateColorAsState(textTarget, GsMotion.standard(), label = "downloadPillText")
-    GsPill(text = label, color = color, textColor = textColor)
+    GsPill(text = label, color = color, textColor = textColor, decorative = decorative)
 }
 
 @Composable

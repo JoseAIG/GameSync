@@ -580,7 +580,7 @@ private fun InstalledRomCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    GsListRow(isSelected = isSelected, onClick = onClick, modifier = modifier) {
+    GsListRow(isSelected = isSelected, onClick = onClick, modifier = modifier, clickLabel = "Manage") {
         SystemBadge(rom.system)
         Column(modifier = Modifier.weight(1f)) {
             Text(

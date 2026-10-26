@@ -461,6 +461,7 @@ private fun FolderRow(
     GsListRow(
         isSelected = focused,
         onClick = onClick,
+        clickLabel = "Open",
         modifier = Modifier
             .padding(vertical = 2.dp)
             .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)

@@ -735,7 +735,7 @@ private fun CatalogRomCard(
     isSelected: Boolean,
     onClick: () -> Unit,
 ) {
-    GsListRow(isSelected = isSelected, onClick = onClick) {
+    GsListRow(isSelected = isSelected, onClick = onClick, clickLabel = "Download") {
         SystemBadge(rom.system)
         Column(modifier = Modifier.weight(1f)) {
             Row(

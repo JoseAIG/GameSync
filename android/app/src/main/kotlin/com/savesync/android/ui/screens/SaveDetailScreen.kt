@@ -1150,6 +1150,8 @@ private fun NormalizePickerDialog(
                 GsListRow(
                     isSelected = chosen,
                     onClick = { cursor = index },
+                    clickLabel = "Choose",
+                    stateDescription = if (chosen) "Chosen" else null,
                     modifier = Modifier
                         .padding(vertical = 2.dp)
                         .bringIntoViewRequester(requesters[index]),
@@ -1250,6 +1252,8 @@ private fun SaturnArchivePickerDialog(
                         cursor = index
                         toggle(index)
                     },
+                    clickLabel = if (checked) "Leave out" else "Include",
+                    stateDescription = if (checked) "Included" else "Left out",
                     modifier = Modifier
                         .padding(vertical = 2.dp)
                         .bringIntoViewRequester(requesters[index]),

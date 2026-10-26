@@ -1,5 +1,6 @@
 package com.savesync.android.ui.screens
 
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import android.content.Intent
 import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
@@ -875,7 +876,18 @@ private fun SaveCard(
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    GsListRow(isSelected = isSelected, onClick = onClick, modifier = modifier) {
+    GsListRow(
+        isSelected = isSelected,
+        onClick = onClick,
+        modifier = modifier,
+        // A tap opens the detail screen (A smart-syncs; see the hints).
+        clickLabel = "Open details",
+        stateDescription = when {
+            syncing -> "Syncing"
+            syncStatus == null -> "Checking"
+            else -> syncStatus.label
+        },
+    ) {
         // Left: game name + optional canonical subtitle
         Column(modifier = Modifier.weight(1f)) {
             Text(
@@ -921,7 +933,7 @@ private fun SaveCard(
                 transitionSpec = { fadeIn(GsMotion.fade()) togetherWith fadeOut(GsMotion.fadeOut()) },
                 label = "rowPill",
             ) { busy ->
-                if (busy) SyncingPill() else SyncStatusBadge(syncStatus)
+                if (busy) SyncingPill() else SyncStatusBadge(syncStatus, decorative = true)
             }
         }
     }
@@ -933,6 +945,8 @@ private fun SyncingPill() {
     val high = LocalHighContrast.current
     Row(
         modifier = Modifier
+            // The row's stateDescription says "Syncing".
+            .clearAndSetSemantics {}
             .clip(GsShapes.Pill)
             .background(if (high) GsColors.PanelHi else GsColors.Info.copy(alpha = 0.16f))
             .then(if (high) Modifier.border(1.dp, GsColors.InfoText, GsShapes.Pill) else Modifier)
@@ -1035,13 +1049,22 @@ private fun StatusFilterChip(
 
 // ── Non-focusable badge composables ──────────────────────────────────────────
 
-/** A status pill; null renders the neutral "Checking…" pill (no icon). */
+/**
+ * A status pill; null renders the neutral "Checking…" pill (no icon).
+ * [decorative] inside a row that already reads the status; standalone (the
+ * detail header) TalkBack reads its label without the glyph.
+ */
 @Composable
-fun SyncStatusBadge(status: SaveSyncStatus?) {
+fun SyncStatusBadge(status: SaveSyncStatus?, decorative: Boolean = false) {
     if (status == null) {
-        GsPill(text = "Checking…", color = GsColors.Muted, textColor = gsTextMuted())
+        GsPill(text = "Checking…", color = GsColors.Muted, textColor = gsTextMuted(), decorative = decorative)
     } else {
-        GsPill(text = "${statusIcon(status)} ${status.label}", color = statusChipColor(status))
+        GsPill(
+            text = "${statusIcon(status)} ${status.label}",
+            color = statusChipColor(status),
+            decorative = decorative,
+            spokenText = status.label,
+        )
     }
 }
 

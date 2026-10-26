@@ -54,6 +54,7 @@ fun StatusBanners(
                         text = "No server set — open Settings to connect",
                         color = GsColors.Info,
                         onClick = onOpenSettings,
+                        clickLabel = "Open Settings",
                     )
                     BannerKind.ServerUnreachable -> GsBanner(
                         text = "Server unreachable — statuses are from this device only",
@@ -63,11 +64,13 @@ fun StatusBanners(
                         text = conflictBannerText(last[0] as Int, hintsOn),
                         color = GsColors.Err,
                         onClick = onReviewConflicts,
+                        clickLabel = "Review conflicts",
                     )
                     BannerKind.FolderMissing -> GsBanner(
                         text = last[1] as String,
                         color = GsColors.Warn,
                         onClick = onFixFolders,
+                        clickLabel = "Fix emulator folder",
                     )
                 }
             }

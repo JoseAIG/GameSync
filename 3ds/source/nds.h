@@ -10,7 +10,8 @@
 int nds_scan(const char *nds_dir, TitleInfo *titles, int offset, int max_titles);
 
 // Read NDS save file into ArchiveFile format (single file "save.dat").
-// Returns number of files (1) on success, -1 on error.
+// Returns number of files (1) on success, ARCHIVE_ERR_OPEN if the .sav does
+// not exist, ARCHIVE_ERR_READ if it exists but can't be read.
 // Caller must call archive_free_files() when done.
 int nds_read_save(const char *sav_path, ArchiveFile *files, int max_files);
 
@@ -20,7 +21,8 @@ int nds_read_save(const char *sav_path, ArchiveFile *files, int max_files);
 bool nds_write_save(const char *sav_path, const ArchiveFile *files, int file_count);
 
 // Read save from a physical NDS cartridge via SPI.
-// Detects save type automatically. Returns 1 on success, -1 on error.
+// Detects save type automatically. Returns 1 on success, ARCHIVE_ERR_OPEN if
+// no save chip is detected, ARCHIVE_ERR_READ if reading it fails.
 // Caller must call archive_free_files() when done.
 int nds_cart_read_save(ArchiveFile *files, int max_files);
 

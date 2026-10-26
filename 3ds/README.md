@@ -109,14 +109,32 @@ key that does the same thing.
 - **Saves**: the list is on the bottom screen, with All / 3DS / NDS sub-tabs, a
   mark box per row (when titles are marked, a `B N marked ×` chip in the header
   unmarks them all), a system tag (`3DS`, `NDS`, cyan `Cart` for game cards) and
-  a status dot. The top screen shows the selected title: name, title id,
-  product code, storage, its sync state (up to date, needs upload / download,
-  conflict, failed, or *manual sync* for game cards, which Sync All skips) and
-  the result of the last compare with the server. The bar above the footer
-  shows the last action's result.
-- **Smart Sync / details**: this console's and the server's copy side by side
-  (size, files, hash, last sync), with the verdict below and a confirmation
-  card on the bottom screen.
+  a state badge: a check (up to date, uploaded, downloaded), an up or down
+  arrow (needs upload / download), `!` (conflict), `×` (failed) or a small card
+  (*manual sync*: game cards, which Sync All skips). When a state changes a
+  ring briefly expands from its badge; a new mark pops in. A magnifier at the
+  right of the header searches the list by name (see below). The top screen
+  shows the selected title: name, its title id and product code as a caption,
+  where the save lives, and what the last compare found in words ("Only this
+  console changed", "Only the server changed" with the device and date,
+  "Matches the server · just now", "Both changed"), the server's size and
+  files and when it was last synced. A failed save shows why it failed. The
+  bar above the footer shows the last action's result; a new one slides in,
+  and after a few seconds it dims so it no longer looks current.
+- **Smart Sync / details**: this console's and the server's copy as two equal
+  cards side by side (whether this console's copy changed since the last sync
+  or the server's date, size and files, and which device it came from), with
+  the verdict below and a confirmation card on the bottom screen that says
+  what will happen. A save that is already in sync opens no card: the status
+  bar says it matches the server. An upload much smaller than the server's
+  copy warns that it may be a new game or an old backup. Hashes are only
+  shown in **Y** > *Compare with the server*.
+- **Errors**: when something fails, a red card says what happened, whether
+  anything was changed (for example "Nothing was changed", or "Writing failed;
+  your previous save was put back") and what to do next, with **A** *Try
+  again* where retrying makes sense. If the server can't be reached, nothing
+  is uploaded or downloaded. After *Sync all* or a batch upload with
+  failures, a card lists the saves that failed and why.
 - **Progress**: syncs, restores, updates and catalog installs show a card with
   a progress bar (with speed, elapsed and remaining time for downloads).
   Downloads that can be stopped have a **B Cancel** button.
@@ -191,18 +209,31 @@ never reaches the screen underneath.
 |---|---|
 | A | Smart sync the selected save (or upload all marked titles) |
 | X | Sync all saves |
-| Y | Details: compare with the server, upload, download, history (restore an older version, after a confirmation), mark / unmark |
-| B | Unmark all marked titles (also a tap on the header's `N marked` chip) |
+| Y | Details: compare with the server, upload, download, history (restore an older version, after a confirmation), mark / unmark, search saves by name |
+| B | Unmark all marked titles (also a tap on the header's `N marked` chip); with nothing marked, clear the search |
+| ZR | Search saves by name (New 3DS) |
 | SELECT | All / 3DS / NDS |
 | Touch | Tap a row to select it; tap its mark box to mark / unmark it (on release, so a drag never toggles a mark) |
+
+**Search.** Tap the magnifier at the right of the header, press **ZR** (New
+3DS) or pick **Y** > *Search saves by name…*, and type part of a name (case
+and accents don't matter; an empty search shows everything). The search
+combines with All / 3DS / NDS and stays while you visit other tabs. While it
+is active the header shows the query as a pill (tap it to edit, tap its `×`
+to clear) and the count as "3 of 41". If nothing matches, the touch screen
+offers *Clear search* and *Edit search* buttons, so an Old 3DS (no ZR) can
+always change or clear it.
 
 The action bar shows **A** *Sync* (*Resolve* when the selected save is in
 conflict, *Upload N marked* when titles are marked), **X** *Sync all* and
 **Y** *Details*. Tapping the selected row doesn't sync: use the A button.
 Marking for a batch upload is on the touch screen (the mark box) or in the
-**Y** menu. When both copies of a save changed, the Smart Sync card offers
-**A** upload (the server keeps the old copy in its history), **X** download,
-**B** cancel.
+**Y** menu. When both copies of a save changed, the Smart Sync card shows two
+equal buttons under the two cards: **A** *Keep this console* (uploads; the
+server keeps its copy in its history) on the left and **X** *Keep server*
+(downloads; this console's copy is backed up to the SD first when Local
+backups is on) on the right, with **B** *Cancel* below. While you press one,
+the top screen outlines the copy it keeps and fades the other.
 
 ### Catalog
 
@@ -210,7 +241,7 @@ Marking for a batch upload is on the touch screen (the mark box) or in the
 |---|---|
 | A | Install the selected game (try again after an error) |
 | X | Only games with RetroAchievements / all games |
-| Y | Search (system keyboard; an empty search shows everything) |
+| Y / ZR | Search (system keyboard; an empty search shows everything; ZR on a New 3DS) |
 | B | Clear the search; hold B (or touch Cancel) to cancel a download |
 | SELECT | 3DS / NDS / DSi, whichever the server has |
 | Touch | Tap a game to select it, tap it again to install (after the prompt); the action bar has A *Install*, Y *Search* and X *RA only* (tinted while on) |
@@ -225,14 +256,16 @@ or *Run*); tapping the highlighted entry does the same.
 
 | Entry | What A does |
 |---|---|
-| Server URL, API key, NDS ROM folder | Edit (system keyboard); saved to `config.txt` right away |
+| Server URL, Alternate URL, API key, NDS ROM folder | Edit (system keyboard); saved to `config.txt` right away. A URL must start with `http://` or `https://` (the keyboard says so and stays open); an empty Alternate URL turns it off. The API key is typed hidden |
 | Rescan titles | Look for installed titles and DS saves again |
 | Refresh catalog | Ask the server to rescan its ROM folder, throw the cached catalog away and download it again |
 | Check for updates | Download and install the latest GameSync CIA |
 
-If the system keyboard can't start, a D-pad editor takes its place: Left /
-Right move the cursor, Up / Down change the character, Y inserts, X deletes,
-A confirms, B cancels.
+If the system keyboard can't start, a D-pad editor takes its place (for every
+text field, including the searches): Left / Right move the cursor, Up / Down
+change the character, Y inserts, X deletes, A confirms, B cancels. It checks
+the text like the keyboard does, and shows the API key as dots except the
+character being changed.
 
 ## Game catalog
 

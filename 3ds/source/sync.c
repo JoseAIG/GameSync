@@ -904,6 +904,10 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
         return file_count == -2 ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_BUNDLE;
     }
 
+    // Compute hash of the restored version while the file data is still valid
+    char hash[65];
+    bundle_compute_save_hash(files, file_count, hash);
+
     snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
     if (progress) progress(msg);
 
@@ -923,8 +927,6 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
     if (!ok) return SYNC_ERR_ARCHIVE;
 
     // Update last synced hash with the downloaded version
-    char hash[65];
-    bundle_compute_save_hash(files, file_count, hash);
     save_last_synced_hash(title->title_id_hex, hash);
 
     return SYNC_OK;

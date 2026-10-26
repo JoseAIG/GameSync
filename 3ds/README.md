@@ -42,7 +42,7 @@ make clean
 Copy `3dssync.3dsx` to `sdmc:/3ds/3dssync/3dssync.3dsx` on the 3DS SD card.
 
 ### Home menu app (.cia)
-Install `3dssync.cia` using FBI or trigger an in-app auto-update from the SELECT button.
+Install `3dssync.cia` using FBI, or update an installed copy from the config menu (L → Check for Updates).
 
 ## Configuration
 
@@ -68,6 +68,7 @@ The in-app config editor (L button) can also edit these values directly on the c
 | `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. |
 | `local_backups` | `3` | Before a download or history restore overwrites a save, the current save is copied to `sdmc:/3ds/3dssync/backups/<TITLEID>/<YYYYMMDD-HHMMSS>/`. This many copies are kept per title (oldest deleted first); `0` disables the copies. |
 | `tls_verify` | `1` | For `https://` server URLs, verify the server certificate. `0` accepts any certificate (the behaviour of older versions; use it for a self-signed server). Has no effect on `http://`. |
+| `update_check` | `1` | Allow *Check for Updates* in the config menu (L). The server looks up the latest GitHub release; the client downloads the CIA through the server and installs it. The download must match the size the server reports, and its SHA-256 when the server publishes one (`sha256`, or GitHub's `digest` field). `0` disables update checks and installs. |
 
 ### HTTPS
 

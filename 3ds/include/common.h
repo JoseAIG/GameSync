@@ -45,6 +45,7 @@ typedef struct {
     int utc_offset_minutes; // Console clock offset from UTC (e.g. -240 for UTC-4)
     int local_backups;      // Copies of the previous save kept before overwriting (0 = off)
     bool tls_verify;        // Verify HTTPS server certificates (default true)
+    bool update_check;      // Allow checking for / installing app updates (default true)
 } AppConfig;
 
 #endif // COMMON_H

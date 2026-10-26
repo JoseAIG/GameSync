@@ -74,6 +74,7 @@ bool config_load(AppConfig *config, char *error_out, int error_size) {
     config->utc_offset_minutes = 0;
     config->local_backups = 3;
     config->tls_verify = true;
+    config->update_check = true;
 
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) {
@@ -127,6 +128,9 @@ bool config_load(AppConfig *config, char *error_out, int error_size) {
         } else if (strcmp(key, "tls_verify") == 0) {
             // 0 = accept any HTTPS certificate (old behaviour)
             config->tls_verify = atoi(val) != 0;
+        } else if (strcmp(key, "update_check") == 0) {
+            // 0 = never contact the server for app updates
+            config->update_check = atoi(val) != 0;
         }
     }
 
@@ -271,6 +275,7 @@ bool config_save(const AppConfig *config) {
     fprintf(f, "utc_offset_minutes=%d\n", config->utc_offset_minutes);
     fprintf(f, "local_backups=%d\n", config->local_backups);
     fprintf(f, "tls_verify=%d\n", config->tls_verify ? 1 : 0);
+    fprintf(f, "update_check=%d\n", config->update_check ? 1 : 0);
 
     fclose(f);
     return true;

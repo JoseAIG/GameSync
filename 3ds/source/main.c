@@ -469,6 +469,8 @@ int main(int argc, char *argv[]) {
                 snprintf(status, sizeof(status), "Rescanned. %d title(s) found.", title_count);
             } else if (result == CONFIG_RESULT_SAVED) {
                 snprintf(status, sizeof(status), "Config saved. Server: %.30s", config.server_url);
+            } else if (result == CONFIG_RESULT_UPDATE && !config.update_check) {
+                snprintf(status, sizeof(status), "Updates disabled (update_check=0 in config)");
             } else if (result == CONFIG_RESULT_UPDATE) {
                 // Check for updates (moved from SELECT)
                 ui_draw_message("Checking for updates...");
@@ -484,12 +486,15 @@ int main(int argc, char *argv[]) {
                         "\x1b[33mUpdate available!\x1b[0m\n\n"
                         "Current: %s\n"
                         "Latest:  %s\n"
-                        "Size:    %lu KB\n\n"
+                        "Size:    %lu KB\n"
+                        "SHA-256: %s\n\n"
                         "Press A to download and install\n"
                         "Press B to cancel",
                         APP_VERSION,
                         update_info.latest_version,
-                        (unsigned long)(update_info.file_size / 1024));
+                        (unsigned long)(update_info.file_size / 1024),
+                        update_info.sha256[0] ? "will be verified"
+                                              : "not published (size check only)");
                     ui_draw_message(confirm_msg);
 
                     bool do_update = false;
@@ -505,8 +510,11 @@ int main(int argc, char *argv[]) {
 
                     if (do_update) {
                         ui_draw_message("Downloading update...");
-                        if (!update_download(&config, update_info.download_url, update_progress_cb)) {
-                            snprintf(status, sizeof(status), "\x1b[31mDownload failed!\x1b[0m");
+                        char download_error[128] = {0};
+                        if (!update_download(&config, &update_info, update_progress_cb,
+                                             download_error, sizeof(download_error))) {
+                            snprintf(status, sizeof(status), "\x1b[31mDownload failed:\x1b[0m %.80s",
+                                     download_error);
                         } else {
                             ui_draw_message("Installing update...\n\nPlease wait, do not power off.");
                             char install_error[128] = {0};

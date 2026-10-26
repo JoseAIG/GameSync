@@ -437,7 +437,11 @@ int main(int argc, char *argv[]) {
                         summary.failed);
                 }
             } else {
-                snprintf(status, sizeof(status), "\x1b[31mSync failed!\x1b[0m Check server.");
+                if (network_last_error()[0])
+                    snprintf(status, sizeof(status), "\x1b[31mSync failed!\x1b[0m %.60s",
+                             network_last_error());
+                else
+                    snprintf(status, sizeof(status), "\x1b[31mSync failed!\x1b[0m Check server.");
             }
             rebuild_filter();
             redraw = true;

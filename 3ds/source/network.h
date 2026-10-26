@@ -25,4 +25,8 @@ u8 *network_post_json(const AppConfig *config, const char *path,
                       const char *json_body,
                       u32 *out_size, u32 *out_status);
 
+// Short description of why the last request failed (empty string if the
+// last request reached the server). Includes httpc result codes.
+const char *network_last_error(void);
+
 #endif // NETWORK_H

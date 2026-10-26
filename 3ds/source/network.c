@@ -1,5 +1,6 @@
 #include "network.h"
 #include <3ds/svc.h>
+#include <stdarg.h>
 
 #define HTTP_BUF_SIZE 0x1000 // 4KB read chunks
 #define MAX_RESPONSE  (2 * 1024 * 1024) // 2MB max response
@@ -7,6 +8,21 @@
 
 #define TIMEOUT_RESPONSE (15ULL * 1000000000ULL) // 15s for server to respond
 #define TIMEOUT_TRANSFER (30ULL * 1000000000ULL) // 30s per data chunk
+
+// Description of the last failed request (empty if none), for the UI
+static char last_error[96];
+
+static void set_error(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+static void set_error(const char *fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(last_error, sizeof(last_error), fmt, args);
+    va_end(args);
+}
+
+const char *network_last_error(void) {
+    return last_error;
+}
 
 // Brief delay between requests to let httpc clean up
 static void request_delay(void) {
@@ -47,7 +63,10 @@ static u8 *read_response(httpcContext *context, u32 *out_size) {
     u32 size = 0;
     u32 buf_cap = HTTP_BUF_SIZE;
     u8 *buf = (u8 *)malloc(buf_cap);
-    if (!buf) return NULL;
+    if (!buf) {
+        set_error("out of memory");
+        return NULL;
+    }
 
     Result res;
     do {
@@ -55,11 +74,13 @@ static u8 *read_response(httpcContext *context, u32 *out_size) {
         if (size + HTTP_BUF_SIZE > buf_cap) {
             buf_cap *= 2;
             if (buf_cap > MAX_RESPONSE) {
+                set_error("response larger than %d MB", MAX_RESPONSE / (1024 * 1024));
                 free(buf);
                 return NULL;
             }
             u8 *new_buf = (u8 *)realloc(buf, buf_cap);
             if (!new_buf) {
+                set_error("out of memory");
                 free(buf);
                 return NULL;
             }
@@ -71,12 +92,14 @@ static u8 *read_response(httpcContext *context, u32 *out_size) {
         size += read;
 
         if (res == (Result)HTTPC_RESULTCODE_TIMEDOUT) {
+            set_error("timed out receiving data");
             free(buf);
             return NULL;
         }
     } while (res == (s32)HTTPC_RESULTCODE_DOWNLOADPENDING);
 
     if (R_FAILED(res) && res != HTTPC_RESULTCODE_DOWNLOADPENDING) {
+        set_error("receive failed: %08lX", res);
         free(buf);
         return NULL;
     }
@@ -88,13 +111,17 @@ static u8 *read_response(httpcContext *context, u32 *out_size) {
 u8 *network_get(const AppConfig *config, const char *path,
                 u32 *out_size, u32 *out_status) {
     request_delay(); // Let previous request fully clean up
+    last_error[0] = '\0';
 
     char url[MAX_URL_LEN + 128];
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
     Result res = httpcOpenContext(&context, HTTPC_METHOD_GET, url, 0);
-    if (R_FAILED(res)) return NULL;
+    if (R_FAILED(res)) {
+        set_error("open failed: %08lX", res);
+        return NULL;
+    }
 
     httpcSetSSLOpt(&context, SSLCOPT_DisableVerify);
     httpcSetKeepAlive(&context, HTTPC_KEEPALIVE_DISABLED);
@@ -105,6 +132,7 @@ u8 *network_get(const AppConfig *config, const char *path,
 
     res = httpcBeginRequest(&context);
     if (R_FAILED(res)) {
+        set_error("request failed: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -112,6 +140,7 @@ u8 *network_get(const AppConfig *config, const char *path,
 
     res = httpcGetResponseStatusCodeTimeout(&context, out_status, TIMEOUT_RESPONSE);
     if (R_FAILED(res)) {
+        set_error("no response: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -127,16 +156,23 @@ u8 *network_post(const AppConfig *config, const char *path,
                  const u8 *body, u32 body_size,
                  u32 *out_size, u32 *out_status) {
     request_delay(); // Let previous request fully clean up
+    last_error[0] = '\0';
 
     // Reject oversized POST bodies that would overflow httpc buffer
-    if (body_size > MAX_POST_SIZE) return NULL;
+    if (body_size > MAX_POST_SIZE) {
+        set_error("upload larger than %d KB", MAX_POST_SIZE / 1024);
+        return NULL;
+    }
 
     char url[MAX_URL_LEN + 128];
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
     Result res = httpcOpenContext(&context, HTTPC_METHOD_POST, url, 0);
-    if (R_FAILED(res)) return NULL;
+    if (R_FAILED(res)) {
+        set_error("open failed: %08lX", res);
+        return NULL;
+    }
 
     httpcSetSSLOpt(&context, SSLCOPT_DisableVerify);
     httpcSetKeepAlive(&context, HTTPC_KEEPALIVE_DISABLED);
@@ -148,6 +184,7 @@ u8 *network_post(const AppConfig *config, const char *path,
 
     res = httpcAddPostDataRaw(&context, (u32 *)body, body_size);
     if (R_FAILED(res)) {
+        set_error("post data failed: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -155,6 +192,7 @@ u8 *network_post(const AppConfig *config, const char *path,
 
     res = httpcBeginRequest(&context);
     if (R_FAILED(res)) {
+        set_error("request failed: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -162,6 +200,7 @@ u8 *network_post(const AppConfig *config, const char *path,
 
     res = httpcGetResponseStatusCodeTimeout(&context, out_status, TIMEOUT_RESPONSE);
     if (R_FAILED(res)) {
+        set_error("no response: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -177,16 +216,23 @@ u8 *network_post_json(const AppConfig *config, const char *path,
                       const char *json_body,
                       u32 *out_size, u32 *out_status) {
     request_delay(); // Let previous request fully clean up
+    last_error[0] = '\0';
 
     u32 json_len = strlen(json_body);
-    if (json_len > MAX_POST_SIZE) return NULL;
+    if (json_len > MAX_POST_SIZE) {
+        set_error("request larger than %d KB", MAX_POST_SIZE / 1024);
+        return NULL;
+    }
 
     char url[MAX_URL_LEN + 128];
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
     Result res = httpcOpenContext(&context, HTTPC_METHOD_POST, url, 0);
-    if (R_FAILED(res)) return NULL;
+    if (R_FAILED(res)) {
+        set_error("open failed: %08lX", res);
+        return NULL;
+    }
 
     httpcSetSSLOpt(&context, SSLCOPT_DisableVerify);
     httpcSetKeepAlive(&context, HTTPC_KEEPALIVE_DISABLED);
@@ -198,6 +244,7 @@ u8 *network_post_json(const AppConfig *config, const char *path,
 
     res = httpcAddPostDataRaw(&context, (u32 *)json_body, json_len);
     if (R_FAILED(res)) {
+        set_error("post data failed: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -205,6 +252,7 @@ u8 *network_post_json(const AppConfig *config, const char *path,
 
     res = httpcBeginRequest(&context);
     if (R_FAILED(res)) {
+        set_error("request failed: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;
@@ -212,6 +260,7 @@ u8 *network_post_json(const AppConfig *config, const char *path,
 
     res = httpcGetResponseStatusCodeTimeout(&context, out_status, TIMEOUT_RESPONSE);
     if (R_FAILED(res)) {
+        set_error("no response: %08lX", res);
         httpcCancelConnection(&context);
         httpcCloseContext(&context);
         return NULL;

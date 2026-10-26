@@ -13,11 +13,27 @@
 #define STATE_DIR "sdmc:/3ds/3dssync/state"
 #define MAX_UPLOAD_SIZE 0x70000  // 448KB compressed - bundles are zlib compressed
 
+// HTTP status of the last request that ended in SYNC_ERR_SERVER
+static u32 last_server_status;
+
+static SyncResult server_error(u32 status) {
+    last_server_status = status;
+    return SYNC_ERR_SERVER;
+}
+
 const char *sync_result_str(SyncResult result) {
+    static char detail[128];
     switch (result) {
         case SYNC_OK:           return "OK";
-        case SYNC_ERR_NETWORK:  return "Network error";
-        case SYNC_ERR_SERVER:   return "Server error";
+        case SYNC_ERR_NETWORK:
+            if (!network_last_error()[0]) return "Network error";
+            snprintf(detail, sizeof(detail), "Network error: %s", network_last_error());
+            return detail;
+        case SYNC_ERR_SERVER:
+            if (!last_server_status) return "Server error";
+            snprintf(detail, sizeof(detail), "Server error (HTTP %lu)",
+                     (unsigned long)last_server_status);
+            return detail;
         case SYNC_ERR_ARCHIVE:  return "Save read/write error";
         case SYNC_ERR_BUNDLE:   return "Bundle format error";
         case SYNC_ERR_TOO_LARGE: return "Save too large";
@@ -224,7 +240,7 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
         save_last_synced_hash(title->title_id_hex, hash_to_save);
         return SYNC_OK;
     }
-    return SYNC_ERR_SERVER;
+    return server_error(status);
 }
 
 static SyncResult download_title(const AppConfig *config, const TitleInfo *title,
@@ -239,7 +255,7 @@ static SyncResult download_title(const AppConfig *config, const TitleInfo *title
     u32 resp_size, status;
     u8 *resp = network_get(config, path, &resp_size, &status);
     if (!resp) return SYNC_ERR_NETWORK;
-    if (status != 200) { free(resp); return SYNC_ERR_SERVER; }
+    if (status != 200) { free(resp); return server_error(status); }
 
     // Heap-allocate to avoid stack overflow
     ArchiveFile *files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
@@ -843,7 +859,7 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
     u32 resp_size, status;
     u8 *resp = network_get(config, path, &resp_size, &status);
     if (!resp) return SYNC_ERR_NETWORK;
-    if (status != 200) { free(resp); return SYNC_ERR_SERVER; }
+    if (status != 200) { free(resp); return server_error(status); }
 
     // Parse bundle
     ArchiveFile *files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));

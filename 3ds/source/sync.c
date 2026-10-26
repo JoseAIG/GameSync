@@ -782,8 +782,10 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
     char path[64];
     snprintf(path, sizeof(path), "/saves/%s/meta", title->title_id_hex);
 
-    u32 resp_size, status;
+    u32 resp_size = 0, status = 0;
     u8 *resp = network_get(config, path, &resp_size, &status);
+    details->server_error = false;
+    details->server_status = status;
 
     if (resp && status == 200) {
         // Null-terminate for string parsing
@@ -806,11 +808,16 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
         } else {
             free(resp);
         }
-    } else if (resp) {
+    } else if (resp && status == 404) {
+        // The server answered and has no save for this title.
         free(resp);
         details->server_exists = false;
     } else {
+        // No response (timeout, Wi-Fi drop) or an unexpected status: the
+        // server state is unknown.
+        if (resp) free(resp);
         details->server_exists = false;
+        details->server_error = true;
     }
 
     // --- Determine sync status ---
@@ -824,6 +831,11 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
 }
 
 SyncAction sync_decide(const SaveDetails *details) {
+    // Never suggest an upload or download when we couldn't read the server.
+    if (details->server_error) {
+        return SYNC_ACTION_SERVER_ERROR;
+    }
+
     // No local and no server -> up to date (nothing to sync)
     if (!details->local_exists && !details->server_exists) {
         return SYNC_ACTION_UP_TO_DATE;

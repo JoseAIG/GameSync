@@ -354,6 +354,8 @@ int main(int argc, char *argv[]) {
                                 snprintf(status, sizeof(status), "\x1b[31mDownload failed\x1b[0m: %s",
                                     sync_result_str(res));
                             }
+                        } else if (chosen == SYNC_ACTION_SERVER_ERROR) {
+                            snprintf(status, sizeof(status), "\x1b[31mServer unreachable\x1b[0m, nothing changed");
                         } else if (chosen == SYNC_ACTION_UP_TO_DATE) {
                             snprintf(status, sizeof(status), "Up to date: %.40s", titles[idx].name);
                         } else {

@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "sync.h"
+#include "network.h"
 
 static PrintConsole top_screen;
 static PrintConsole bottom_screen;
@@ -326,7 +327,13 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
 
     // Server info
     printf("\x1b[%d;1H\x1b[33m-- Server --\x1b[0m", row++);
-    if (details->server_exists) {
+    if (details->server_error) {
+        if (details->server_status)
+            printf("\x1b[%d;1H\x1b[31m Server error (HTTP %lu)\x1b[0m", row++, (unsigned long)details->server_status);
+        else
+            printf("\x1b[%d;1H\x1b[31m Server did not respond\x1b[0m", row++);
+        printf("\x1b[%d;1H\x1b[90m %.38s\x1b[0m", row++, network_last_error());
+    } else if (details->server_exists) {
         char size_str[32];
         format_size(details->server_size, size_str, sizeof(size_str));
         printf("\x1b[%d;1H Size: %s", row++, size_str);
@@ -364,6 +371,11 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
                 printf("\x1b[%d;1H\x1b[32m >> DOWNLOAD\x1b[0m", row++);
             }
             break;
+        case SYNC_ACTION_SERVER_ERROR:
+            printf("\x1b[%d;1H\x1b[31m Can't compare with the server.\x1b[0m", row++);
+            printf("\x1b[%d;1H Nothing will be changed.\x1b[0m", row++);
+            printf("\x1b[%d;1H Check Wi-Fi/server and retry.\x1b[0m", row++);
+            break;
         case SYNC_ACTION_CONFLICT:
             printf("\x1b[%d;1H\x1b[31m !! CONFLICT !!\x1b[0m", row++);
             printf("\x1b[%d;1H Both local and server\x1b[0m", row++);
@@ -375,7 +387,7 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
     printf("\x1b[%d;1H\x1b[90m----------------------------------------\x1b[0m", TOP_ROWS - 1);
     if (suggested == SYNC_ACTION_CONFLICT) {
         printf("\x1b[%d;1H\x1b[90m R:Upload L:Download B:Cancel\x1b[0m", TOP_ROWS);
-    } else if (suggested == SYNC_ACTION_UP_TO_DATE) {
+    } else if (suggested == SYNC_ACTION_UP_TO_DATE || suggested == SYNC_ACTION_SERVER_ERROR) {
         printf("\x1b[%d;1H\x1b[90m A:OK B:Cancel\x1b[0m", TOP_ROWS);
     } else {
         printf("\x1b[%d;1H\x1b[90m A:Confirm B:Cancel\x1b[0m", TOP_ROWS);
@@ -398,6 +410,8 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
         } else if (suggested == SYNC_ACTION_UP_TO_DATE) {
             if (kDown & KEY_A) return SYNC_ACTION_UP_TO_DATE;
             if (kDown & KEY_B) return SYNC_ACTION_UP_TO_DATE;
+        } else if (suggested == SYNC_ACTION_SERVER_ERROR) {
+            if (kDown & (KEY_A | KEY_B)) return SYNC_ACTION_SERVER_ERROR;
         } else {
             if (kDown & KEY_A) return suggested;
             if (kDown & KEY_B) return SYNC_ACTION_UP_TO_DATE;

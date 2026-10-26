@@ -54,6 +54,8 @@ import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import com.savesync.android.ui.components.GsBanner
+import com.savesync.android.ui.components.gsFocusRing
+import androidx.compose.foundation.shape.CircleShape
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
 import com.savesync.android.ui.theme.gsExpandIn
@@ -242,7 +244,7 @@ private fun EmulatorCard(
                 if (overrideWarning != null) {
                     Button(
                         onClick = onBrowse,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).gsFocusRing(),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = GsColors.Accent,
                             contentColor = GsColors.Ink,
@@ -255,7 +257,7 @@ private fun EmulatorCard(
                 } else {
                     OutlinedButton(
                         onClick = onBrowse,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier.weight(1f).gsFocusRing(),
                     ) {
                         Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
@@ -263,7 +265,7 @@ private fun EmulatorCard(
                     }
                 }
                 if (isOverridden) {
-                    OutlinedButton(onClick = onClear) {
+                    OutlinedButton(onClick = onClear, modifier = Modifier.gsFocusRing()) {
                         Icon(
                             Icons.Default.Close,
                             contentDescription = "Clear override",
@@ -312,6 +314,7 @@ private fun RetroArchExtras(
         Switch(
             checked = beetleSaturnPerCoreFolder,
             onCheckedChange = onBeetleChange,
+            modifier = Modifier.gsFocusRing(CircleShape),
         )
     }
 
@@ -334,6 +337,7 @@ private fun RetroArchExtras(
         Switch(
             checked = cdGamesPerContentFolder,
             onCheckedChange = onPerContentChange,
+            modifier = Modifier.gsFocusRing(CircleShape),
         )
     }
 }

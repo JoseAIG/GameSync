@@ -676,11 +676,16 @@ async def create_share_link(
 
 @router.get("/roms/scan")
 async def trigger_scan(request: Request, use_crc32: bool = Query(False)):
-    # Only admin users may trigger a rescan
+    # Only admin users may trigger a rescan.  A request that reached this
+    # point already carries the API key, which device clients (PSP, Vita,
+    # PS3, MiSTer) use to rescan.  When a trusted proxy identifies a user,
+    # that user must also be in SYNC_ADMIN_USERS — the same rule the web UI
+    # uses.  An untrusted X-Remote-User header is ignored, as in web.py.
     from app.config import settings as _settings
-    remote_user = request.headers.get("X-Remote-User", "")
-    is_admin = (not remote_user) or (remote_user in _settings.admin_users_set)
-    if not is_admin:
+    from app.middleware.auth import trusted_remote_user
+
+    remote_user = trusted_remote_user(request)
+    if remote_user and remote_user not in _settings.admin_users_set:
         return JSONResponse(status_code=403, content={"detail": "Admin access required"})
 
     catalog = rom_scanner.rescan(use_crc32=use_crc32)

@@ -5,6 +5,7 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.middleware.auth import APIKeyMiddleware
+from app.middleware.body_limit import BodySizeLimitMiddleware
 from app.routes import catalog, normalize, roms, saves, status, sync, titles, update, web
 from app.services import dat_normalizer, db, game_names, rom_scanner, saturn_archives
 
@@ -251,9 +252,19 @@ async def _periodic_rom_cleanup():
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Save Sync", version="1.0.0", lifespan=lifespan)
+    # The interactive docs and schema are served without an API key, so an
+    # internet-facing deployment can hide them with SYNC_DISABLE_DOCS=true.
+    docs_kwargs = (
+        {"docs_url": None, "redoc_url": None, "openapi_url": None}
+        if settings.disable_docs
+        else {}
+    )
+    app = FastAPI(title="Save Sync", version="1.0.0", lifespan=lifespan, **docs_kwargs)
 
     app.add_middleware(APIKeyMiddleware)
+    # Added last so it runs first: oversized bodies are refused before auth
+    # or any route reads them.
+    app.add_middleware(BodySizeLimitMiddleware)
 
     app.include_router(web.router)  # serves GET / — no auth, key injected server-side
     app.include_router(status.router, prefix="/api/v1")

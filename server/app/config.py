@@ -1,6 +1,9 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
+# Shortest SYNC_API_KEY accepted at startup (unless SYNC_ALLOW_WEAK_KEY=true).
+MIN_API_KEY_LENGTH = 16
+
 
 class Settings(BaseSettings):
     save_dir: Path = Path(__file__).parent.parent / "saves"
@@ -132,8 +135,19 @@ class Settings(BaseSettings):
     # ``keys.txt``.  When unset we fall back to the per-request scratch dir.
     rom_wiiu_cwd: str = ""
     api_key: str = "anything"
+    # Upper bound on a request body, enforced from Content-Length before the
+    # body is read and again while it streams in.  The largest saves seen in
+    # practice are 8 MB memory-card images (PS2 / GameCube) and multi-MB
+    # PS3 / Wii U save folders, so 64 MiB leaves ample headroom.  0 disables.
+    max_upload_bytes: int = 64 * 1024 * 1024
+    # Upper bound on the uncompressed payload of a zlib bundle (v2+), so a
+    # tiny upload cannot inflate into gigabytes of RAM.  0 disables.
+    max_decompressed_bytes: int = 256 * 1024 * 1024
     host: str = "0.0.0.0"
     port: int = 8000
+    # Auto-reload on code changes when started via ``python run.py``.
+    # Handy for development; set SYNC_RELOAD=false in production.
+    reload: bool = True
     max_history_versions: int = 10
     rom_scan_interval: int = 300
 
@@ -150,6 +164,12 @@ class Settings(BaseSettings):
     # Example: SYNC_ADMIN_USERS=admin,pepas
     admin_users: str = "admin"
 
+    # GitHub repository ("owner/repo") whose releases /update/check reports
+    # and /update/download is allowed to proxy for the 3DS/NDS clients.
+    update_repo: str = "pepasjc/GameSync"
+    # Set False to turn off both update endpoints (no outbound requests).
+    update_proxy_enabled: bool = True
+
     # ── Security toggles (secure-by-default) ─────────────────────────────
     # The X-Remote-User header is only trustworthy when set by a reverse
     # proxy we control (nginx Basic Auth).  A client hitting the server
@@ -164,6 +184,14 @@ class Settings(BaseSettings):
     # internet.  When False, the web UI loads without a key and prompts the
     # user to paste it (stored in their browser's localStorage).
     lan_admin: bool = False
+    # Accept the API key as ``?api_key=`` in the URL (used by the web UI for
+    # direct download links).  Keys in URLs end up in reverse-proxy / tunnel
+    # logs and browser history; set False to require the X-API-Key header
+    # (share links via ``?token=`` keep working).
+    allow_query_api_key: bool = True
+    # Don't serve /docs, /redoc or /openapi.json (the API description is
+    # public by default).  Recommended for servers reachable from the internet.
+    disable_docs: bool = False
     # Escape hatch: allow booting with the placeholder/empty api_key.  Off by
     # default so a fresh deploy fails loudly instead of running wide open.
     allow_weak_key: bool = False
@@ -174,13 +202,27 @@ class Settings(BaseSettings):
 
     def validate_security(self) -> None:
         """Fail fast on an insecure key unless the operator opted out."""
-        weak = {"", "anything", "changeme", "password", "secret"}
-        if self.api_key.strip().lower() in weak and not self.allow_weak_key:
+        # Placeholders and the example values from the README/docs.
+        weak = {
+            "", "anything", "changeme", "password", "secret",
+            "dev-key-change-me", "your-secret-key", "your-key",
+        }
+        key = self.api_key.strip()
+        if self.allow_weak_key:
+            return
+        if key.lower() in weak:
             raise RuntimeError(
-                "Refusing to start: SYNC_API_KEY is unset or weak "
+                "Refusing to start: SYNC_API_KEY is unset or a placeholder "
                 f"({self.api_key!r}). Set a strong SYNC_API_KEY in the "
-                "environment / .env, or set SYNC_ALLOW_WEAK_KEY=true to "
-                "override (NOT recommended)."
+                "environment / .env (e.g. `openssl rand -hex 32`), or set "
+                "SYNC_ALLOW_WEAK_KEY=true to override (NOT recommended)."
+            )
+        if len(key) < MIN_API_KEY_LENGTH:
+            raise RuntimeError(
+                f"Refusing to start: SYNC_API_KEY is shorter than "
+                f"{MIN_API_KEY_LENGTH} characters. Use a longer random key "
+                "(e.g. `openssl rand -hex 32`), or set SYNC_ALLOW_WEAK_KEY=true "
+                "to override (NOT recommended)."
             )
 
     model_config = {

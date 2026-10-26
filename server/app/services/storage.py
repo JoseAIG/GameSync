@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -29,6 +30,11 @@ from app.models.save import SaveBundle, SaveMetadata
 from app.services import db, game_names
 from app.services.ps1_cards import is_ps1_title_id, psp_visible_stats
 from app.services.rom_id import parse_title_id as _parse_emulator_id
+from app.services.safe_path import (
+    safe_join,
+    validate_path_component,
+    validate_relative_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +90,9 @@ def comparable_files(title_id: str, files: list[tuple[str, bytes]]) -> list[tupl
 
 
 def _title_dir(title_id: str) -> Path:
-    return settings.save_dir / title_id
+    # Title IDs are validated at the API boundary; this is a last line of
+    # defence so no caller can ever address a directory outside save_dir.
+    return settings.save_dir / validate_path_component(title_id)
 
 
 def _current_dir(title_id: str) -> Path:
@@ -206,6 +214,49 @@ def get_metadata_for_sync(title_id: str, console_id: str = "") -> SaveMetadata |
     return meta
 
 
+_STAGING_PREFIX = ".current-new-"
+_RETIRED_PREFIX = ".current-old-"
+
+
+def _swap_into_place(staging: Path, current: Path) -> None:
+    """Replace ``current`` with ``staging`` using renames only.
+
+    If the second rename fails the previous save is moved back, so
+    ``current`` is always either the old or the new save.
+    """
+    if not current.exists():
+        staging.rename(current)
+        return
+    retired = current.with_name(f"{_RETIRED_PREFIX}{uuid.uuid4().hex}")
+    current.rename(retired)
+    try:
+        staging.rename(current)
+    except BaseException:
+        retired.rename(current)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
+
+
+def _recover_interrupted_swap(title_dir: Path) -> None:
+    """Clean up after a crash in the middle of ``store_save``.
+
+    A leftover staging dir is an unfinished upload and is discarded.  A
+    retired dir with no ``current`` means the process died between the two
+    renames, so the previous save is restored.
+    """
+    current = title_dir / "current"
+    for entry in title_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(_RETIRED_PREFIX):
+            if not current.exists():
+                entry.rename(current)
+            else:
+                shutil.rmtree(entry, ignore_errors=True)
+        elif entry.name.startswith(_STAGING_PREFIX):
+            shutil.rmtree(entry, ignore_errors=True)
+
+
 def store_save(
     bundle: SaveBundle,
     source: str = "3ds",
@@ -218,30 +269,47 @@ def store_save(
     current = _current_dir(title_id)
     history = _history_dir(title_id)
 
-    # Archive existing save to history
-    if current.exists():
-        old_meta = get_metadata(title_id)
-        if old_meta:
-            ts = old_meta.last_sync.replace(":", "_").replace("+", "_")
-            archive_dir = history / ts
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            for item in current.iterdir():
-                if item.is_file():
-                    shutil.copy2(item, archive_dir / item.name)
-                elif item.is_dir():
-                    shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
-
-            _prune_history(title_id)
-
-        shutil.rmtree(current)
-
-    # Write new save files
-    current.mkdir(parents=True, exist_ok=True)
-    _trace_files("store-write", title_id, [(f.path, f.data) for f in bundle.files])
+    # Reject unsafe file names before touching the existing save.
     for f in bundle.files:
-        file_path = current / f.path
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_bytes(f.data)
+        validate_relative_path(f.path)
+
+    title_dir = _title_dir(title_id)
+    title_dir.mkdir(parents=True, exist_ok=True)
+    _recover_interrupted_swap(title_dir)
+
+    # Write the new save into a sibling staging directory first, so a failed
+    # write (disk full, I/O error) never leaves ``current`` half-written or
+    # missing.  The swap below is two renames on the same filesystem.
+    _trace_files("store-write", title_id, [(f.path, f.data) for f in bundle.files])
+    # Plain mkdir (not mkdtemp) so ``current`` keeps the usual umask-based
+    # permissions after the rename.
+    staging = title_dir / f"{_STAGING_PREFIX}{uuid.uuid4().hex}"
+    staging.mkdir()
+    try:
+        for f in bundle.files:
+            file_path = safe_join(staging, f.path)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(f.data)
+
+        # Archive existing save to history
+        if current.exists():
+            old_meta = get_metadata(title_id)
+            if old_meta:
+                ts = old_meta.last_sync.replace(":", "_").replace("+", "_")
+                archive_dir = history / ts
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                for item in current.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, archive_dir / item.name)
+                    elif item.is_dir():
+                        shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
+
+                _prune_history(title_id)
+
+        _swap_into_place(staging, current)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
     # Compute sync metadata hash. For PS1, preserve PSP/Vita-compatible hashing
     # over the PSP-visible file set so legacy clients continue to compare correctly.
@@ -384,6 +452,22 @@ def _prune_history(title_id: str) -> None:
         shutil.rmtree(oldest)
 
 
+def _parse_history_dir_name(name: str) -> tuple[str, int]:
+    """Turn a history dir name back into (ISO string, unix seconds).
+
+    Dir names are ``last_sync`` with ``:`` and ``+`` replaced by ``_``, e.g.
+    ``2026-01-02T03_04_05.123456_00_00``.  Returns unix 0 if unparseable.
+    """
+    ts_str = name.replace("_", ":")
+    if ts_str.endswith(":00:00"):
+        ts_str = ts_str[:-6] + "+00:00"
+    try:
+        return ts_str, int(datetime.fromisoformat(ts_str).timestamp())
+    except Exception as e:
+        print(f"Failed to parse timestamp '{ts_str}': {e}")
+        return ts_str, 0
+
+
 def list_history(title_id: str, console_id: str = "") -> list[dict]:
     """List all history versions for a title. console_id is ignored (flat layout)."""
     history = _history_dir(title_id)
@@ -395,15 +479,7 @@ def list_history(title_id: str, console_id: str = "") -> list[dict]:
         if not ts_dir.is_dir():
             continue
 
-        ts_str = ts_dir.name.replace("_", ":")
-        if ts_str.endswith(":00:00"):
-            ts_str = ts_str[:-6] + "+00:00"
-        try:
-            dt = datetime.fromisoformat(ts_str)
-            unix_ts = int(dt.timestamp())
-        except Exception as e:
-            print(f"Failed to parse timestamp '{ts_str}': {e}")
-            unix_ts = 0
+        ts_str, unix_ts = _parse_history_dir_name(ts_dir.name)
 
         total_size = 0
         file_count = 0
@@ -432,12 +508,15 @@ def load_history_version_by_unix_ts(
     if not history.exists():
         return None
 
-    dt = datetime.fromtimestamp(unix_timestamp, tz=timezone.utc)
-    iso_ts = dt.isoformat()
-    ts_dir_name = iso_ts.replace(":", "_").replace("+", "_")
-
-    history_path = history / ts_dir_name
-    if not history_path.exists():
+    # Dir names carry microseconds (they come from ``last_sync``) while the
+    # listed timestamp is whole seconds, so match on the parsed value rather
+    # than rebuilding the name.  Newest first, like ``list_history``.
+    history_path = None
+    for ts_dir in sorted(history.iterdir(), reverse=True):
+        if ts_dir.is_dir() and _parse_history_dir_name(ts_dir.name)[1] == unix_timestamp:
+            history_path = ts_dir
+            break
+    if history_path is None:
         return None
 
     files = []

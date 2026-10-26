@@ -17,6 +17,7 @@ Type=simple
 #   SYNC_API_KEY=...
 #   SYNC_SAVE_DIR=...
 #   SYNC_MAX_HISTORY_VERSIONS=...
+#   SYNC_DISABLE_DOCS=true        (recommended when exposed to the internet)
 EnvironmentFile=-/etc/default/3dssync
 Environment=UV_BIN=uv
 Environment=SYNC_HOST=0.0.0.0
@@ -25,7 +26,8 @@ Environment=SYNC_PORT=8000
 User=%i
 Group=%i
 
-# Use uvicorn directly for systemd instead of run.py because run.py enables reload mode.
+# Use uvicorn directly for systemd instead of run.py, which enables reload
+# mode by default (SYNC_RELOAD=true).
 ExecStart=/bin/sh -lc 'cd "$APP_DIR" && exec "$UV_BIN" run uvicorn app.main:app --host "$SYNC_HOST" --port "$SYNC_PORT"'
 Restart=always
 RestartSec=3

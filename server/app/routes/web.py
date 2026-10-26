@@ -11,6 +11,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from app.config import settings
+from app.middleware.auth import trusted_remote_user
 
 router = APIRouter()
 
@@ -37,11 +38,7 @@ async def web_ui(request: Request):
     """
     # Only trust the proxy-forwarded username when a trusted proxy is
     # actually configured; otherwise a direct client could forge it.
-    remote_user = (
-        request.headers.get("X-Remote-User", "")
-        if settings.trust_proxy_auth
-        else ""
-    )
+    remote_user = trusted_remote_user(request)
 
     if remote_user:
         authenticated = True

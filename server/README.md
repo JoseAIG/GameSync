@@ -32,7 +32,7 @@ All settings are via environment variables with the `SYNC_` prefix, or in a `ser
 
 | Variable | Default | Description |
 |---|---|---|
-| `SYNC_API_KEY` | `anything` | Key required in the `X-API-Key` header by all device clients |
+| `SYNC_API_KEY` | `anything` | Key required in the `X-API-Key` header by all device clients. The server refuses to start with a placeholder (`anything`, `dev-key-change-me`, `your-secret-key`, …) or a key shorter than 16 characters — generate one with `openssl rand -hex 32` |
 | `SYNC_SAVE_DIR` | `./saves` | Directory where save files and history are stored |
 | `SYNC_ROM_DIR` | *(unset)* | ROM root directory for the web library (see [ROM Library](#rom-library)) |
 | `SYNC_ROM_SCAN_INTERVAL` | `300` | Background ROM rescan interval in seconds (`0` disables it) |
@@ -43,11 +43,31 @@ All settings are via environment variables with the `SYNC_` prefix, or in a `ser
 | `SYNC_MAX_HISTORY_VERSIONS` | `10` | Previous save versions to keep per title |
 | `SYNC_SITE_TITLE` | `GameSync` | Title shown in the web UI header and browser tab |
 | `SYNC_ADMIN_USERS` | `admin` | Comma-separated nginx Basic Auth usernames with admin access (see [User Roles](#user-roles)) |
+| `SYNC_RELOAD` | `true` | Auto-reload on code changes when started with `python run.py`; set `false` in production |
+
+### Security settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `SYNC_ALLOW_WEAK_KEY` | `false` | Boot even with a placeholder or short `SYNC_API_KEY` (not recommended) |
+| `SYNC_ALLOW_QUERY_API_KEY` | `true` | Accept the key as `?api_key=` in the URL. The web UI uses this for direct download links; set `false` to require the `X-API-Key` header and keep the key out of proxy/tunnel logs (share links via `?token=` keep working) |
+| `SYNC_DISABLE_DOCS` | `false` | Don't serve `/docs`, `/redoc` and `/openapi.json` (they need no API key) |
+| `SYNC_MAX_UPLOAD_BYTES` | `67108864` (64 MiB) | Largest accepted request body; bigger uploads get `413`. `0` disables the limit |
+| `SYNC_MAX_DECOMPRESSED_BYTES` | `268435456` (256 MiB) | Largest uncompressed payload accepted in a compressed save bundle. `0` disables the limit |
+| `SYNC_UPDATE_REPO` | `pepasjc/GameSync` | GitHub `owner/repo` whose releases `/update/check` reports and `/update/download` may proxy for the 3DS/NDS clients |
+| `SYNC_UPDATE_PROXY_ENABLED` | `true` | Set `false` to disable both update endpoints (no outbound requests) |
+| `SYNC_TRUST_PROXY_AUTH` | `false` | Trust the `X-Remote-User` header set by nginx Basic Auth (see [User Roles](#user-roles)). Only enable it when clients cannot reach the server except through that proxy |
+| `SYNC_LAN_ADMIN` | `false` | Treat every web UI visitor as admin and embed the API key in the page. Only for a LAN that is never exposed to the internet |
+
+For a server reachable from the internet, set `SYNC_DISABLE_DOCS=true`,
+`SYNC_RELOAD=false` (or run uvicorn directly as the systemd unit does), keep
+`SYNC_LAN_ADMIN=false`, and consider `SYNC_ALLOW_QUERY_API_KEY=false` if you
+don't use the web UI's download buttons.
 
 Example `server/.env`:
 
 ```ini
-SYNC_API_KEY=your-secret-key
+SYNC_API_KEY=<output of: openssl rand -hex 32>
 SYNC_SAVE_DIR=/home/pi/Documents/3ds_sync/server/saves
 SYNC_ROM_DIR=/mnt/roms
 SYNC_ROM_3DS_CIA_COMMAND=["/usr/local/bin/your-3ds-tool","{input}","{output}"]
@@ -397,7 +417,7 @@ The web UI supports two roles: **admin** and **read-only**.
 - **Admin** — can browse, download, and trigger ROM rescans via ⚙ Settings.
 - **Read-only** — can browse and download only. Settings button is hidden; the scan API returns 403.
 
-Roles are determined by the nginx Basic Auth username forwarded in the `X-Remote-User` header. Admin usernames are configured via `SYNC_ADMIN_USERS`.
+Roles are determined by the nginx Basic Auth username forwarded in the `X-Remote-User` header, which is only honoured when `SYNC_TRUST_PROXY_AUTH=true`. Admin usernames are configured via `SYNC_ADMIN_USERS`.
 
 ### Add users
 
@@ -420,7 +440,7 @@ SYNC_ADMIN_USERS=youradminuser
 # SYNC_ADMIN_USERS=pepas,admin
 ```
 
-> **LAN access** (direct to port 8000, no nginx): always treated as admin regardless of `SYNC_ADMIN_USERS`.
+> **LAN access** (direct to port 8000, no nginx): the web UI is admin only with `SYNC_LAN_ADMIN=true`; otherwise it asks for the API key. Device clients that call `/api/v1/roms/scan` with the API key and no proxy username can always rescan.
 
 ---
 

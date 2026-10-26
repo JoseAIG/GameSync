@@ -665,8 +665,19 @@ async def import_gc_vmc(request: Request, console_id: str = Query("")):
 
     cid = _console_id_from_request(request, console_id)
     timestamp = int(time.time())
-    imported = [_store_gc_single_game(code, gci, timestamp, cid) for code, gci in entries]
-    return {"status": "ok", "imported": imported}
+    imported: list[dict] = []
+    skipped: list[str] = []
+    for code, gci in entries:
+        # The game code comes straight from the card's directory entry, so it
+        # must pass the same title ID validation as a URL before it is used
+        # as a storage directory name.
+        try:
+            validate_any_title_id(f"GC_{code}")
+        except ValueError:
+            skipped.append(code)
+            continue
+        imported.append(_store_gc_single_game(code, gci, timestamp, cid))
+    return {"status": "ok", "imported": imported, "skipped": skipped}
 
 
 @router.post("/saves/{title_id}/ps1-card")

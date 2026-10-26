@@ -75,6 +75,9 @@ void ui_device_label(const char *console_id, char *out, int out_size) {
 static UiTouchTrack touch_track;
 static UiRepeat key_repeat;
 
+// ZL / ZR (New 3DS) need no setup here: libctru's hidInit() starts ir:rst
+// itself on a New 3DS (hidShouldUseIrrst) and hidScanInput() merges its
+// keys into hidKeysDown()/hidKeysHeld().
 bool ui_input_scan(UiInput *in) {
     memset(in, 0, sizeof(*in));
     if (!aptMainLoop()) return false;

@@ -31,6 +31,10 @@ make cia      # produces 3dssync.cia
 make clean
 ```
 
+For performance work, `make clean && make GUI_PERF=1` builds a version that
+shows the last frame's GPU time (citro3d processing + drawing, in ms) in
+the top-right corner of the top screen; the normal build has no overlay.
+
 ### Output files
 
 | File | How to use |
@@ -73,6 +77,7 @@ These keys are edited in `config.txt` on the SD card.
 | `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. |
 | `local_backups` | `3` | Before a download or history restore overwrites a save, the current save is copied to `sdmc:/3ds/3dssync/backups/<TITLEID>/<YYYYMMDD-HHMMSS>/`. This many copies are kept per title (oldest deleted first); `0` disables the copies. |
 | `tls_verify` | `1` | For `https://` server URLs, verify the server certificate. `0` accepts any certificate (the behaviour of older versions; use it for a self-signed server). Has no effect on `http://`. |
+| `reduce_motion` | `0` | `1` turns off sliding and springing: the list highlight and scrolling jump instead of gliding, and nothing nudges or bounces. The fade when a list wraps around and the progress bar's glide stay. |
 | `update_check` | `1` | Allow *Settings > Check for updates*. The server looks up the latest GitHub release; the client downloads the CIA through the server and installs it. The download must match the size the server reports, and its SHA-256 when the server publishes one (`sha256`, or GitHub's `digest` field). `0` disables update checks and installs. |
 
 ### HTTPS
@@ -100,7 +105,7 @@ strength and a server status dot (green = the server answered, red = it
 didn't), and every screen has a footer with button hints.
 
 - **Saves**: the list is on the bottom screen, with All / 3DS / NDS sub-tabs, a
-  mark box per row, a system tag (`3DS`, `NDS`, cyan `CART` for game cards) and
+  mark box per row, a system tag (`3DS`, `NDS`, cyan `Cart` for game cards) and
   a status dot. The top screen shows the selected title: name, title id,
   product code, storage, its sync state (up to date, needs upload / download,
   conflict, failed, or *manual sync* for game cards, which Sync All skips) and
@@ -113,14 +118,25 @@ didn't), and every screen has a footer with button hints.
   a progress bar (with speed, elapsed and remaining time for downloads).
 - **Catalog**, **Settings** and **History** use the same layout: a list on the
   bottom screen, details of the highlighted entry on the top.
+- **History restore**: before a saved version is written, the top screen shows
+  the save on the console now (size, files, and whether it changed since the
+  last sync) beside the chosen version (date, size, files), and the card says
+  whether the current save is backed up to the SD first. Only **A** restores.
 
 Rows can also be picked by tapping them on the touch screen. Holding the D-pad
-repeats.
+repeats. The highlight glides between rows; when a list wraps around it jumps
+to the other end and the rows fade in, and a page press with nowhere left to
+go nudges the highlight. Dates read "Today 21:14", "Yesterday 21:14" or
+"Oct 12 21:14" in the console's time zone (`utc_offset_minutes`); if the
+console clock looks wrong (before 2024, or more than a day behind the server) they always
+show the year instead.
 
 ## Safety when writing saves
 
 - Every file of a downloaded bundle is checked against its SHA-256 before anything is written; a mismatch aborts the download.
 - The current save is backed up to the SD card first (see `local_backups`). If it cannot be read or backed up completely, nothing is written.
+- A History restore always asks first and says whether the current save will be backed up.
+- Uploading marked saves that are in conflict (Sync All marks them) asks "Replace N server copies?" in red and names them; the server keeps the replaced copies in its history.
 - If writing or committing the new save fails, the previous save is written back. To recover by hand, copy the files from the backup folder into the save with a save manager such as Checkpoint.
 - A save with more than 256 files is refused instead of being uploaded incompletely.
 
@@ -151,7 +167,7 @@ The same scheme on every screen (shared by all GameSync console clients):
 |---|---|
 | A | Smart sync the selected save (or upload all marked titles) |
 | X | Sync all saves |
-| Y | Details: compare with the server, upload, download, history (restore an older version), mark / unmark |
+| Y | Details: compare with the server, upload, download, history (restore an older version, after a confirmation), mark / unmark |
 | B | Unmark all marked titles |
 | SELECT | All / 3DS / NDS |
 | Touch | Tap a row to select it; tap its mark box to mark / unmark it |
@@ -202,7 +218,7 @@ client asks `GET /api/v1/roms/fingerprints` and downloads again only the
 systems whose fingerprint changed (same strategy as the MiSTer client); the
 rest come from the SD card. Search and the RetroAchievements filter then run
 on the cached rows. If the server can't be reached the cached copy is shown
-with an `OFFLINE` tag. A server without the fingerprints route is browsed live
+with an `Offline` tag. A server without the fingerprints route is browsed live
 like before (paged from the server, which also does search and the RA
 filter). *Settings > Refresh catalog* forces a full reload. The server's
 `?extract=` support is cached with the rows: if the server operator enables
@@ -241,8 +257,10 @@ new game's save can be synced.
 
 ## Tests
 
-The catalog's parsing and planning code (`source/catalog_data.c`) is plain C
-and has host tests:
+The plain-C parts have host tests: the catalog's parsing and planning
+(`source/catalog_data.c`), the History list parser (`source/history_parse.c`),
+the springs (`source/gui_motion.c`), the `config.txt` reader/writer
+(`source/config_file.c`) and the date/size formatting (`source/ui_format.c`):
 
 ```bash
 sh tests/run_host_tests.sh          # needs a host gcc (Linux / WSL)

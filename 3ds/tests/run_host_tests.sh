@@ -39,4 +39,7 @@ gcc $CFLAGS -o "$out/test_ui_format" tests/test_ui_format.c source/ui_format.c
 gcc $CFLAGS $HOST_INC -o "$out/test_ui_gesture" tests/test_ui_gesture.c source/ui_gesture.c source/gui_motion.c -lm
 "$out/test_ui_gesture"
 
+gcc $CFLAGS -o "$out/test_folder_scan" tests/test_folder_scan.c source/folder_scan.c
+"$out/test_folder_scan"
+
 rm -rf "$out"

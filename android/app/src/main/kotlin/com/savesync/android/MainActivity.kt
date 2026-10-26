@@ -64,6 +64,20 @@ import com.savesync.android.ui.components.LocalServerOnline
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.rememberShowButtonHints
 import com.savesync.android.ui.theme.SaveSyncTheme
+import com.savesync.android.ui.components.GsFooterHeights
+import com.savesync.android.ui.components.GsNotifier
+import com.savesync.android.ui.components.GsSnackbarHost
+import com.savesync.android.ui.components.LocalFooterHeight
+import com.savesync.android.ui.components.LocalGsHaptics
+import com.savesync.android.ui.components.LocalGsNotifier
+import com.savesync.android.ui.components.rememberGsHaptics
+import com.savesync.android.ui.theme.LocalHighContrast
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.rememberHighContrast
+import com.savesync.android.ui.theme.rememberReduceMotion
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -434,15 +448,44 @@ private fun MainApp() {
     }
 
     val showHints = rememberShowButtonHints()
+    val reduceMotion = rememberReduceMotion()
+    val highContrast = rememberHighContrast()
+    val haptics = rememberGsHaptics()
+
+    // One snackbar host for the whole app, on MainApp's scope, so a notice
+    // outlives the screen that raised it and never queues behind another.
+    val snackbarHostState = remember { SnackbarHostState() }
+    val appScope = rememberCoroutineScope()
+    val notifier = remember(snackbarHostState, haptics) {
+        GsNotifier(snackbarHostState, appScope, haptics)
+    }
+    // Until the footer moves into MainApp, each screen draws its own hints;
+    // they report their height here so the snackbar never covers them.
+    val footerHeights = remember { GsFooterHeights() }
 
     CompositionLocalProvider(
         LocalServerOnline provides serverOnline,
         LocalShowButtonHints provides showHints,
+        LocalReduceMotion provides reduceMotion,
+        LocalHighContrast provides highContrast,
+        LocalGsHaptics provides haptics,
+        LocalGsNotifier provides notifier,
+        LocalFooterHeight provides footerHeights,
     ) {
         // No Scaffold bars here — each screen draws its own GsTopBar (header
         // + tab strip + sub-tab chips) and GsFooterHints, so the hints can
         // follow the screen's state.
-        Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            snackbarHost = {
+                val footerDp = with(LocalDensity.current) { footerHeights.maxPx.toDp() }
+                GsSnackbarHost(
+                    host = snackbarHostState,
+                    modifier = Modifier.padding(bottom = footerDp),
+                    onOccludedChange = notifier::setOccludedBottom,
+                )
+            },
+        ) { padding ->
             NavHost(
                 navController = navController,
                 startDestination = TAB_ROUTES[0],

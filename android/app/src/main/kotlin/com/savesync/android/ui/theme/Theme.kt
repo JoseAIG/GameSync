@@ -1,6 +1,7 @@
 package com.savesync.android.ui.theme
 
 import android.app.Activity
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -8,6 +9,7 @@ import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.unit.dp
 import androidx.core.view.WindowCompat
 
 /**
@@ -39,6 +41,50 @@ object GsColors {
     val BtnB = Color(0xFFE5483F)
     val BtnX = Color(0xFF3D8FE0)
     val BtnY = Color(0xFFF2C230)
+
+    // Text-only variants, added for legibility (the values above mirror the
+    // console headers and stay untouched).  Worst-case WCAG contrast noted.
+    /** Secondary text, captions, timestamps; secondary text on PanelHi (4.97:1). */
+    val TextMuted = Color(0xFF9DB0C2)
+    /** Ok text and pill text (5.03:1 on a 16% Ok tint over PanelHi). */
+    val OkText = Color(0xFF6EDC7A)
+    /** Info text and pill text (4.93:1 on its tint). */
+    val InfoText = Color(0xFF8CCBFF)
+    /** Warn text and pill text (5.06:1 on its tint). */
+    val WarnText = Color(0xFFF5C451)
+    /** Err text, body and pill (4.98:1 on its tint, 6.69:1 on Panel). */
+    val ErrText = Color(0xFFFFA198)
+}
+
+/**
+ * The legible text colour for a status colour: Ok/Info/Warn/Err map to their
+ * text variants, anything else to itself.  Fills keep the base colour.
+ */
+fun textVariantOf(color: Color): Color = when (color) {
+    GsColors.Ok -> GsColors.OkText
+    GsColors.Info -> GsColors.InfoText
+    GsColors.Warn -> GsColors.WarnText
+    GsColors.Err -> GsColors.ErrText
+    else -> color
+}
+
+/** Corner radii, one per kind of surface. */
+object GsShapes {
+    val Row = RoundedCornerShape(8.dp)
+    val Card = RoundedCornerShape(12.dp)
+    val Dialog = RoundedCornerShape(14.dp)
+    val Pill = RoundedCornerShape(10.dp)
+    val Choice = RoundedCornerShape(20.dp)
+    val Hud = RoundedCornerShape(16.dp)
+}
+
+/** Elevation per layer: rows sit flat, floating layers cast a shadow. */
+object GsElevation {
+    val Row = 0.dp
+    val Snackbar = 6.dp
+    val Hud = 8.dp
+    val DialogShadow = 12.dp
+    val DialogTonal = 0.dp
 }
 
 /**
@@ -104,6 +150,7 @@ fun SaveSyncTheme(
 
     MaterialTheme(
         colorScheme = colorScheme,
+        typography = GsTypography,
         content = content
     )
 }

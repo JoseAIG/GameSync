@@ -1,6 +1,7 @@
 package com.savesync.android.ui.components
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import com.savesync.android.ui.theme.GsColors
 
@@ -96,12 +98,14 @@ fun GsTopBar(
                         actions()
                         ServerDot(online)
                     }
+                    // No bottom padding: each pill's 48dp hit area already
+                    // leaves room under the visual pill.
                     TabSwitchBar(
                         activeTabIndex = activeTabIndex,
                         onTabClick = onTabClick,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(start = 12.dp, end = 12.dp, bottom = 6.dp),
+                            .padding(start = 12.dp, end = 12.dp),
                     )
                 }
             }
@@ -112,7 +116,9 @@ fun GsTopBar(
                     .fillMaxWidth()
                     .background(GsColors.Bg)
                     .horizontalScroll(rememberScrollState())
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                    // No vertical padding: each chip carries its own 48dp
+                    // touch target.
+                    .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 content = subTabs,
@@ -149,6 +155,9 @@ fun GsSubScreenBar(
         ) {
             Box(
                 modifier = Modifier
+                    // 48dp hit area; the chip itself has no fill, so it
+                    // looks the same.
+                    .heightIn(min = 48.dp)
                     .clip(RoundedCornerShape(16.dp))
                     .clickable(onClick = onBack)
                     .padding(horizontal = 8.dp, vertical = 6.dp),
@@ -172,6 +181,7 @@ fun GsSubScreenBar(
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             actions()
@@ -194,6 +204,7 @@ private fun AppName() {
         style = MaterialTheme.typography.titleLarge,
         fontWeight = FontWeight.Bold,
         maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
     )
 }
 
@@ -234,20 +245,25 @@ fun TabSwitchBar(
         if (glyphs) ButtonGlyph(GsButton.L1)
         TAB_LABELS.forEachIndexed { idx, label ->
             val selected = idx == activeTabIndex
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (selected) GsColors.Accent else Color.Transparent)
-                    .clickable { onTabClick(idx) }
-                    .padding(horizontal = 12.dp, vertical = 5.dp),
-            ) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (selected) GsColors.Ink else GsColors.Dim,
-                    maxLines = 1,
-                )
+            // The hit area is at least 48dp tall; the visual pill inside it
+            // keeps its 5dp vertical padding.
+            GsHitTarget(onClick = { onTabClick(idx) }, role = Role.Tab) { indication ->
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(if (selected) GsColors.Accent else Color.Transparent)
+                        .then(indication)
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (selected) GsColors.Ink else GsColors.Dim,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
         }
         if (glyphs) ButtonGlyph(GsButton.R1)

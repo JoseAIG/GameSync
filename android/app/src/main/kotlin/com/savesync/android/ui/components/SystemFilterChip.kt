@@ -52,37 +52,39 @@ fun SystemFilterChip(
     var expanded by remember { mutableStateOf(false) }
     val color = GsColors.Text
     Box(modifier = modifier) {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(GsColors.PanelHi)
-                .border(
-                    width = 1.dp,
-                    color = GsColors.Accent.copy(alpha = 0.7f),
-                    shape = RoundedCornerShape(16.dp),
+        GsHitTarget(onClick = { expanded = true }) { indication ->
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(GsColors.PanelHi)
+                    .border(
+                        width = 1.dp,
+                        color = GsColors.Accent.copy(alpha = 0.7f),
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                    .then(indication)
+                    .padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (LocalShowButtonHints.current) {
+                    ButtonGlyph(GsButton.SELECT)
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = color,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                .clickable { expanded = true }
-                .padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            if (LocalShowButtonHints.current) {
-                ButtonGlyph(GsButton.SELECT)
-                Spacer(Modifier.width(4.dp))
+                Icon(
+                    Icons.Filled.ArrowDropDown,
+                    contentDescription = "Choose system",
+                    tint = GsColors.Accent,
+                    modifier = Modifier.size(20.dp),
+                )
             }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                color = color,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Icon(
-                Icons.Filled.ArrowDropDown,
-                contentDescription = "Choose system",
-                tint = GsColors.Accent,
-                modifier = Modifier.size(20.dp),
-            )
         }
         DropdownMenu(
             expanded = expanded,

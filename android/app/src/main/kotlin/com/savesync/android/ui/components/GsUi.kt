@@ -62,6 +62,25 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.savesync.android.ui.theme.GsColors
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.material.ripple.rememberRipple
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.max
+import com.savesync.android.ui.theme.GsElevation
+import com.savesync.android.ui.theme.GsShapes
+import com.savesync.android.ui.theme.LocalHighContrast
+import com.savesync.android.ui.theme.gsDim
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.theme.textVariantOf
 
 // ── Controller glyphs ─────────────────────────────────────────────────────
 
@@ -83,9 +102,11 @@ enum class GsButton(val label: String, val color: Color?, val round: Boolean) {
 @Composable
 fun ButtonGlyph(button: GsButton, modifier: Modifier = Modifier) {
     if (button.round) {
+        // Grows with the font scale so the letter never overflows the circle.
+        val diameter = max(20.dp, with(LocalDensity.current) { (11.sp * 1.8f).toDp() })
         Box(
             modifier = modifier
-                .size(20.dp)
+                .size(diameter)
                 .clip(CircleShape)
                 .background(button.color ?: GsColors.PanelHi),
             contentAlignment = Alignment.Center,
@@ -100,6 +121,7 @@ fun ButtonGlyph(button: GsButton, modifier: Modifier = Modifier) {
     } else {
         Box(
             modifier = modifier
+                .heightIn(min = 18.dp)
                 .clip(RoundedCornerShape(5.dp))
                 .background(GsColors.PanelHi)
                 .border(1.dp, GsColors.Line, RoundedCornerShape(5.dp))
@@ -169,8 +191,22 @@ private fun hasGamepad(): Boolean = try {
  */
 @Composable
 fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
-    if (!LocalShowButtonHints.current || hints.isEmpty()) return
-    Column(modifier = modifier.fillMaxWidth().background(GsColors.Bg2)) {
+    // Publish this footer's height so the global snackbar sits above it.
+    val footerHeights = LocalFooterHeight.current
+    val footerKey = remember { Any() }
+    DisposableEffect(footerHeights, footerKey) {
+        onDispose { footerHeights?.remove(footerKey) }
+    }
+    if (!LocalShowButtonHints.current || hints.isEmpty()) {
+        SideEffect { footerHeights?.remove(footerKey) }
+        return
+    }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(GsColors.Bg2)
+            .onSizeChanged { footerHeights?.set(footerKey, it.height) },
+    ) {
         Box(
             Modifier
                 .fillMaxWidth()
@@ -191,9 +227,10 @@ fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
                     Spacer(Modifier.width(5.dp))
                     Text(
                         hint.label,
-                        color = GsColors.Dim,
+                        color = gsDim(),
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -213,6 +250,30 @@ fun Modifier.gsFocusRing(shape: Shape = RoundedCornerShape(20.dp)): Modifier = c
         .border(2.dp, if (focused) GsColors.Accent2 else Color.Transparent, shape)
 }
 
+/**
+ * A small visual (a tab pill, a filter chip) inside a touch target at least
+ * 48×48dp, so it is easy to hit without looking bigger.  The ripple is drawn
+ * on the visual: [visual] must apply the modifier it is given.
+ */
+@Composable
+fun GsHitTarget(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    role: Role = Role.Button,
+    visual: @Composable (indication: Modifier) -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    Box(
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .widthIn(min = 48.dp)
+            .clickable(interactionSource = source, indication = null, role = role, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        visual(Modifier.indication(source, rememberRipple()))
+    }
+}
+
 // ── Rows, pills, banners ──────────────────────────────────────────────────
 
 /**
@@ -227,7 +288,9 @@ fun GsListRow(
     containerColor: Color = GsColors.Panel,
     content: @Composable RowScope.() -> Unit,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = GsShapes.Row
+    // High contrast: the selection border goes from Accent@55% to solid.
+    val selectedBorder = if (LocalHighContrast.current) GsColors.Accent else GsColors.Accent.copy(alpha = 0.55f)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -235,7 +298,7 @@ fun GsListRow(
             .clip(shape)
             .background(if (isSelected) GsColors.PanelHi else containerColor)
             .then(
-                if (isSelected) Modifier.border(1.dp, GsColors.Accent.copy(alpha = 0.55f), shape)
+                if (isSelected) Modifier.border(1.dp, selectedBorder, shape)
                 else Modifier
             )
             .clickable(onClick = onClick),
@@ -257,13 +320,32 @@ fun GsListRow(
     }
 }
 
-/** Status pill: tinted fill with coloured text, or solid fill with ink text. */
+/**
+ * Status pill: a 16% tint of [color] with its legible text variant
+ * ([textVariantOf]), or a solid fill with ink text.  Under high contrast the
+ * tint becomes an opaque PanelHi fill with a 1dp border in the text colour.
+ */
 @Composable
-fun GsPill(text: String, color: Color, modifier: Modifier = Modifier, filled: Boolean = false) {
+fun GsPill(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    filled: Boolean = false,
+    textColor: Color = textVariantOf(color),
+) {
+    val high = LocalHighContrast.current
+    val shape = GsShapes.Pill
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (filled) color else color.copy(alpha = 0.16f))
+            .clip(shape)
+            .background(
+                when {
+                    filled -> color
+                    high -> GsColors.PanelHi
+                    else -> color.copy(alpha = 0.16f)
+                }
+            )
+            .then(if (high && !filled) Modifier.border(1.dp, textColor, shape) else Modifier)
             .padding(horizontal = 8.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center,
     ) {
@@ -271,22 +353,42 @@ fun GsPill(text: String, color: Color, modifier: Modifier = Modifier, filled: Bo
             text = text,
             style = MaterialTheme.typography.labelSmall,
             fontWeight = FontWeight.Bold,
-            color = if (filled) GsColors.Ink else color,
+            color = if (filled) GsColors.Ink else textColor,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
 
-/** One-line status banner on a panel with a coloured edge (offline notice etc.). */
+/**
+ * Status banner for an ongoing condition (offline, no server, conflicts):
+ * a panel with a 4dp edge bar in [color] and text in its legible variant.
+ * With [onClick] it is a button: 48dp minimum height and a trailing chevron.
+ * See GsBanners.kt for which banners may show at once.
+ */
 @Composable
-fun GsBanner(text: String, color: Color, modifier: Modifier = Modifier) {
+fun GsBanner(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+) {
+    val high = LocalHighContrast.current
+    val textColor = textVariantOf(color)
+    val shape = GsShapes.Row
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
+            .then(if (onClick != null) Modifier.heightIn(min = 48.dp) else Modifier)
             .height(IntrinsicSize.Min)
-            .clip(RoundedCornerShape(8.dp))
-            .background(GsColors.Panel),
+            .clip(shape)
+            .background(GsColors.Panel)
+            .then(if (high) Modifier.border(1.dp, textColor, shape) else Modifier)
+            .then(
+                if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick)
+                else Modifier
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -297,11 +399,23 @@ fun GsBanner(text: String, color: Color, modifier: Modifier = Modifier) {
         )
         Text(
             text,
-            color = color,
+            color = textColor,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 12.dp, vertical = 8.dp),
         )
+        if (onClick != null) {
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = gsTextMuted(),
+                modifier = Modifier
+                    .padding(end = 12.dp)
+                    .size(16.dp),
+            )
+        }
     }
 }
 
@@ -339,11 +453,13 @@ fun GsDialog(
     fun choiceFor(button: GsButton): GsDialogChoice? = choices.firstOrNull { it.button == button }
     Dialog(onDismissRequest = onDismiss) {
         Surface(
-            shape = RoundedCornerShape(14.dp),
+            shape = GsShapes.Dialog,
             color = GsColors.Panel,
+            shadowElevation = GsElevation.DialogShadow,
+            tonalElevation = GsElevation.DialogTonal,
             modifier = Modifier
                 .widthIn(min = 280.dp, max = 520.dp)
-                .border(1.dp, GsColors.Line, RoundedCornerShape(14.dp))
+                .border(1.dp, GsColors.Line, GsShapes.Dialog)
                 .focusRequester(focusRequester)
                 .focusable()
                 .onPreviewKeyEvent { event ->
@@ -380,7 +496,7 @@ fun GsDialog(
                     Spacer(Modifier.height(8.dp))
                     Text(
                         message,
-                        color = GsColors.Dim,
+                        color = gsDim(),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -441,12 +557,24 @@ fun GsConfirmDialog(
     dismissLabel: String = "Cancel",
     startConfirms: Boolean = false,
     destructive: Boolean = false,
+    /** An irreversibility line ("This can't be undone."), drawn in ErrText. */
+    warning: String? = null,
 ) {
     GsDialog(
         title = title,
         message = message,
         onDismiss = onDismiss,
         startConfirms = startConfirms,
+        body = warning?.let { w ->
+            {
+                Text(
+                    w,
+                    color = GsColors.ErrText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        },
         choices = listOf(
             GsDialogChoice(GsButton.B, dismissLabel, onDismiss),
             GsDialogChoice(

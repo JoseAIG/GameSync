@@ -116,15 +116,14 @@ private val DPAD_DIAGONALS = setOf(
 )
 
 /**
- * Keys the reveal press (see [GsInputTracker]) swallows on list screens:
- * Up/Down only show the cursor (re-anchoring it if a fling left it
- * off-screen) and the action buttons don't act.
+ * Action keys the reveal press (see [GsInputTracker]) swallows on list
+ * screens, so nothing fires on a row that wasn't lit.  Up/Down are not in
+ * here: they go through [ListFollower.step], which on the reveal press only
+ * re-anchors the cursor if a fling left it off-screen.
  */
 fun isRevealGuarded(key: Key): Boolean = key in REVEAL_GUARDED
 
 private val REVEAL_GUARDED = setOf(
-    Key.DirectionUp,
-    Key.DirectionDown,
     Key.ButtonA,
     Key.Enter,
     Key.NumPadEnter,

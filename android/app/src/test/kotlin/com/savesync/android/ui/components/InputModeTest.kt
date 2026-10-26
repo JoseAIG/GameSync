@@ -90,8 +90,9 @@ class InputModeTest {
     }
 
     @Test
-    fun `the reveal press swallows moves and actions but not B`() {
-        assertTrue(isRevealGuarded(Key.DirectionDown))
+    fun `the reveal press swallows actions but not B or the d-pad`() {
+        // Up/Down reach ListFollower.step, which only reveals on that press.
+        assertFalse(isRevealGuarded(Key.DirectionDown))
         assertTrue(isRevealGuarded(Key.ButtonA))
         assertTrue(isRevealGuarded(Key.Enter))
         assertTrue(isRevealGuarded(Key.ButtonX))

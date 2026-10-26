@@ -68,7 +68,7 @@ import com.savesync.android.ui.components.LocalInputTracker
 import com.savesync.android.ui.components.isRevealGuarded
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
-import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.components.rememberListFollower
 import com.savesync.android.ui.theme.gsDim
 import com.savesync.android.ui.theme.gsTextMuted
 import com.savesync.android.ui.theme.textVariantOf
@@ -143,6 +143,7 @@ fun DownloadsScreen(
     // Saveable, so rotation keeps the cursor on the same row.
     var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
+    val follower = rememberListFollower(listState)
     val scope = rememberCoroutineScope()
     val reduceMotion = LocalReduceMotion.current
     val holdNav = rememberHoldNavState()
@@ -162,7 +163,16 @@ fun DownloadsScreen(
     fun moveTo(index: Int) {
         if (downloads.isEmpty()) return
         selectedIndex = index.coerceIn(0, downloads.size - 1)
-        scope.launch { listState.gsScrollToItem(selectedIndex + headerItems, reduceMotion) }
+        follower.follow(selectedIndex + headerItems, reduceMotion)
+    }
+    /** Up/Down: re-anchor after a fling, else step; the list follows. */
+    fun step(delta: Int) {
+        selectedIndex = follower.step(
+            selectedIndex, delta, downloads.size,
+            reveal = inputTracker?.isRevealPress == true,
+            reduce = reduceMotion,
+            headerItems = headerItems,
+        )
     }
 
     /** A: the selected row's main action, by status. */
@@ -244,8 +254,8 @@ fun DownloadsScreen(
                         return@onPreviewKeyEvent true
                     }
                     when (event.key) {
-                        Key.DirectionDown -> { moveTo(selectedIndex + 1); true }
-                        Key.DirectionUp -> { moveTo(selectedIndex - 1); true }
+                        Key.DirectionDown -> { step(1); true }
+                        Key.DirectionUp -> { step(-1); true }
                         // A held A's repeats are ignored: one press, one
                         // pause / resume, never a pause-then-resume flicker.
                         Key.ButtonA, Key.Enter -> {

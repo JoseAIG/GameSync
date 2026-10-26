@@ -73,7 +73,7 @@ import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
-import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.components.rememberListFollower
 import com.savesync.android.ui.theme.gsDim
 import com.savesync.android.ui.theme.gsTextMuted
 import com.savesync.android.ui.components.GsHaptic
@@ -134,6 +134,7 @@ fun InstalledGamesScreen(
     // ── Gamepad navigation state ────────────────────────────────────────
     var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
+    val follower = rememberListFollower(listState)
     // Hold-to-accelerate state for d-pad left/right (page → alphabet jump).
     val holdNav = rememberHoldNavState()
     val inputTracker = LocalInputTracker.current
@@ -292,7 +293,7 @@ fun InstalledGamesScreen(
                                         .coerceAtLeast(1)
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, filtered.size - 1)
-                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                             onAlphabet = { d ->
@@ -311,7 +312,7 @@ fun InstalledGamesScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
-                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                         )
@@ -323,18 +324,22 @@ fun InstalledGamesScreen(
                         return@onPreviewKeyEvent true
                     }
                     when (event.key) {
+                        // Re-anchors first if a fling left the cursor
+                        // off-screen; otherwise steps and the list follows.
                         Key.DirectionDown -> {
-                            if (filtered.isNotEmpty()) {
-                                selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, 1, filtered.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         Key.DirectionUp -> {
-                            if (filtered.isNotEmpty()) {
-                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, -1, filtered.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         // A held A's repeats are ignored, so it can't open

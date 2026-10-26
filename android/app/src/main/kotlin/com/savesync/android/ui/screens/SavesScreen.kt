@@ -96,7 +96,7 @@ import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
-import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.components.rememberListFollower
 import com.savesync.android.ui.theme.gsTextMuted
 import com.savesync.android.ui.theme.textVariantOf
 import com.savesync.android.ui.components.GsHaptic
@@ -154,6 +154,7 @@ fun SavesScreen(
     // the gamepad cursor doesn't leak to the toolbar actions above it.
     var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
+    val follower = rememberListFollower(listState)
     val coroutineScope = rememberCoroutineScope()
     val reduceMotion = LocalReduceMotion.current
     // Hold-to-accelerate state for d-pad left/right: page scroll → faster
@@ -396,9 +397,7 @@ fun SavesScreen(
                                         .coerceAtLeast(1)
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, saves.size - 1)
-                                    coroutineScope.launch {
-                                        listState.gsScrollToItem(selectedIndex, reduceMotion)
-                                    }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                             onAlphabet = { d ->
@@ -417,9 +416,7 @@ fun SavesScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) saves.size - 1 else 0
-                                    coroutineScope.launch {
-                                        listState.gsScrollToItem(selectedIndex, reduceMotion)
-                                    }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                         )
@@ -432,22 +429,22 @@ fun SavesScreen(
                     }
                     when (event.key) {
                         // D-pad / analog stick — vertical: scroll list
+                        // Re-anchors first if a fling left the cursor
+                        // off-screen; otherwise steps and the list follows.
                         Key.DirectionDown -> {
-                            if (saves.isNotEmpty()) {
-                                selectedIndex = (selectedIndex + 1).coerceAtMost(saves.size - 1)
-                                coroutineScope.launch {
-                                    listState.gsScrollToItem(selectedIndex, reduceMotion)
-                                }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, 1, saves.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         Key.DirectionUp -> {
-                            if (saves.isNotEmpty()) {
-                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                coroutineScope.launch {
-                                    listState.gsScrollToItem(selectedIndex, reduceMotion)
-                                }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, -1, saves.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         // A → smart sync the selected save.  A held A's

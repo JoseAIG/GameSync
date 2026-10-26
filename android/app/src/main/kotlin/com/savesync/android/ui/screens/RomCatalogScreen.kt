@@ -86,7 +86,7 @@ import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.theme.LocalReduceMotion
-import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.components.rememberListFollower
 import com.savesync.android.ui.theme.gsDim
 import com.savesync.android.ui.theme.gsTextMuted
 import com.savesync.android.ui.components.GsNotice
@@ -159,6 +159,7 @@ fun RomCatalogScreen(
     // rom grid without focus leaking up to the search field.
     var selectedIndex by remember { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
+    val follower = rememberListFollower(listState)
     // Hold-to-accelerate state for d-pad left/right (page → alphabet jump).
     val holdNav = rememberHoldNavState()
     val inputTracker = LocalInputTracker.current
@@ -416,7 +417,7 @@ fun RomCatalogScreen(
                                         .coerceAtLeast(1)
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, filtered.size - 1)
-                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                             onAlphabet = { d ->
@@ -435,7 +436,7 @@ fun RomCatalogScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
-                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                         )
@@ -447,18 +448,22 @@ fun RomCatalogScreen(
                         return@onPreviewKeyEvent true
                     }
                     when (event.key) {
+                        // Re-anchors first if a fling left the cursor
+                        // off-screen; otherwise steps and the list follows.
                         Key.DirectionDown -> {
-                            if (filtered.isNotEmpty()) {
-                                selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, 1, filtered.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         Key.DirectionUp -> {
-                            if (filtered.isNotEmpty()) {
-                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, -1, filtered.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         // A / Enter → open the download-confirm dialog.  A

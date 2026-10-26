@@ -233,11 +233,17 @@ fun SettingsScreen(
     // With a controller attached, land on the first button so the D-pad has
     // somewhere to start (Settings is plain Material controls: D-pad moves
     // focus, A activates — see MainActivity.dispatchKeyEvent).  Not a text
-    // field: focusing one would pop the keyboard by itself.
+    // field: focusing one would pop the keyboard by itself.  Test connection
+    // is disabled (unfocusable) until a valid URL is set, so wait for the
+    // stored fields and fall back to the always-enabled show/hide-key button.
     val firstEntryFocus = remember { FocusRequester() }
+    val keyToggleFocus = remember { FocusRequester() }
     val gamepadHints = LocalShowButtonHints.current
-    LaunchedEffect(gamepadHints) {
-        if (gamepadHints) runCatching { firstEntryFocus.requestFocus() }
+    LaunchedEffect(gamepadHints, fieldsLoaded) {
+        if (!gamepadHints || !fieldsLoaded) return@LaunchedEffect
+        val canTest = serverUrlError(serverUrl) == null && serverUrl.isNotBlank()
+        val focused = canTest && runCatching { firstEntryFocus.requestFocus() }.isSuccess
+        if (!focused) runCatching { keyToggleFocus.requestFocus() }
     }
 
     // Footer hints, drawn by MainApp's persistent chrome.
@@ -306,7 +312,9 @@ fun SettingsScreen(
                 trailingIcon = {
                     IconButton(
                         onClick = { apiKeyVisible = !apiKeyVisible },
-                        modifier = Modifier.gsFocusRing(CircleShape),
+                        modifier = Modifier
+                            .focusRequester(keyToggleFocus)
+                            .gsFocusRing(CircleShape),
                     ) {
                         Icon(
                             if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,

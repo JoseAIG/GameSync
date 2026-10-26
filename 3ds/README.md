@@ -235,8 +235,9 @@ Marking for a batch upload is on the touch screen (the mark box) or in the
 equal buttons under the two cards: **A** *Keep this console* (uploads; the
 server keeps its copy in its history) on the left and **X** *Keep server*
 (downloads; this console's copy is backed up to the SD first when Local
-backups is on) on the right, with **B** *Cancel* below. While you press one,
-the top screen outlines the copy it keeps and fades the other.
+backups is on) on the right, with **B** *Cancel* below. While your finger is
+on one, the top screen outlines the copy it keeps and fades the other; slide
+off to cancel. A and X act as soon as they are pressed.
 
 ### Catalog
 

@@ -99,9 +99,9 @@ typedef struct {
 } UiDialogOpts;
 u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count,
                  const UiDialogOpts *opts);
-// While a dialog runs: the keys of the button being pressed (a finger on
-// it, or its key held), 0 otherwise. The backdrop reads it to preview the
-// choice before it is made.
+// While a dialog runs: the keys of the button a finger is pressing, 0
+// otherwise. The backdrop reads it to preview the choice before it is made
+// (a key commits on its press frame, so only touch can preview).
 u32 ui_dialog_pressed(void);
 // Something failed: what happened (`reason`), whether anything changed
 // (`safety`, dim) and what to do next. ERR tone with a cross in the title;

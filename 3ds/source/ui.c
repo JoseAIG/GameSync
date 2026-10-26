@@ -302,8 +302,6 @@ u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButto
     DialogGeom g;
     dialog_geom(&lines, buttons, count, opts, &g);
     progress_cancelling = false;   // whatever was cancelling has been answered
-    u32 all_keys = 0;
-    for (int i = 0; i < count; i++) all_keys |= buttons[i].keys;
 
     // Ignore keys still held from whatever opened the dialog, and the
     // finger that opened it
@@ -328,10 +326,12 @@ u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButto
                 if (in.down & buttons[i].keys) result = in.down & buttons[i].keys;
             if (result) break;
         }
-        // What the backdrop may preview: the button under a finger, or a
-        // held key (on its press frame; sliding off cancels it)
+        // What the backdrop may preview: the button under a finger
+        // (sliding off cancels it). A button's key commits on its press
+        // frame (the frozen v055 bindings), so a key never gets a held
+        // frame to preview.
         u32 held = any_key ? 0 : (in.held & armed);
-        dialog_pressed_keys = (pressed >= 0 && !any_key ? buttons[pressed].keys : 0) | (held & all_keys);
+        dialog_pressed_keys = pressed >= 0 && !any_key ? buttons[pressed].keys : 0;
 
         gui_begin(true);
         gui_screen(GUI_TOP);

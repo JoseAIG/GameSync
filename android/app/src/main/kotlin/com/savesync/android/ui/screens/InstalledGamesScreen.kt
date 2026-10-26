@@ -101,6 +101,9 @@ import com.savesync.android.ui.components.rememberHoldNavState
 import com.savesync.android.ui.components.LocalInputTracker
 import com.savesync.android.ui.components.isRevealGuarded
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import androidx.compose.runtime.produceState
 
 /**
  * Label the [SystemFilterChip] shows when no specific system is
@@ -451,7 +454,7 @@ fun InstalledGamesScreen(
     }
 
     confirmTarget?.let { rom ->
-        val wholeFolder = InstalledRomsScanner.wouldRemoveWholeFolder(rom)
+        val wholeFolder = rememberDeletePlan(rom).wholeFolder
         // Per-rom action sheet: A syncs this game's save, X deletes the ROM
         // (after a second confirmation), B cancels.
         GsDialog(
@@ -519,16 +522,10 @@ fun InstalledGamesScreen(
     }
 
     deleteTarget?.let { rom ->
-        val wholeFolder = InstalledRomsScanner.wouldRemoveWholeFolder(rom)
+        val plan = rememberDeletePlan(rom)
         GsConfirmDialog(
             title = "Delete ${rom.displayName}?",
-            message = if (wholeFolder) {
-                "Removes the folder ${rom.path.parentFile?.name ?: "?"} and everything in it."
-            } else {
-                "Removes ${rom.filename}" +
-                    (if (rom.companionFiles.isNotEmpty()) " and ${rom.companionFiles.size} companion file(s)" else "") +
-                    "."
-            },
+            message = deleteConfirmMessage(rom, plan),
             warning = "This can't be undone.",
             confirmLabel = "Delete",
             destructive = true,
@@ -649,4 +646,35 @@ private fun filterInstalled(
         val haystack = "${rom.displayName} ${rom.filename} ${rom.system}".lowercase()
         q in haystack
     }
+}
+
+/** What a delete of one installed game will remove, worked out off the main thread. */
+internal data class DeletePlan(val wholeFolder: Boolean, val fileCount: Int)
+
+@Composable
+private fun rememberDeletePlan(rom: InstalledRom): DeletePlan {
+    val plan by produceState(DeletePlan(wholeFolder = false, fileCount = 0), rom) {
+        value = withContext(Dispatchers.IO) {
+            val whole = InstalledRomsScanner.wouldRemoveWholeFolder(rom)
+            DeletePlan(whole, if (whole) InstalledRomsScanner.wholeFolderFileCount(rom) else rom.totalFiles)
+        }
+    }
+    return plan
+}
+
+/**
+ * The delete confirm's message: what goes (the folder and its file count,
+ * or the ROM and its companions), then that the synced save is untouched.
+ * A folder that holds a save is never removed whole, so the save stays too.
+ */
+internal fun deleteConfirmMessage(rom: InstalledRom, plan: DeletePlan): String {
+    val what = if (plan.wholeFolder) {
+        val files = if (plan.fileCount == 1) "1 file" else "${plan.fileCount} files"
+        "Removes the folder ${rom.path.parentFile?.name ?: "?"} and everything in it ($files)."
+    } else {
+        "Removes ${rom.filename}" +
+            (if (rom.companionFiles.isNotEmpty()) " and ${rom.companionFiles.size} companion file(s)" else "") +
+            "."
+    }
+    return "$what Your synced save on the server is not affected."
 }

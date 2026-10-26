@@ -44,7 +44,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -82,9 +81,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import com.savesync.android.ui.components.GS_BUTTON_PRESS_SCALE
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.rememberPressScale
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
-import com.savesync.android.ui.components.GsSubScreenBar
 import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.components.GsHaptic
 import com.savesync.android.ui.components.GsNotice
@@ -303,336 +302,336 @@ fun SaveDetailScreen(
         )
     }
 
-    Scaffold(
-        topBar = {
-            GsSubScreenBar(title = entry?.displayName ?: titleId, onBack = onNavigateBack)
-        },
-        bottomBar = {
-            GsFooterHints(
-                listOf(
-                    GsHint(GsButton.DPAD, "Move"),
-                    GsHint(GsButton.A, "Select"),
-                    GsHint(GsButton.B, "Back"),
-                    GsHint(GsButton.L1, "Tabs"),
-                )
-            )
-        },
-    ) { paddingValues ->
-        if (entry == null) {
-            Box(
-                Modifier.fillMaxSize().padding(paddingValues),
-                contentAlignment = Alignment.Center
-            ) {
-                Text("Save not found")
-            }
-            return@Scaffold
+    // Sub-screen header and hints, drawn by MainApp's persistent chrome.
+    // Keyed by the title id, so a second game never shows this one's title.
+    val detailTitle = entry?.displayName ?: titleId
+    val chromeSpec = remember(detailTitle, onNavigateBack) {
+        GsChromeSpec(
+            title = detailTitle,
+            onBack = onNavigateBack,
+            hints = listOf(
+                GsHint(GsButton.DPAD, "Move"),
+                GsHint(GsButton.A, "Select"),
+                GsHint(GsButton.B, "Back"),
+                GsHint(GsButton.L1, "Tabs"),
+            ),
+        )
+    }
+    GsScreenChrome("detail/$titleId", chromeSpec)
+
+    if (entry == null) {
+        Box(
+            Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("Save not found")
         }
+        return
+    }
 
-        val isBusy = detailState is SaveDetailState.Working
-        val canDownloadSave = entry.saveFile != null || entry.saveDir != null
-        val canUploadSave = viewModel.canUploadFromDetail(entry)
+    val isBusy = detailState is SaveDetailState.Working
+    val canDownloadSave = entry.saveFile != null || entry.saveDir != null
+    val canUploadSave = viewModel.canUploadFromDetail(entry)
 
-        // Compute local hash — recompute when the underlying file is modified (e.g. after download)
-        val fileModTime = when {
-            entry.saveFile != null && entry.extraFiles.isNotEmpty() ->
-                (listOf(entry.saveFile) + entry.extraFiles).filter { it.exists() }.maxOfOrNull { it.lastModified() } ?: 0L
-            else -> entry.saveFile?.lastModified() ?: entry.saveDir?.lastModified() ?: 0L
-        }
-        val localHash = remember(entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
-            viewModel.detailLocalHash(entry)
-        }
-        val localSize = remember(entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
-            viewModel.detailLocalSize(entry)
-        }
+    // Compute local hash — recompute when the underlying file is modified (e.g. after download)
+    val fileModTime = when {
+        entry.saveFile != null && entry.extraFiles.isNotEmpty() ->
+            (listOf(entry.saveFile) + entry.extraFiles).filter { it.exists() }.maxOfOrNull { it.lastModified() } ?: 0L
+        else -> entry.saveFile?.lastModified() ?: entry.saveDir?.lastModified() ?: 0L
+    }
+    val localHash = remember(entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
+        viewModel.detailLocalHash(entry)
+    }
+    val localSize = remember(entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
+        viewModel.detailLocalSize(entry)
+    }
 
-        // ── ROM availability (needed before we build the action list) ──
-        val romAvailable by viewModel.romAvailable.collectAsState()
-        val romsByTitle by viewModel.romsByTitle.collectAsState()
-        val romDownloadState by viewModel.romDownloadState.collectAsState()
-        val romBusy = romDownloadState is MainViewModel.RomDownloadState.Downloading
-        val hasRom = entry.titleId in romAvailable
-        val roms = if (hasRom) romsByTitle[entry.titleId].orEmpty() else emptyList()
+    // ── ROM availability (needed before we build the action list) ──
+    val romAvailable by viewModel.romAvailable.collectAsState()
+    val romsByTitle by viewModel.romsByTitle.collectAsState()
+    val romDownloadState by viewModel.romDownloadState.collectAsState()
+    val romBusy = romDownloadState is MainViewModel.RomDownloadState.Downloading
+    val hasRom = entry.titleId in romAvailable
+    val roms = if (hasRom) romsByTitle[entry.titleId].orEmpty() else emptyList()
 
-        // ── Gamepad navigation state ───────────────────────────────────
-        val focusRequester = remember { FocusRequester() }
-        var selectedActionIndex by remember { mutableIntStateOf(0) }
+    // ── Gamepad navigation state ───────────────────────────────────
+    val focusRequester = remember { FocusRequester() }
+    var selectedActionIndex by remember { mutableIntStateOf(0) }
 
-        // Hoist theme colors out of Composable scope so they're usable
-        // inside the plain-Kotlin buildList below.
-        val primaryColor = MaterialTheme.colorScheme.primary
-        val surfaceVariantColor = MaterialTheme.colorScheme.surfaceVariant
-        val onSurfaceVariantColor = MaterialTheme.colorScheme.onSurfaceVariant
+    // Hoist theme colors out of Composable scope so they're usable
+    // inside the plain-Kotlin buildList below.
+    val primaryColor = MaterialTheme.colorScheme.primary
+    val surfaceVariantColor = MaterialTheme.colorScheme.surfaceVariant
+    val onSurfaceVariantColor = MaterialTheme.colorScheme.onSurfaceVariant
 
-        // Derive the ordered list of gamepad-selectable action buttons.
-        // The list order dictates D-pad up/down traversal.
-        val actions: List<DetailAction> = buildList {
-            add(DetailAction(
-                label = if (isBusy && detailState.isSync) "Syncing…" else "Smart Sync",
-                icon = Icons.Default.Sync,
-                enabled = !isBusy && (!entry.isServerOnly || canDownloadSave),
-                containerColor = primaryColor,
-                isBusy = isBusy && detailState.isSync,
-                onClick = { viewModel.syncSave(entry) }
-            ))
-            add(DetailAction(
-                label = if (isBusy && detailState.isUpload) "Uploading…" else "Force Upload ↑",
-                icon = Icons.Default.CloudUpload,
-                enabled = !isBusy && canUploadSave,
-                containerColor = GsColors.Info,
-                isBusy = isBusy && detailState.isUpload,
-                onClick = { viewModel.uploadSave(entry) }
-            ))
-            add(DetailAction(
-                label = if (isBusy && detailState.isDownload) "Downloading…" else "Force Download ↓",
-                icon = Icons.Default.CloudDownload,
-                enabled = !isBusy && canDownloadSave,
-                containerColor = GsColors.Ok,
-                isBusy = isBusy && detailState.isDownload,
-                onClick = { viewModel.downloadSave(entry) }
-            ))
-            if (hasRom) {
-                if (roms.size <= 1) {
-                    val rom = roms.firstOrNull()
+    // Derive the ordered list of gamepad-selectable action buttons.
+    // The list order dictates D-pad up/down traversal.
+    val actions: List<DetailAction> = buildList {
+        add(DetailAction(
+            label = if (isBusy && detailState.isSync) "Syncing…" else "Smart Sync",
+            icon = Icons.Default.Sync,
+            enabled = !isBusy && (!entry.isServerOnly || canDownloadSave),
+            containerColor = primaryColor,
+            isBusy = isBusy && detailState.isSync,
+            onClick = { viewModel.syncSave(entry) }
+        ))
+        add(DetailAction(
+            label = if (isBusy && detailState.isUpload) "Uploading…" else "Force Upload ↑",
+            icon = Icons.Default.CloudUpload,
+            enabled = !isBusy && canUploadSave,
+            containerColor = GsColors.Info,
+            isBusy = isBusy && detailState.isUpload,
+            onClick = { viewModel.uploadSave(entry) }
+        ))
+        add(DetailAction(
+            label = if (isBusy && detailState.isDownload) "Downloading…" else "Force Download ↓",
+            icon = Icons.Default.CloudDownload,
+            enabled = !isBusy && canDownloadSave,
+            containerColor = GsColors.Ok,
+            isBusy = isBusy && detailState.isDownload,
+            onClick = { viewModel.downloadSave(entry) }
+        ))
+        if (hasRom) {
+            if (roms.size <= 1) {
+                val rom = roms.firstOrNull()
+                add(DetailAction(
+                    label = when (romDownloadState) {
+                        is MainViewModel.RomDownloadState.Downloading -> "Downloading ROM…"
+                        is MainViewModel.RomDownloadState.Success -> "✓ ROM Downloaded"
+                        else -> "Download ROM"
+                    },
+                    icon = Icons.Default.CloudDownload,
+                    enabled = !isBusy && !romBusy && rom != null,
+                    containerColor = GsColors.Accent2,
+                    isBusy = romBusy,
+                    onClick = {
+                        if (rom != null) {
+                            val extract = rom.preferredDownloadExtractFormat()
+                            viewModel.downloadRom(
+                                romId = rom.rom_id ?: rom.title_id,
+                                system = rom.system,
+                                filename = rom.preferredDownloadFilename(extract),
+                                extractFormat = extract,
+                                bundleKind = rom.msuPackKind,
+                            )
+                        }
+                    }
+                ))
+            } else {
+                roms.forEachIndexed { index, rom ->
                     add(DetailAction(
                         label = when (romDownloadState) {
-                            is MainViewModel.RomDownloadState.Downloading -> "Downloading ROM…"
-                            is MainViewModel.RomDownloadState.Success -> "✓ ROM Downloaded"
-                            else -> "Download ROM"
+                            is MainViewModel.RomDownloadState.Downloading -> "Downloading ${rom.filename}…"
+                            is MainViewModel.RomDownloadState.Success -> "✓ ${rom.filename} downloaded"
+                            else -> "Download ${rom.filename}"
                         },
                         icon = Icons.Default.CloudDownload,
-                        enabled = !isBusy && !romBusy && rom != null,
+                        enabled = !isBusy && !romBusy,
                         containerColor = GsColors.Accent2,
                         isBusy = romBusy,
+                        headerAbove = if (index == 0) "Available ROMs" else null,
                         onClick = {
-                            if (rom != null) {
-                                val extract = rom.preferredDownloadExtractFormat()
-                                viewModel.downloadRom(
-                                    romId = rom.rom_id ?: rom.title_id,
-                                    system = rom.system,
-                                    filename = rom.preferredDownloadFilename(extract),
-                                    extractFormat = extract,
-                                    bundleKind = rom.msuPackKind,
-                                )
-                            }
+                            val extract = rom.preferredDownloadExtractFormat()
+                            viewModel.downloadRom(
+                                romId = rom.rom_id ?: rom.title_id,
+                                system = rom.system,
+                                filename = rom.preferredDownloadFilename(extract),
+                                extractFormat = extract,
+                                bundleKind = rom.msuPackKind,
+                            )
                         }
                     ))
-                } else {
-                    roms.forEachIndexed { index, rom ->
-                        add(DetailAction(
-                            label = when (romDownloadState) {
-                                is MainViewModel.RomDownloadState.Downloading -> "Downloading ${rom.filename}…"
-                                is MainViewModel.RomDownloadState.Success -> "✓ ${rom.filename} downloaded"
-                                else -> "Download ${rom.filename}"
-                            },
-                            icon = Icons.Default.CloudDownload,
-                            enabled = !isBusy && !romBusy,
-                            containerColor = GsColors.Accent2,
-                            isBusy = romBusy,
-                            headerAbove = if (index == 0) "Available ROMs" else null,
-                            onClick = {
-                                val extract = rom.preferredDownloadExtractFormat()
-                                viewModel.downloadRom(
-                                    romId = rom.rom_id ?: rom.title_id,
-                                    system = rom.system,
-                                    filename = rom.preferredDownloadFilename(extract),
-                                    extractFormat = extract,
-                                    bundleKind = rom.msuPackKind,
-                                )
-                            }
-                        ))
-                    }
                 }
             }
-            if (!entry.isServerOnly && entry.systemName != "PSP") {
-                add(DetailAction(
-                    label = if (isBusy && detailState.isNormalize) "Normalizing…" else
-                        entry.canonicalName?.let { "Normalize (→ $it)" } ?: "Normalize Name",
-                    icon = Icons.Default.Edit,
-                    enabled = !isBusy,
-                    containerColor = surfaceVariantColor,
-                    contentColor = onSurfaceVariantColor,
-                    isBusy = isBusy && detailState.isNormalize,
-                    dividerAbove = true,
-                    onClick = { viewModel.normalizeRomAndSave(entry) }
-                ))
-            }
         }
+        if (!entry.isServerOnly && entry.systemName != "PSP") {
+            add(DetailAction(
+                label = if (isBusy && detailState.isNormalize) "Normalizing…" else
+                    entry.canonicalName?.let { "Normalize (→ $it)" } ?: "Normalize Name",
+                icon = Icons.Default.Edit,
+                enabled = !isBusy,
+                containerColor = surfaceVariantColor,
+                contentColor = onSurfaceVariantColor,
+                isBusy = isBusy && detailState.isNormalize,
+                dividerAbove = true,
+                onClick = { viewModel.normalizeRomAndSave(entry) }
+            ))
+        }
+    }
 
-        // Clamp selection when the list size changes (e.g. ROM availability
-        // resolves, or Normalize becomes applicable).
-        LaunchedEffect(actions.size) {
-            if (actions.isNotEmpty()) {
-                selectedActionIndex = selectedActionIndex.coerceIn(0, actions.size - 1)
-            } else {
-                selectedActionIndex = 0
-            }
+    // Clamp selection when the list size changes (e.g. ROM availability
+    // resolves, or Normalize becomes applicable).
+    LaunchedEffect(actions.size) {
+        if (actions.isNotEmpty()) {
+            selectedActionIndex = selectedActionIndex.coerceIn(0, actions.size - 1)
+        } else {
+            selectedActionIndex = 0
         }
+    }
 
-        // Per-action requesters so D-pad/stick scrolls the selected button
-        // into the visible window on smaller screens (verticalScroll).
-        val bringRequesters = remember(actions.size) {
-            List(actions.size) { BringIntoViewRequester() }
-        }
-        LaunchedEffect(selectedActionIndex, actions.size) {
-            bringRequesters.getOrNull(selectedActionIndex)?.bringIntoView()
-        }
+    // Per-action requesters so D-pad/stick scrolls the selected button
+    // into the visible window on smaller screens (verticalScroll).
+    val bringRequesters = remember(actions.size) {
+        List(actions.size) { BringIntoViewRequester() }
+    }
+    LaunchedEffect(selectedActionIndex, actions.size) {
+        bringRequesters.getOrNull(selectedActionIndex)?.bringIntoView()
+    }
 
-        // Claim focus on entry so the D-pad/stick immediately drive nav.
-        LaunchedEffect(Unit) {
-            runCatching { focusRequester.requestFocus() }
-        }
+    // Claim focus on entry so the D-pad/stick immediately drive nav.
+    LaunchedEffect(Unit) {
+        runCatching { focusRequester.requestFocus() }
+    }
 
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(horizontal = 20.dp, vertical = 12.dp)
-                .verticalScroll(rememberScrollState())
-                .focusRequester(focusRequester)
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    when (event.key) {
-                        Key.DirectionDown -> {
-                            if (actions.isNotEmpty()) {
-                                selectedActionIndex = (selectedActionIndex + 1)
-                                    .coerceAtMost(actions.size - 1)
-                            }
-                            true
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp, vertical = 12.dp)
+            .verticalScroll(rememberScrollState())
+            .focusRequester(focusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                when (event.key) {
+                    Key.DirectionDown -> {
+                        if (actions.isNotEmpty()) {
+                            selectedActionIndex = (selectedActionIndex + 1)
+                                .coerceAtMost(actions.size - 1)
                         }
-                        Key.DirectionUp -> {
-                            if (actions.isNotEmpty()) {
-                                selectedActionIndex = (selectedActionIndex - 1)
-                                    .coerceAtLeast(0)
-                            }
-                            true
-                        }
-                        Key.ButtonA, Key.Enter -> {
-                            actions.getOrNull(selectedActionIndex)
-                                ?.takeIf { it.enabled }?.onClick?.invoke()
-                            true
-                        }
-                        Key.ButtonB, Key.Escape, Key.Back -> {
-                            onNavigateBack()
-                            true
-                        }
-                        else -> false
+                        true
                     }
-                },
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            // System badge + sync status badge + picker for RETRO
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                SystemChip(entry.systemName)
-                val detailSyncStatus = viewModel.computeSyncStatus(entry, syncState, cheapOnly = true)
-                SyncStatusBadge(detailSyncStatus)
-                if (entry.systemName == "RETRO") {
-                    Text("Unknown — set below:", style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Key.DirectionUp -> {
+                        if (actions.isNotEmpty()) {
+                            selectedActionIndex = (selectedActionIndex - 1)
+                                .coerceAtLeast(0)
+                        }
+                        true
+                    }
+                    Key.ButtonA, Key.Enter -> {
+                        actions.getOrNull(selectedActionIndex)
+                            ?.takeIf { it.enabled }?.onClick?.invoke()
+                        true
+                    }
+                    Key.ButtonB, Key.Escape, Key.Back -> {
+                        onNavigateBack()
+                        true
+                    }
+                    else -> false
                 }
-            }
+            },
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        // System badge + sync status badge + picker for RETRO
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SystemChip(entry.systemName)
+            val detailSyncStatus = viewModel.computeSyncStatus(entry, syncState, cheapOnly = true)
+            SyncStatusBadge(detailSyncStatus)
             if (entry.systemName == "RETRO") {
-                SystemPicker(onSystemSelected = { viewModel.setSaveSystem(entry, it) })
+                Text("Unknown — set below:", style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
+        }
+        if (entry.systemName == "RETRO") {
+            SystemPicker(onSystemSelected = { viewModel.setSaveSystem(entry, it) })
+        }
 
-            HorizontalDivider()
-            InfoRow("Title ID", entry.titleId)
-            InfoRow("File", entry.saveDir?.name ?: entry.saveFile?.name ?: "—")
-            entry.canonicalName?.let { canonical ->
-                InfoRow("Canonical name", canonical)
-            }
+        HorizontalDivider()
+        InfoRow("Title ID", entry.titleId)
+        InfoRow("File", entry.saveDir?.name ?: entry.saveFile?.name ?: "—")
+        entry.canonicalName?.let { canonical ->
+            InfoRow("Canonical name", canonical)
+        }
 
-            HorizontalDivider()
+        HorizontalDivider()
 
-            // ── Local vs Server comparison ──────────────────────────────
-            Text("Status", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+        // ── Local vs Server comparison ──────────────────────────────
+        Text("Status", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
 
-            // LOCAL
-            Text("📱 Local", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            InfoRow("  Size", formatSize(localSize))
-            InfoRow("  Hash", localHash?.take(16)?.let { "$it…" } ?: "—")
-            syncState?.lastSyncedAt?.takeIf { it > 0 }?.let {
-                InfoRow("  Last synced", formatTimestampFull(it))
-            } ?: InfoRow("  Last synced", "Never")
+        // LOCAL
+        Text("📱 Local", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        InfoRow("  Size", formatSize(localSize))
+        InfoRow("  Hash", localHash?.take(16)?.let { "$it…" } ?: "—")
+        syncState?.lastSyncedAt?.takeIf { it > 0 }?.let {
+            InfoRow("  Last synced", formatTimestampFull(it))
+        } ?: InfoRow("  Last synced", "Never")
 
-            Spacer(Modifier.height(4.dp))
+        Spacer(Modifier.height(4.dp))
 
-            // SERVER
-            Text("☁ Server", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            when (val meta = serverMeta) {
-                is ServerMetaState.Loading ->
-                    Text("  Fetching…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                is ServerMetaState.NotFound ->
-                    Text("  No save on server yet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                is ServerMetaState.Found -> {
-                    InfoRow("  Size", formatSize(meta.sizeBytes))
-                    InfoRow("  Hash", meta.hash.take(16).let { "$it…" })
-                    if (meta.timestamp > 0) InfoRow("  Saved at", formatTimestampFull(meta.timestamp))
-                    meta.source?.let { InfoRow("  Source", it) }
-                    // Match indicator
-                    val matches = localHash != null && localHash == meta.hash
-                    Text(
-                        text = if (matches) "  ✓ In sync" else "  ≠ Out of sync",
-                        style = MaterialTheme.typography.bodySmall,
-                        fontWeight = FontWeight.Bold,
-                        color = if (matches) GsColors.Ok else MaterialTheme.colorScheme.error
-                    )
-                }
-                is ServerMetaState.Error ->
-                    Text("  Error: ${meta.message}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                is ServerMetaState.Idle -> {}
-            }
-
-            HorizontalDivider()
-
-            // ── Gamepad-navigable action buttons ────────────────────────
-            actions.forEachIndexed { index, action ->
-                if (action.dividerAbove) {
-                    HorizontalDivider()
-                }
-                action.headerAbove?.let { header ->
-                    Text(
-                        header,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.Bold
-                    )
-                }
-                ActionButton(
-                    label = action.label,
-                    icon = action.icon,
-                    enabled = action.enabled,
-                    containerColor = action.containerColor,
-                    contentColor = action.contentColor,
-                    isBusy = action.isBusy,
-                    isSelected = index == selectedActionIndex,
-                    onClick = action.onClick,
-                    modifier = Modifier.bringIntoViewRequester(bringRequesters[index]),
-                )
-            }
-
-            // ROM download result banner (not a gamepad-selectable item).
-            when (val s = romDownloadState) {
-                is MainViewModel.RomDownloadState.Success ->
-                    Text(
-                        "  ✓ Saved to ${s.file.absolutePath}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = GsColors.Ok
-                    )
-                is MainViewModel.RomDownloadState.Error ->
-                    Text(
-                        "  ✗ ${s.message}",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error
-                    )
-                else -> {}
-            }
-            if (entry.isServerOnly && !canDownloadSave) {
+        // SERVER
+        Text("☁ Server", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        when (val meta = serverMeta) {
+            is ServerMetaState.Loading ->
+                Text("  Fetching…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            is ServerMetaState.NotFound ->
+                Text("  No save on server yet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            is ServerMetaState.Found -> {
+                InfoRow("  Size", formatSize(meta.sizeBytes))
+                InfoRow("  Hash", meta.hash.take(16).let { "$it…" })
+                if (meta.timestamp > 0) InfoRow("  Saved at", formatTimestampFull(meta.timestamp))
+                meta.source?.let { InfoRow("  Source", it) }
+                // Match indicator
+                val matches = localHash != null && localHash == meta.hash
                 Text(
-                    text = "Download the ROM first, then rescan to create a local save target for this server-only save.",
+                    text = if (matches) "  ✓ In sync" else "  ≠ Out of sync",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    fontWeight = FontWeight.Bold,
+                    color = if (matches) GsColors.Ok else MaterialTheme.colorScheme.error
                 )
             }
+            is ServerMetaState.Error ->
+                Text("  Error: ${meta.message}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            is ServerMetaState.Idle -> {}
+        }
+
+        HorizontalDivider()
+
+        // ── Gamepad-navigable action buttons ────────────────────────
+        actions.forEachIndexed { index, action ->
+            if (action.dividerAbove) {
+                HorizontalDivider()
+            }
+            action.headerAbove?.let { header ->
+                Text(
+                    header,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            ActionButton(
+                label = action.label,
+                icon = action.icon,
+                enabled = action.enabled,
+                containerColor = action.containerColor,
+                contentColor = action.contentColor,
+                isBusy = action.isBusy,
+                isSelected = index == selectedActionIndex,
+                onClick = action.onClick,
+                modifier = Modifier.bringIntoViewRequester(bringRequesters[index]),
+            )
+        }
+
+        // ROM download result banner (not a gamepad-selectable item).
+        when (val s = romDownloadState) {
+            is MainViewModel.RomDownloadState.Success ->
+                Text(
+                    "  ✓ Saved to ${s.file.absolutePath}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = GsColors.Ok
+                )
+            is MainViewModel.RomDownloadState.Error ->
+                Text(
+                    "  ✗ ${s.message}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            else -> {}
+        }
+        if (entry.isServerOnly && !canDownloadSave) {
+            Text(
+                text = "Download the ROM first, then rescan to create a local save target for this server-only save.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }

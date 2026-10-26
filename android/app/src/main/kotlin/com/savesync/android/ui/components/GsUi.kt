@@ -193,25 +193,17 @@ private fun hasGamepad(): Boolean = try {
 
 /**
  * The controller-hint footer: coloured A/B/X/Y glyphs plus a label each,
- * changing per tab.  Draws nothing when [LocalShowButtonHints] is off.
+ * changing per screen.  Draws nothing when [LocalShowButtonHints] is off.
  */
 @Composable
 fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
-    // Publish this footer's height so the global snackbar sits above it.
-    val footerHeights = LocalFooterHeight.current
-    val footerKey = remember { Any() }
-    DisposableEffect(footerHeights, footerKey) {
-        onDispose { footerHeights?.remove(footerKey) }
-    }
-    if (!LocalShowButtonHints.current || hints.isEmpty()) {
-        SideEffect { footerHeights?.remove(footerKey) }
-        return
-    }
+    // Drawn once, as MainApp's Scaffold bottomBar (GsChrome.kt), so the
+    // Scaffold already keeps the snackbar above it.
+    if (!LocalShowButtonHints.current || hints.isEmpty()) return
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(GsColors.Bg2)
-            .onSizeChanged { footerHeights?.set(footerKey, it.height) },
+            .background(GsColors.Bg2),
     ) {
         Box(
             Modifier

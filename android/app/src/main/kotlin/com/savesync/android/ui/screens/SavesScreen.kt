@@ -42,7 +42,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -86,12 +85,13 @@ import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
+import com.savesync.android.ui.components.GsSubTabRow
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.GsHitTarget
 import com.savesync.android.ui.components.GsListRow
 import com.savesync.android.ui.components.GsPill
-import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
@@ -291,88 +291,88 @@ fun SavesScreen(
         else -> "Sync ${saves.size} $selectedFilter saves?"
     }
 
-    Scaffold(
-        topBar = {
-            GsTopBar(
-                activeTabIndex = 0,
-                onTabClick = onNavigateToTab,
-                actions = {
-                    if (saves.isNotEmpty()) {
-                        Text(
-                            text = "${saves.size}",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = GsColors.Dim,
-                            modifier = Modifier.padding(end = 4.dp)
-                        )
-                    }
-                    // Sync all (X button); spins for a single A sync too
-                    if (isSyncing || isSyncingOne) {
-                        Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(20.dp),
-                                strokeWidth = 2.dp,
-                                color = GsColors.Accent
-                            )
-                        }
-                    } else {
-                        IconButton(onClick = { showSyncConfirmDialog = true }) {
-                            Icon(Icons.Default.Sync, contentDescription = "Sync all (X)", tint = GsColors.Text)
-                        }
-                    }
-                    // Search (touch; Y opens details on a controller)
-                    IconButton(onClick = {
-                        searchVisible = !searchVisible
-                        if (!searchVisible) viewModel.setSearchQuery("")
-                    }) {
-                        Icon(Icons.Default.Search, contentDescription = "Search", tint = GsColors.Text)
-                    }
-                    // Web ROM library (touch only)
-                    IconButton(
-                        onClick = {
-                            webLibraryUrl?.let { url ->
-                                context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-                            }
-                        },
-                        enabled = webLibraryUrl != null
-                    ) {
-                        Icon(Icons.Default.Language, contentDescription = "Web ROM Library", tint = GsColors.Text)
-                    }
-                },
-                subTabs = {
-                    SystemFilterChip(
-                        label = selectedFilter,
-                        options = availableFilters,
-                        onSelect = { viewModel.setFilter(it) },
+    // Header actions and footer hints, drawn by MainApp's persistent chrome.
+    // Remembered on what they show, so a D-pad step never touches the header.
+    val busy = isSyncing || isSyncingOne
+    val saveCount = saves.size
+    val chromeSpec = remember(saveCount, busy, searchVisible, webLibraryUrl) {
+        GsChromeSpec(
+            actions = {
+                if (saveCount > 0) {
+                    Text(
+                        text = "$saveCount",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = GsColors.Dim,
+                        modifier = Modifier.padding(end = 4.dp)
                     )
-                    if (availableStatusFilters.isNotEmpty() || statusFilter != null) {
-                        StatusFilterChip(
-                            statusFilter = statusFilter,
-                            options = availableStatusFilters,
-                            onSelect = { viewModel.setStatusFilter(it) },
+                }
+                // Sync all (X button); spins for a single A sync too
+                if (busy) {
+                    Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp,
+                            color = GsColors.Accent
                         )
                     }
-                },
+                } else {
+                    IconButton(onClick = { showSyncConfirmDialog = true }) {
+                        Icon(Icons.Default.Sync, contentDescription = "Sync all (X)", tint = GsColors.Text)
+                    }
+                }
+                // Search (touch; Y opens details on a controller)
+                IconButton(onClick = {
+                    searchVisible = !searchVisible
+                    if (!searchVisible) viewModel.setSearchQuery("")
+                }) {
+                    Icon(Icons.Default.Search, contentDescription = "Search", tint = GsColors.Text)
+                }
+                // Web ROM library (touch only)
+                IconButton(
+                    onClick = {
+                        webLibraryUrl?.let { url ->
+                            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+                        }
+                    },
+                    enabled = webLibraryUrl != null
+                ) {
+                    Icon(Icons.Default.Language, contentDescription = "Web ROM Library", tint = GsColors.Text)
+                }
+            },
+            hints = if (searchVisible) listOf(
+                GsHint(GsButton.A, "Sync"),
+                GsHint(GsButton.B, "Close search"),
+                GsHint(GsButton.X, "Sync all"),
+                GsHint(GsButton.Y, "Details"),
+            ) else listOf(
+                GsHint(GsButton.A, "Sync"),
+                GsHint(GsButton.X, "Sync all"),
+                GsHint(GsButton.Y, "Details"),
+                GsHint(GsButton.SELECT, "System"),
+                GsHint(GsButton.L2R2, "Status"),
+                GsHint(GsButton.L1, "Tabs"),
+                GsHint(GsButton.START, "Exit"),
+            ),
+        )
+    }
+    GsScreenChrome("saves", chromeSpec)
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Sub-tab chips move with their list (SELECT / L2-R2 step them).
+        GsSubTabRow {
+            SystemFilterChip(
+                label = selectedFilter,
+                options = availableFilters,
+                onSelect = { viewModel.setFilter(it) },
             )
-        },
-        bottomBar = {
-            GsFooterHints(
-                if (searchVisible) listOf(
-                    GsHint(GsButton.A, "Sync"),
-                    GsHint(GsButton.B, "Close search"),
-                    GsHint(GsButton.X, "Sync all"),
-                    GsHint(GsButton.Y, "Details"),
-                ) else listOf(
-                    GsHint(GsButton.A, "Sync"),
-                    GsHint(GsButton.X, "Sync all"),
-                    GsHint(GsButton.Y, "Details"),
-                    GsHint(GsButton.SELECT, "System"),
-                    GsHint(GsButton.L2R2, "Status"),
-                    GsHint(GsButton.L1, "Tabs"),
-                    GsHint(GsButton.START, "Exit"),
+            if (availableStatusFilters.isNotEmpty() || statusFilter != null) {
+                StatusFilterChip(
+                    statusFilter = statusFilter,
+                    options = availableStatusFilters,
+                    onSelect = { viewModel.setStatusFilter(it) },
                 )
-            )
-        },
-    ) { paddingValues ->
+            }
+        }
         // ── Master gamepad handler ───────────────────────────────────────
         // D-pad up/down steps the list, left/right page-scrolls with hold
         // acceleration (then letter jumps).  A smart-syncs the row, X syncs
@@ -383,8 +383,8 @@ fun SavesScreen(
             state = rememberSwipeRefreshState(isRefreshing = isSyncing),
             onRefresh = { viewModel.scanSaves() },
             modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
+                .fillMaxWidth()
+                .weight(1f)
                 .focusRequester(listFocusRequester)
                 .focusable()
                 .onPreviewKeyEvent { event ->

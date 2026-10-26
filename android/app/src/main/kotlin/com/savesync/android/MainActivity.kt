@@ -69,10 +69,13 @@ import com.savesync.android.ui.NAV_TAB_ROUTES
 import com.savesync.android.ui.enter
 import com.savesync.android.ui.exit
 import com.savesync.android.ui.navMotionFor
-import com.savesync.android.ui.components.GsFooterHeights
+import com.savesync.android.ui.components.GsChromeFooter
+import com.savesync.android.ui.components.GsChromeHeader
+import com.savesync.android.ui.components.GsChromeState
+import com.savesync.android.ui.components.LocalGsChrome
+import com.savesync.android.ui.components.chromeKeyFor
 import com.savesync.android.ui.components.GsNotifier
 import com.savesync.android.ui.components.GsSnackbarHost
-import com.savesync.android.ui.components.LocalFooterHeight
 import com.savesync.android.ui.components.LocalGsHaptics
 import com.savesync.android.ui.components.LocalGsNotifier
 import com.savesync.android.ui.components.rememberGsHaptics
@@ -88,7 +91,6 @@ import com.savesync.android.ui.theme.rememberHighContrast
 import com.savesync.android.ui.theme.rememberReduceMotion
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.platform.LocalDensity
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -504,9 +506,10 @@ private fun MainApp() {
     val notifier = remember(snackbarHostState, haptics) {
         GsNotifier(snackbarHostState, appScope, haptics)
     }
-    // Until the footer moves into MainApp, each screen draws its own hints;
-    // they report their height here so the snackbar never covers them.
-    val footerHeights = remember { GsFooterHeights() }
+    // The one header and footer (GsChrome.kt): screens publish what they
+    // want in them, keyed by destination.
+    val chrome = remember { GsChromeState() }
+    val chromeKey = chromeKeyFor(currentRoute, backStackEntry?.arguments?.getString("titleId"))
 
     CompositionLocalProvider(
         LocalServerOnline provides serverOnline,
@@ -517,18 +520,26 @@ private fun MainApp() {
         LocalHighContrast provides highContrast,
         LocalGsHaptics provides haptics,
         LocalGsNotifier provides notifier,
-        LocalFooterHeight provides footerHeights,
+        LocalGsChrome provides chrome,
     ) {
-        // No Scaffold bars here — each screen draws its own GsTopBar (header
-        // + tab strip + sub-tab chips) and GsFooterHints, so the hints can
-        // follow the screen's state.
+        // Persistent chrome: one header and one footer for every screen, so
+        // a transition moves content only and the tab highlight can travel.
+        // The footer follows the screen's own state through its spec; the
+        // Scaffold keeps the snackbar above it.
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                GsChromeHeader(
+                    routePattern = currentRoute,
+                    key = chromeKey,
+                    onTabClick = onNavigateToTab,
+                    onBack = { navController.popBackStack() },
+                )
+            },
+            bottomBar = { GsChromeFooter(chromeKey) },
             snackbarHost = {
-                val footerDp = with(LocalDensity.current) { footerHeights.maxPx.toDp() }
                 GsSnackbarHost(
                     host = snackbarHostState,
-                    modifier = Modifier.padding(bottom = footerDp),
                     onOccludedChange = notifier::setOccludedBottom,
                 )
             },

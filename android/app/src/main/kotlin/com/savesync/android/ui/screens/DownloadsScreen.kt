@@ -27,7 +27,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -57,11 +56,11 @@ import com.savesync.android.sync.DownloadManager
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.GsListRow
 import com.savesync.android.ui.components.GsPill
-import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
 import com.savesync.android.ui.components.LocalInputTracker
@@ -197,112 +196,108 @@ fun DownloadsScreen(
         else -> null
     }
 
-    Scaffold(
-        topBar = {
-            GsTopBar(
-                activeTabIndex = 3,
-                onTabClick = onNavigateToTab,
-                actions = {
-                    if (finishedCount > 0) {
-                        TextButton(onClick = { viewModel.clearFinishedDownloads() }) {
-                            Text("Clear finished", color = GsColors.Accent)
-                        }
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            GsFooterHints(
-                buildList {
-                    if (primaryLabel != null) add(GsHint(GsButton.A, primaryLabel))
-                    if (activeCount > 0) add(GsHint(GsButton.B, "Pause running"))
-                    if (finishedCount > 0) add(GsHint(GsButton.X, "Clear finished"))
-                    selected?.let { sel ->
-                        add(GsHint(GsButton.Y, if (sel.isTerminal) "Remove" else "Cancel"))
-                    }
-                    add(GsHint(GsButton.L1, "Tabs"))
-                    add(GsHint(GsButton.START, "Exit"))
-                }
-            )
-        },
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .focusRequester(listFocusRequester)
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (holdNav.handleHorizontalHoldKeyEvent(
-                            event,
-                            scope,
-                            onPage = { d ->
-                                val page = listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
-                                moveTo(selectedIndex + d * page)
-                            },
-                            // No names to letter-jump through: keep paging.
-                            onAlphabet = { d ->
-                                val page = listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
-                                moveTo(selectedIndex + d * page)
-                            },
-                        )
-                    ) return@onPreviewKeyEvent true
-                    if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
-                    // First key after touch on a device without a gamepad: it only
-                    // reveals the cursor, so nothing acts on a row that wasn't lit.
-                    if (inputTracker?.isRevealPress == true && isRevealGuarded(event.key)) {
-                        return@onPreviewKeyEvent true
-                    }
-                    when (event.key) {
-                        Key.DirectionDown -> { step(1); true }
-                        Key.DirectionUp -> { step(-1); true }
-                        // A held A's repeats are ignored: one press, one
-                        // pause / resume, never a pause-then-resume flicker.
-                        Key.ButtonA, Key.Enter -> {
-                            if (event.nativeKeyEvent.repeatCount == 0) {
-                                downloads.getOrNull(selectedIndex)?.let { primaryAction(it) }
-                            }
-                            true
-                        }
-                        // B: pause the running download (the selected one
-                        // if it is running, else the first that is).  With
-                        // nothing running it is unclaimed — and the
-                        // Activity swallows it, so B never exits.
-                        Key.ButtonB -> {
-                            val running = downloads.getOrNull(selectedIndex)
-                                ?.takeIf { it.status == DownloadEntity.Status.DOWNLOADING }
-                                ?: downloads.firstOrNull { it.status == DownloadEntity.Status.DOWNLOADING }
-                            if (running != null) {
-                                viewModel.pauseDownload(running.id)
-                                true
-                            } else false
-                        }
-                        Key.ButtonX -> {
-                            if (finishedCount > 0) viewModel.clearFinishedDownloads()
-                            true
-                        }
-                        Key.ButtonY -> {
-                            removeTarget = downloads.getOrNull(selectedIndex)
-                            true
-                        }
-                        else -> false
+    // Header actions and footer hints, drawn by MainApp's persistent chrome.
+    // Keyed on counts and the selected row's status, not on every D-pad step.
+    val selectedStatus = selected?.status
+    val selectedTerminal = selected?.isTerminal
+    val chromeSpec = remember(finishedCount, activeCount, primaryLabel, selectedStatus, selectedTerminal) {
+        GsChromeSpec(
+            actions = {
+                if (finishedCount > 0) {
+                    TextButton(onClick = { viewModel.clearFinishedDownloads() }) {
+                        Text("Clear finished", color = GsColors.Accent)
                     }
                 }
-        ) {
-            if (downloads.isEmpty()) {
-                EmptyDownloads()
-            } else {
-                DownloadsList(
-                    downloads = downloads,
-                    liveProgress = liveProgress,
-                    listState = listState,
-                    activeCount = activeCount,
-                    finishedCount = finishedCount,
-                    selectedIndex = { selectedIndex },
-                    onSelect = { selectedIndex = it },
-                    viewModel = viewModel,
-                )
+            },
+            hints = buildList {
+                if (primaryLabel != null) add(GsHint(GsButton.A, primaryLabel))
+                if (activeCount > 0) add(GsHint(GsButton.B, "Pause running"))
+                if (finishedCount > 0) add(GsHint(GsButton.X, "Clear finished"))
+                selectedTerminal?.let { terminal ->
+                    add(GsHint(GsButton.Y, if (terminal) "Remove" else "Cancel"))
+                }
+                add(GsHint(GsButton.L1, "Tabs"))
+                add(GsHint(GsButton.START, "Exit"))
+            },
+        )
+    }
+    GsScreenChrome("downloads", chromeSpec)
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .focusRequester(listFocusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (holdNav.handleHorizontalHoldKeyEvent(
+                        event,
+                        scope,
+                        onPage = { d ->
+                            val page = listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
+                            moveTo(selectedIndex + d * page)
+                        },
+                        // No names to letter-jump through: keep paging.
+                        onAlphabet = { d ->
+                            val page = listState.layoutInfo.visibleItemsInfo.size.coerceAtLeast(1)
+                            moveTo(selectedIndex + d * page)
+                        },
+                    )
+                ) return@onPreviewKeyEvent true
+                if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                // First key after touch on a device without a gamepad: it only
+                // reveals the cursor, so nothing acts on a row that wasn't lit.
+                if (inputTracker?.isRevealPress == true && isRevealGuarded(event.key)) {
+                    return@onPreviewKeyEvent true
+                }
+                when (event.key) {
+                    Key.DirectionDown -> { step(1); true }
+                    Key.DirectionUp -> { step(-1); true }
+                    // A held A's repeats are ignored: one press, one
+                    // pause / resume, never a pause-then-resume flicker.
+                    Key.ButtonA, Key.Enter -> {
+                        if (event.nativeKeyEvent.repeatCount == 0) {
+                            downloads.getOrNull(selectedIndex)?.let { primaryAction(it) }
+                        }
+                        true
+                    }
+                    // B: pause the running download (the selected one
+                    // if it is running, else the first that is).  With
+                    // nothing running it is unclaimed — and the
+                    // Activity swallows it, so B never exits.
+                    Key.ButtonB -> {
+                        val running = downloads.getOrNull(selectedIndex)
+                            ?.takeIf { it.status == DownloadEntity.Status.DOWNLOADING }
+                            ?: downloads.firstOrNull { it.status == DownloadEntity.Status.DOWNLOADING }
+                        if (running != null) {
+                            viewModel.pauseDownload(running.id)
+                            true
+                        } else false
+                    }
+                    Key.ButtonX -> {
+                        if (finishedCount > 0) viewModel.clearFinishedDownloads()
+                        true
+                    }
+                    Key.ButtonY -> {
+                        removeTarget = downloads.getOrNull(selectedIndex)
+                        true
+                    }
+                    else -> false
+                }
             }
+    ) {
+        if (downloads.isEmpty()) {
+            EmptyDownloads()
+        } else {
+            DownloadsList(
+                downloads = downloads,
+                liveProgress = liveProgress,
+                listState = listState,
+                activeCount = activeCount,
+                finishedCount = finishedCount,
+                selectedIndex = { selectedIndex },
+                onSelect = { selectedIndex = it },
+                viewModel = viewModel,
+            )
         }
     }
 

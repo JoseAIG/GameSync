@@ -24,7 +24,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -46,9 +45,9 @@ import com.savesync.android.emulators.EmulatorRegistry
 import com.savesync.android.emulators.impl.RetroArchEmulator
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.GsButton
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
-import com.savesync.android.ui.components.GsSubScreenBar
 import com.savesync.android.ui.components.FolderPickerDialog
 
 /**
@@ -72,68 +71,66 @@ fun EmulatorsScreen(
 
     var folderPickerForEmulator by remember { mutableStateOf<String?>(null) }
 
-    Scaffold(
-        topBar = {
-            GsSubScreenBar(title = "Emulator Configuration", onBack = onNavigateBack)
-        },
-        bottomBar = {
-            GsFooterHints(
-                listOf(
-                    GsHint(GsButton.DPAD, "Move"),
-                    GsHint(GsButton.A, "Select"),
-                    GsHint(GsButton.B, "Back"),
-                )
-            )
-        },
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = "Set a custom save folder for each emulator. Existing " +
-                       "auto-detection (Emudeck root, retroarch.cfg, etc.) " +
-                       "is used when no override is configured. Existing " +
-                       "saves on disk are still discovered regardless.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    // Sub-screen header and hints, drawn by MainApp's persistent chrome.
+    val chromeSpec = remember(onNavigateBack) {
+        GsChromeSpec(
+            title = "Emulator Configuration",
+            onBack = onNavigateBack,
+            hints = listOf(
+                GsHint(GsButton.DPAD, "Move"),
+                GsHint(GsButton.A, "Select"),
+                GsHint(GsButton.B, "Back"),
+            ),
+        )
+    }
+    GsScreenChrome("emulators", chromeSpec)
 
-            EmulatorCatalog.ALL.forEach { descriptor ->
-                EmulatorCard(
-                    descriptor = descriptor,
-                    overridePath = settings.saveDirOverrides[descriptor.key],
-                    overrideWarning = EmulatorRegistry.saveDirOverrideWarning(
-                        descriptor.key, settings.saveDirOverrides[descriptor.key]
-                    ),
-                    onBrowse = { folderPickerForEmulator = descriptor.key },
-                    onClear = { viewModel.clearSaveDirOverride(descriptor.key) },
-                    extras = if (descriptor.key == RetroArchEmulator.EMULATOR_KEY) {
-                        {
-                            RetroArchExtras(
-                                beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
-                                cdGamesPerContentFolder = settings.cdGamesPerContentFolder,
-                                onBeetleChange = { newBeetle ->
-                                    viewModel.saveRetroArchToggles(
-                                        beetleSaturnPerCoreFolder = newBeetle,
-                                        cdGamesPerContentFolder = settings.cdGamesPerContentFolder
-                                    )
-                                },
-                                onPerContentChange = { newPerContent ->
-                                    viewModel.saveRetroArchToggles(
-                                        beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
-                                        cdGamesPerContentFolder = newPerContent
-                                    )
-                                },
-                            )
-                        }
-                    } else null,
-                )
-            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "Set a custom save folder for each emulator. Existing " +
+                   "auto-detection (Emudeck root, retroarch.cfg, etc.) " +
+                   "is used when no override is configured. Existing " +
+                   "saves on disk are still discovered regardless.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        EmulatorCatalog.ALL.forEach { descriptor ->
+            EmulatorCard(
+                descriptor = descriptor,
+                overridePath = settings.saveDirOverrides[descriptor.key],
+                overrideWarning = EmulatorRegistry.saveDirOverrideWarning(
+                    descriptor.key, settings.saveDirOverrides[descriptor.key]
+                ),
+                onBrowse = { folderPickerForEmulator = descriptor.key },
+                onClear = { viewModel.clearSaveDirOverride(descriptor.key) },
+                extras = if (descriptor.key == RetroArchEmulator.EMULATOR_KEY) {
+                    {
+                        RetroArchExtras(
+                            beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
+                            cdGamesPerContentFolder = settings.cdGamesPerContentFolder,
+                            onBeetleChange = { newBeetle ->
+                                viewModel.saveRetroArchToggles(
+                                    beetleSaturnPerCoreFolder = newBeetle,
+                                    cdGamesPerContentFolder = settings.cdGamesPerContentFolder
+                                )
+                            },
+                            onPerContentChange = { newPerContent ->
+                                viewModel.saveRetroArchToggles(
+                                    beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
+                                    cdGamesPerContentFolder = newPerContent
+                                )
+                            },
+                        )
+                    }
+                } else null,
+            )
         }
     }
 

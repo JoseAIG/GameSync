@@ -32,7 +32,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -78,10 +77,11 @@ import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsDialog
 import com.savesync.android.ui.components.GsDialogChoice
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
+import com.savesync.android.ui.components.GsSubTabRow
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.GsListRow
-import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
@@ -341,70 +341,69 @@ fun RomCatalogScreen(
         activity?.systemCycleEvents?.collect { delta -> cycleSystem(delta) }
     }
 
-    Scaffold(
-        topBar = {
-            GsTopBar(
-                activeTabIndex = 1,
-                onTabClick = onNavigateToTab,
-                actions = {
-                    if (loading && catalog.isNotEmpty()) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = GsColors.Accent,
-                        )
-                    }
-                    IconButton(onClick = {
-                        searchVisible = !searchVisible
-                        if (!searchVisible) query = ""
-                    }) {
-                        Icon(Icons.Filled.Search, contentDescription = "Search (Y)", tint = GsColors.Text)
-                    }
-                },
-                subTabs = {
-                    SystemFilterChip(
-                        label = activeSystem ?: ALL_SYSTEMS_LABEL,
-                        options = listOf(ALL_SYSTEMS_LABEL) + systems,
-                        onSelect = { choice ->
-                            systemFilter = choice.takeIf { it != ALL_SYSTEMS_LABEL }
-                        },
+    // Header actions and footer hints, drawn by MainApp's persistent chrome.
+    val showSpinner = loading && catalog.isNotEmpty()
+    val clearSearchHint = searchVisible || query.isNotEmpty()
+    val chromeSpec = remember(showSpinner, raOnly, clearSearchHint) {
+        GsChromeSpec(
+            actions = {
+                if (showSpinner) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = GsColors.Accent,
                     )
-                    FilterChip(
-                        selected = raOnly,
-                        onClick = { toggleRaOnly() },
-                        label = { Text("RetroAchievements") },
-                        leadingIcon = if (LocalShowButtonHints.current) {
-                            { ButtonGlyph(GsButton.X) }
-                        } else null,
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = GsColors.Panel,
-                            labelColor = GsColors.Dim,
-                            selectedContainerColor = GsColors.Ra,
-                            selectedLabelColor = GsColors.Ink,
-                        ),
-                    )
-                },
-            )
-        },
-        bottomBar = {
-            GsFooterHints(
+                }
+                IconButton(onClick = {
+                    searchVisible = !searchVisible
+                    if (!searchVisible) query = ""
+                }) {
+                    Icon(Icons.Filled.Search, contentDescription = "Search (Y)", tint = GsColors.Text)
+                }
+            },
+            hints = listOf(
+                GsHint(GsButton.A, "Install"),
+                GsHint(GsButton.X, if (raOnly) "All games" else "RA only"),
+                GsHint(GsButton.Y, "Search"),
+            ) + (if (clearSearchHint) listOf(GsHint(GsButton.B, "Clear search")) else emptyList()) +
                 listOf(
-                    GsHint(GsButton.A, "Install"),
-                    GsHint(GsButton.X, if (raOnly) "All games" else "RA only"),
-                    GsHint(GsButton.Y, "Search"),
-                ) + (if (searchVisible || query.isNotEmpty()) listOf(GsHint(GsButton.B, "Clear search")) else emptyList()) +
-                    listOf(
-                        GsHint(GsButton.SELECT, "System"),
-                        GsHint(GsButton.L1, "Tabs"),
-                        GsHint(GsButton.START, "Exit"),
-                    )
+                    GsHint(GsButton.SELECT, "System"),
+                    GsHint(GsButton.L1, "Tabs"),
+                    GsHint(GsButton.START, "Exit"),
+                ),
+        )
+    }
+    GsScreenChrome("catalog", chromeSpec)
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Sub-tab chips move with their list (SELECT / X step them).
+        GsSubTabRow {
+            SystemFilterChip(
+                label = activeSystem ?: ALL_SYSTEMS_LABEL,
+                options = listOf(ALL_SYSTEMS_LABEL) + systems,
+                onSelect = { choice ->
+                    systemFilter = choice.takeIf { it != ALL_SYSTEMS_LABEL }
+                },
             )
-        },
-    ) { padding ->
+            FilterChip(
+                selected = raOnly,
+                onClick = { toggleRaOnly() },
+                label = { Text("RetroAchievements") },
+                leadingIcon = if (LocalShowButtonHints.current) {
+                    { ButtonGlyph(GsButton.X) }
+                } else null,
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = GsColors.Panel,
+                    labelColor = GsColors.Dim,
+                    selectedContainerColor = GsColors.Ra,
+                    selectedLabelColor = GsColors.Ink,
+                ),
+            )
+        }
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
+                .fillMaxWidth()
+                .weight(1f)
                 .focusRequester(listFocusRequester)
                 .focusable()
                 .onPreviewKeyEvent { event ->

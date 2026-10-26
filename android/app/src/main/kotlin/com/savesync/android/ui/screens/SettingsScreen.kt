@@ -32,7 +32,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -65,9 +64,9 @@ import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.components.FolderPickerDialog
 import com.savesync.android.ui.components.GsButton
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
-import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.gsFocusRing
 import com.savesync.android.ui.theme.GsColors
@@ -145,716 +144,699 @@ fun SettingsScreen(
         if (gamepadHints) runCatching { firstEntryFocus.requestFocus() }
     }
 
-    Scaffold(
-        topBar = {
-            GsTopBar(
-                activeTabIndex = 4,
-                onTabClick = onNavigateToTab,
-            )
-        },
-        bottomBar = {
-            GsFooterHints(
-                listOf(
-                    GsHint(GsButton.DPAD, "Move"),
-                    GsHint(GsButton.A, "Select"),
-                    GsHint(GsButton.L1, "Tabs"),
-                    GsHint(GsButton.START, "Exit"),
-                )
-            )
-        },
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
+    // Footer hints, drawn by MainApp's persistent chrome.
+    GsScreenChrome("settings", SETTINGS_CHROME)
 
-            // --- Library: the console clients' "Rescan titles" / "Refresh
-            // catalog" entries ---
-            Text("Library", style = MaterialTheme.typography.titleMedium, color = GsColors.Accent)
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+
+        // --- Library: the console clients' "Rescan titles" / "Refresh
+        // catalog" entries ---
+        Text("Library", style = MaterialTheme.typography.titleMedium, color = GsColors.Accent)
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = { viewModel.scanSaves() },
+                enabled = syncState !is SyncState.Syncing,
+                modifier = Modifier
+                    .weight(1f)
+                    .focusRequester(firstEntryFocus)
+                    .gsFocusRing()
             ) {
-                Button(
-                    onClick = { viewModel.scanSaves() },
-                    enabled = syncState !is SyncState.Syncing,
-                    modifier = Modifier
-                        .weight(1f)
-                        .focusRequester(firstEntryFocus)
-                        .gsFocusRing()
-                ) {
-                    Text("Rescan saves")
-                }
-                Button(
-                    onClick = { viewModel.refreshCatalog() },
-                    enabled = !catalogLoading,
-                    modifier = Modifier
-                        .weight(1f)
-                        .gsFocusRing()
-                ) {
-                    Text(if (catalogLoading) "Refreshing…" else "Refresh catalog")
+                Text("Rescan saves")
+            }
+            Button(
+                onClick = { viewModel.refreshCatalog() },
+                enabled = !catalogLoading,
+                modifier = Modifier
+                    .weight(1f)
+                    .gsFocusRing()
+            ) {
+                Text(if (catalogLoading) "Refreshing…" else "Refresh catalog")
+            }
+        }
+        Text(
+            text = catalogRefreshStatus
+                ?: ("Refresh catalog asks the server to rescan its ROM folder, " +
+                    "throws the cached catalog away and downloads it again."),
+            style = MaterialTheme.typography.bodySmall,
+            color = if (catalogRefreshStatus != null) GsColors.Text else GsColors.Dim
+        )
+
+        HorizontalDivider()
+
+        // --- Server settings ---
+        Text("Server", style = MaterialTheme.typography.titleMedium)
+
+        OutlinedTextField(
+            value = serverUrl,
+            onValueChange = { serverUrl = it },
+            label = { Text("Server URL") },
+            placeholder = { Text("http://192.168.1.100:8000") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+        )
+
+        OutlinedTextField(
+            value = apiKey,
+            onValueChange = { apiKey = it },
+            label = { Text("API Key") },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            visualTransformation = if (apiKeyVisible) VisualTransformation.None
+                else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            trailingIcon = {
+                IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
+                    Icon(
+                        if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                        contentDescription = if (apiKeyVisible) "Hide" else "Show"
+                    )
                 }
             }
+        )
+
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        connectionStatus = "Testing…"
+                        connectionOk = null
+                        try {
+                            val api = ApiClient.create(serverUrl, apiKey)
+                            val resp = api.getStatus()
+                            connectionStatus = "Connected — v${resp.version}"
+                            connectionOk = true
+                        } catch (e: Exception) {
+                            connectionStatus = "Failed: ${e.message}"
+                            connectionOk = false
+                        }
+                    }
+                },
+                modifier = Modifier.weight(1f).gsFocusRing()
+            ) {
+                Text("Test Connection")
+            }
+
+            Button(
+                onClick = {
+                    viewModel.saveSettings(
+                        serverUrl = serverUrl,
+                        apiKey = apiKey,
+                        autoSync = autoSync,
+                        intervalMinutes = intervalMinutes,
+                        romScanDir = romScanDir,
+                        emudeckDir = emudeckDir,
+                        saturnSyncFormat = saturnSyncFormat,
+                        beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
+                        cdGamesPerContentFolder = settings.cdGamesPerContentFolder,
+                        segaCdSyncFormat = segaCdSyncFormat,
+                        ps2Emulator = ps2Emulator
+                    )
+                    savedConfirmation = true
+                },
+                modifier = Modifier.weight(1f).gsFocusRing(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            ) {
+                Text("Save")
+            }
+        }
+
+        if (savedConfirmation) {
             Text(
-                text = catalogRefreshStatus
-                    ?: ("Refresh catalog asks the server to rescan its ROM folder, " +
-                        "throws the cached catalog away and downloads it again."),
+                text = "✓ Settings saved",
                 style = MaterialTheme.typography.bodySmall,
-                color = if (catalogRefreshStatus != null) GsColors.Text else GsColors.Dim
+                color = GsColors.Ok
             )
+            LaunchedEffect(Unit) {
+                kotlinx.coroutines.delay(3000)
+                savedConfirmation = false
+            }
+        }
 
-            HorizontalDivider()
-
-            // --- Server settings ---
-            Text("Server", style = MaterialTheme.typography.titleMedium)
-
-            OutlinedTextField(
-                value = serverUrl,
-                onValueChange = { serverUrl = it },
-                label = { Text("Server URL") },
-                placeholder = { Text("http://192.168.1.100:8000") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri)
+        connectionStatus?.let { status ->
+            Text(
+                text = status,
+                color = when (connectionOk) {
+                    true -> GsColors.Ok
+                    false -> MaterialTheme.colorScheme.error
+                    null -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+                style = MaterialTheme.typography.bodySmall
             )
+        }
 
-            OutlinedTextField(
-                value = apiKey,
-                onValueChange = { apiKey = it },
-                label = { Text("API Key") },
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-                visualTransformation = if (apiKeyVisible) VisualTransformation.None
-                    else PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                trailingIcon = {
-                    IconButton(onClick = { apiKeyVisible = !apiKeyVisible }) {
-                        Icon(
-                            if (apiKeyVisible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                            contentDescription = if (apiKeyVisible) "Hide" else "Show"
+        HorizontalDivider()
+
+        // --- Emudeck ---
+        Text("Emudeck", style = MaterialTheme.typography.titleMedium)
+
+        Text(
+            text = "Optional Emudeck folder. When set, 3DS uses storage/Azahar, " +
+                   "GC/Wii uses storage/Dolphin, PS2 uses storage/NetherSX2, " +
+                   "and PSP uses storage/PPSSPP. Other emulators keep their normal paths.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Emudeck Folder",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = if (emudeckDir.isNotBlank()) emudeckDir else "Not set",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (emudeckDir.isNotBlank())
+                        MaterialTheme.colorScheme.onSurface
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = { showEmudeckFolderPicker = true }, modifier = Modifier.gsFocusRing()) {
+                Icon(
+                    Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("Browse")
+            }
+        }
+
+        if (emudeckDir.isNotBlank()) {
+            OutlinedButton(
+                onClick = { emudeckDir = "" },
+                modifier = Modifier.fillMaxWidth().gsFocusRing()
+            ) {
+                Text("Clear Emudeck Folder")
+            }
+        }
+
+        HorizontalDivider()
+
+        // --- Auto sync ---
+        Text("Auto Sync", style = MaterialTheme.typography.titleMedium)
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("Enable auto sync")
+            Switch(
+                checked = autoSync,
+                onCheckedChange = { autoSync = it },
+                modifier = Modifier.gsFocusRing(),
+            )
+        }
+
+        if (autoSync) {
+            ExposedDropdownMenuBox(
+                expanded = intervalDropdownExpanded,
+                onExpandedChange = { intervalDropdownExpanded = it }
+            ) {
+                OutlinedTextField(
+                    value = "$intervalMinutes minutes",
+                    onValueChange = {},
+                    readOnly = true,
+                    label = { Text("Sync Interval") },
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(intervalDropdownExpanded) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .menuAnchor()
+                )
+                ExposedDropdownMenu(
+                    expanded = intervalDropdownExpanded,
+                    onDismissRequest = { intervalDropdownExpanded = false }
+                ) {
+                    intervalOptions.forEach { minutes ->
+                        DropdownMenuItem(
+                            text = { Text("$minutes minutes") },
+                            onClick = {
+                                intervalMinutes = minutes
+                                intervalDropdownExpanded = false
+                            }
                         )
                     }
                 }
+            }
+        }
+
+        HorizontalDivider()
+
+        // --- Scan ---
+        Text("Saves", style = MaterialTheme.typography.titleMedium)
+
+        var saturnFormatExpanded by remember { mutableStateOf(false) }
+        ExposedDropdownMenuBox(
+            expanded = saturnFormatExpanded,
+            onExpandedChange = { saturnFormatExpanded = it }
+        ) {
+            OutlinedTextField(
+                value = saturnSyncFormat.label,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Saturn Download Format") },
+                supportingText = {
+                    Text("Server stays on Beetle/Mednafen format; this controls how Saturn saves are written locally.")
+                },
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(saturnFormatExpanded)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor()
             )
-
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+            ExposedDropdownMenu(
+                expanded = saturnFormatExpanded,
+                onDismissRequest = { saturnFormatExpanded = false }
             ) {
-                Button(
-                    onClick = {
-                        scope.launch {
-                            connectionStatus = "Testing…"
-                            connectionOk = null
-                            try {
-                                val api = ApiClient.create(serverUrl, apiKey)
-                                val resp = api.getStatus()
-                                connectionStatus = "Connected — v${resp.version}"
-                                connectionOk = true
-                            } catch (e: Exception) {
-                                connectionStatus = "Failed: ${e.message}"
-                                connectionOk = false
-                            }
+                SaturnSyncFormat.values().forEach { format ->
+                    DropdownMenuItem(
+                        text = { Text(format.label) },
+                        onClick = {
+                            saturnSyncFormat = format
+                            saturnFormatExpanded = false
                         }
-                    },
-                    modifier = Modifier.weight(1f).gsFocusRing()
-                ) {
-                    Text("Test Connection")
-                }
-
-                Button(
-                    onClick = {
-                        viewModel.saveSettings(
-                            serverUrl = serverUrl,
-                            apiKey = apiKey,
-                            autoSync = autoSync,
-                            intervalMinutes = intervalMinutes,
-                            romScanDir = romScanDir,
-                            emudeckDir = emudeckDir,
-                            saturnSyncFormat = saturnSyncFormat,
-                            beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
-                            cdGamesPerContentFolder = settings.cdGamesPerContentFolder,
-                            segaCdSyncFormat = segaCdSyncFormat,
-                            ps2Emulator = ps2Emulator
-                        )
-                        savedConfirmation = true
-                    },
-                    modifier = Modifier.weight(1f).gsFocusRing(),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                     )
-                ) {
-                    Text("Save")
                 }
             }
+        }
 
-            if (savedConfirmation) {
+        var segaCdFormatExpanded by remember { mutableStateOf(false) }
+        ExposedDropdownMenuBox(
+            expanded = segaCdFormatExpanded,
+            onExpandedChange = { segaCdFormatExpanded = it }
+        ) {
+            OutlinedTextField(
+                value = segaCdSyncFormat.label,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("Sega CD Save Format") },
+                supportingText = {
+                    Text(
+                        "Genesis Plus GX writes <game>.brm; PicoDrive writes <game>.srm. " +
+                        "Pick the core you play with. Genesis Plus GX only flushes Sega CD " +
+                        "backup RAM on Close Content — killing RetroArch from the task " +
+                        "switcher loses the save before GameSync can see it."
+                    )
+                },
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(segaCdFormatExpanded)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor()
+            )
+            ExposedDropdownMenu(
+                expanded = segaCdFormatExpanded,
+                onDismissRequest = { segaCdFormatExpanded = false }
+            ) {
+                SegaCdSyncFormat.values().forEach { format ->
+                    DropdownMenuItem(
+                        text = { Text(format.label) },
+                        onClick = {
+                            segaCdSyncFormat = format
+                            segaCdFormatExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+
+        var ps2EmulatorExpanded by remember { mutableStateOf(false) }
+        ExposedDropdownMenuBox(
+            expanded = ps2EmulatorExpanded,
+            onExpandedChange = { ps2EmulatorExpanded = it }
+        ) {
+            OutlinedTextField(
+                value = ps2Emulator.label,
+                onValueChange = {},
+                readOnly = true,
+                label = { Text("PS2 Emulator") },
+                supportingText = {
+                    Text("Which emulator's memcards folder PS2 saves are read from and downloaded to.")
+                },
+                trailingIcon = {
+                    ExposedDropdownMenuDefaults.TrailingIcon(ps2EmulatorExpanded)
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor()
+            )
+            ExposedDropdownMenu(
+                expanded = ps2EmulatorExpanded,
+                onDismissRequest = { ps2EmulatorExpanded = false }
+            ) {
+                Ps2EmulatorChoice.values().forEach { choice ->
+                    DropdownMenuItem(
+                        text = { Text(choice.label) },
+                        onClick = {
+                            ps2Emulator = choice
+                            ps2EmulatorExpanded = false
+                        }
+                    )
+                }
+            }
+        }
+
+        // (Beetle Saturn per-core + CD per-content toggles moved to the
+        // Emulator Configuration screen — they live with the rest of the
+        // RetroArch knobs there.)
+
+        HorizontalDivider()
+
+        // --- Emulator Configuration link ---
+        OutlinedButton(
+            onClick = onNavigateToEmulators,
+            modifier = Modifier.fillMaxWidth().gsFocusRing()
+        ) {
+            Text("Emulator Configuration →")
+        }
+        Text(
+            text = "Per-emulator save folder overrides, RetroArch toggles, " +
+                   "and other emulator-specific options.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        HorizontalDivider()
+
+        // --- ROM Scan Directory ---
+        Text("ROMs", style = MaterialTheme.typography.titleMedium)
+
+        Text(
+            text = "Select the folder where your ROMs are organized by system subfolder " +
+                   "(e.g. GBA/, MegaDrive/, PS1/, SNES/, …). GameSync uses this to detect " +
+                   "which games you have installed so it can show server saves for them. " +
+                   "When Emudeck is set, GameSync uses its roms folder.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        // Current path display + browse button
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "✓ Settings saved",
+                    text = "ROM Directory",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = if (effectiveRomScanDir.isNotBlank()) effectiveRomScanDir else "Not set",
                     style = MaterialTheme.typography.bodySmall,
-                    color = GsColors.Ok
-                )
-                LaunchedEffect(Unit) {
-                    kotlinx.coroutines.delay(3000)
-                    savedConfirmation = false
-                }
-            }
-
-            connectionStatus?.let { status ->
-                Text(
-                    text = status,
-                    color = when (connectionOk) {
-                        true -> GsColors.Ok
-                        false -> MaterialTheme.colorScheme.error
-                        null -> MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                    style = MaterialTheme.typography.bodySmall
+                    color = if (effectiveRomScanDir.isNotBlank())
+                        MaterialTheme.colorScheme.onSurface
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Spacer(Modifier.width(8.dp))
+            Button(onClick = { showFolderPicker = true }, modifier = Modifier.gsFocusRing()) {
+                Icon(
+                    Icons.Default.FolderOpen,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("Browse")
+            }
+        }
 
-            HorizontalDivider()
+        if (romScanDir.isNotBlank() && emudeckDir.isBlank()) {
+            OutlinedButton(
+                onClick = { romScanDir = "" },
+                modifier = Modifier.fillMaxWidth().gsFocusRing()
+            ) {
+                Text("Clear ROM Directory")
+            }
+        }
 
-            // --- Emudeck ---
-            Text("Emudeck", style = MaterialTheme.typography.titleMedium)
+        // ROM scan diagnostic
+        val romScanResults by viewModel.romScanResults.collectAsState()
+        OutlinedButton(
+            onClick = { viewModel.runRomScanDiagnostic(romScanDir) },
+            modifier = Modifier.fillMaxWidth().gsFocusRing()
+        ) {
+            Text("Test ROM Scan")
+        }
 
+        // Prepare canonical per-system folders so catalog downloads
+        // land in predictable places instead of inventing stray
+        // folder names.  Existing files/folders are never touched.
+        val prepareMessage by viewModel.prepareFoldersMessage.collectAsState()
+        OutlinedButton(
+            onClick = { viewModel.prepareRomFolders(romScanDir) },
+            modifier = Modifier.fillMaxWidth().gsFocusRing(),
+            enabled = effectiveRomScanDir.isNotBlank(),
+        ) {
+            Text("Prepare ROM Folders")
+        }
+        Text(
+            text = "Creates the standard per-system folders " +
+                "(PS1, GBA, SEGACD, …) under your ROM directory. " +
+                "Existing folders are left alone.",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        prepareMessage?.let { msg ->
             Text(
-                text = "Optional Emudeck folder. When set, 3DS uses storage/Azahar, " +
-                       "GC/Wii uses storage/Dolphin, PS2 uses storage/NetherSX2, " +
-                       "and PSP uses storage/PPSSPP. Other emulators keep their normal paths.",
+                text = msg,
+                style = MaterialTheme.typography.labelSmall,
+                color = GsColors.Ok,
+            )
+        }
+        if (romScanResults.isNotEmpty()) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Systems found in ROM directory:",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            romScanResults.forEach { (system, count) ->
+                val ok = count > 0
+                Text(
+                    text = "${if (ok) "✓" else "✗"}  $system  —  $count ROM${if (count != 1) "s" else ""}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (ok) GsColors.Ok else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        // --- Per-system folder overrides ---
+        HorizontalDivider()
+        Text("System Folders", style = MaterialTheme.typography.titleMedium)
+        Text(
+            text = "GameSync auto-detects which subfolder of your ROM directory belongs " +
+                   "to each system. Override any folder here — useful when a folder has " +
+                   "a non-standard name (e.g. \"Saturn\" instead of \"SAT\").",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            val overrides = settings.romDirOverrides
+            val allSystems = (detectedFolders.keys + overrides.keys).toSortedSet()
+            Text(
+                text = "${allSystems.size} system${if (allSystems.size != 1) "s" else ""} detected",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            OutlinedButton(onClick = { viewModel.detectSystemFolders() }) {
+                Text("Detect", style = MaterialTheme.typography.labelMedium)
+            }
+        }
 
+        val overrides = settings.romDirOverrides
+        val allSystems = (detectedFolders.keys + overrides.keys).toSortedSet()
+
+        if (allSystems.isEmpty() && effectiveRomScanDir.isNotBlank()) {
+            Text(
+                text = "No system folders detected yet — press Detect.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        allSystems.forEach { system ->
+            val effectivePath = overrides[system] ?: detectedFolders[system] ?: return@forEach
+            val isOverridden = system in overrides
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // System badge
+                SystemChip(system)
+                Spacer(Modifier.width(8.dp))
+                // Folder path (shrinks to fill remaining space)
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Emudeck Folder",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = if (emudeckDir.isNotBlank()) emudeckDir else "Not set",
+                        text = effectivePath.substringAfterLast('/'),
                         style = MaterialTheme.typography.bodySmall,
-                        color = if (emudeckDir.isNotBlank())
-                            MaterialTheme.colorScheme.onSurface
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant
+                        fontWeight = if (isOverridden) FontWeight.Bold else FontWeight.Normal,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
+                    if (isOverridden) {
+                        Text(
+                            text = effectivePath,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
-                Spacer(Modifier.width(8.dp))
-                Button(onClick = { showEmudeckFolderPicker = true }, modifier = Modifier.gsFocusRing()) {
+                // Browse button
+                IconButton(onClick = { folderPickerForSystem = system }) {
                     Icon(
                         Icons.Default.FolderOpen,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
+                        contentDescription = "Change folder",
+                        modifier = Modifier.size(20.dp),
+                        tint = MaterialTheme.colorScheme.primary
                     )
-                    Spacer(Modifier.width(6.dp))
-                    Text("Browse")
+                }
+                // Clear override button (only shown when user has set an override)
+                if (isOverridden) {
+                    IconButton(onClick = { viewModel.clearRomDirOverride(system) }) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Reset to auto-detected",
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
                 }
             }
+        }
 
-            if (emudeckDir.isNotBlank()) {
-                OutlinedButton(
-                    onClick = { emudeckDir = "" },
-                    modifier = Modifier.fillMaxWidth().gsFocusRing()
-                ) {
-                    Text("Clear Emudeck Folder")
-                }
-            }
+        // Add a custom system folder not yet auto-detected
+        val knownAddSystems = listOf(
+            "SAT", "DC", "PS1", "PS2", "PSP", "GBA", "GBC", "GB", "SNES", "NES",
+            "N64", "NDS", "3DS", "GC", "WII", "MD", "SMS", "GG", "SEGACD",
+            "PCE", "PCECD", "NEOCD",
+            "NGP", "WSWAN", "WSWANC", "A2600", "A7800", "LYNX", "MAME", "ARCADE"
+        ).filter { it !in allSystems }
 
-            HorizontalDivider()
-
-            // --- Auto sync ---
-            Text("Auto Sync", style = MaterialTheme.typography.titleMedium)
-
+        if (knownAddSystems.isNotEmpty()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Enable auto sync")
-                Switch(
-                    checked = autoSync,
-                    onCheckedChange = { autoSync = it },
-                    modifier = Modifier.gsFocusRing(),
-                )
-            }
-
-            if (autoSync) {
                 ExposedDropdownMenuBox(
-                    expanded = intervalDropdownExpanded,
-                    onExpandedChange = { intervalDropdownExpanded = it }
+                    expanded = addSystemExpanded,
+                    onExpandedChange = { addSystemExpanded = it },
+                    modifier = Modifier.weight(1f)
                 ) {
                     OutlinedTextField(
-                        value = "$intervalMinutes minutes",
+                        value = addSystemSelected.ifBlank { "Add system…" },
                         onValueChange = {},
                         readOnly = true,
-                        label = { Text("Sync Interval") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(intervalDropdownExpanded) },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(addSystemExpanded) },
                         modifier = Modifier
                             .fillMaxWidth()
-                            .menuAnchor()
+                            .menuAnchor(),
+                        textStyle = MaterialTheme.typography.bodySmall
                     )
                     ExposedDropdownMenu(
-                        expanded = intervalDropdownExpanded,
-                        onDismissRequest = { intervalDropdownExpanded = false }
+                        expanded = addSystemExpanded,
+                        onDismissRequest = { addSystemExpanded = false }
                     ) {
-                        intervalOptions.forEach { minutes ->
+                        knownAddSystems.forEach { sys ->
                             DropdownMenuItem(
-                                text = { Text("$minutes minutes") },
+                                text = { Text(sys, style = MaterialTheme.typography.bodySmall) },
                                 onClick = {
-                                    intervalMinutes = minutes
-                                    intervalDropdownExpanded = false
+                                    addSystemSelected = sys
+                                    addSystemExpanded = false
                                 }
                             )
                         }
                     }
                 }
-            }
-
-            HorizontalDivider()
-
-            // --- Scan ---
-            Text("Saves", style = MaterialTheme.typography.titleMedium)
-
-            var saturnFormatExpanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = saturnFormatExpanded,
-                onExpandedChange = { saturnFormatExpanded = it }
-            ) {
-                OutlinedTextField(
-                    value = saturnSyncFormat.label,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Saturn Download Format") },
-                    supportingText = {
-                        Text("Server stays on Beetle/Mednafen format; this controls how Saturn saves are written locally.")
-                    },
-                    trailingIcon = {
-                        ExposedDropdownMenuDefaults.TrailingIcon(saturnFormatExpanded)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .menuAnchor()
-                )
-                ExposedDropdownMenu(
-                    expanded = saturnFormatExpanded,
-                    onDismissRequest = { saturnFormatExpanded = false }
+                Button(
+                    onClick = { folderPickerForSystem = addSystemSelected },
+                    enabled = addSystemSelected.isNotBlank()
                 ) {
-                    SaturnSyncFormat.values().forEach { format ->
-                        DropdownMenuItem(
-                            text = { Text(format.label) },
-                            onClick = {
-                                saturnSyncFormat = format
-                                saturnFormatExpanded = false
-                            }
-                        )
-                    }
-                }
-            }
-
-            var segaCdFormatExpanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = segaCdFormatExpanded,
-                onExpandedChange = { segaCdFormatExpanded = it }
-            ) {
-                OutlinedTextField(
-                    value = segaCdSyncFormat.label,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("Sega CD Save Format") },
-                    supportingText = {
-                        Text(
-                            "Genesis Plus GX writes <game>.brm; PicoDrive writes <game>.srm. " +
-                            "Pick the core you play with. Genesis Plus GX only flushes Sega CD " +
-                            "backup RAM on Close Content — killing RetroArch from the task " +
-                            "switcher loses the save before GameSync can see it."
-                        )
-                    },
-                    trailingIcon = {
-                        ExposedDropdownMenuDefaults.TrailingIcon(segaCdFormatExpanded)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .menuAnchor()
-                )
-                ExposedDropdownMenu(
-                    expanded = segaCdFormatExpanded,
-                    onDismissRequest = { segaCdFormatExpanded = false }
-                ) {
-                    SegaCdSyncFormat.values().forEach { format ->
-                        DropdownMenuItem(
-                            text = { Text(format.label) },
-                            onClick = {
-                                segaCdSyncFormat = format
-                                segaCdFormatExpanded = false
-                            }
-                        )
-                    }
-                }
-            }
-
-            var ps2EmulatorExpanded by remember { mutableStateOf(false) }
-            ExposedDropdownMenuBox(
-                expanded = ps2EmulatorExpanded,
-                onExpandedChange = { ps2EmulatorExpanded = it }
-            ) {
-                OutlinedTextField(
-                    value = ps2Emulator.label,
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text("PS2 Emulator") },
-                    supportingText = {
-                        Text("Which emulator's memcards folder PS2 saves are read from and downloaded to.")
-                    },
-                    trailingIcon = {
-                        ExposedDropdownMenuDefaults.TrailingIcon(ps2EmulatorExpanded)
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .menuAnchor()
-                )
-                ExposedDropdownMenu(
-                    expanded = ps2EmulatorExpanded,
-                    onDismissRequest = { ps2EmulatorExpanded = false }
-                ) {
-                    Ps2EmulatorChoice.values().forEach { choice ->
-                        DropdownMenuItem(
-                            text = { Text(choice.label) },
-                            onClick = {
-                                ps2Emulator = choice
-                                ps2EmulatorExpanded = false
-                            }
-                        )
-                    }
-                }
-            }
-
-            // (Beetle Saturn per-core + CD per-content toggles moved to the
-            // Emulator Configuration screen — they live with the rest of the
-            // RetroArch knobs there.)
-
-            HorizontalDivider()
-
-            // --- Emulator Configuration link ---
-            OutlinedButton(
-                onClick = onNavigateToEmulators,
-                modifier = Modifier.fillMaxWidth().gsFocusRing()
-            ) {
-                Text("Emulator Configuration →")
-            }
-            Text(
-                text = "Per-emulator save folder overrides, RetroArch toggles, " +
-                       "and other emulator-specific options.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            HorizontalDivider()
-
-            // --- ROM Scan Directory ---
-            Text("ROMs", style = MaterialTheme.typography.titleMedium)
-
-            Text(
-                text = "Select the folder where your ROMs are organized by system subfolder " +
-                       "(e.g. GBA/, MegaDrive/, PS1/, SNES/, …). GameSync uses this to detect " +
-                       "which games you have installed so it can show server saves for them. " +
-                       "When Emudeck is set, GameSync uses its roms folder.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            // Current path display + browse button
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "ROM Directory",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = if (effectiveRomScanDir.isNotBlank()) effectiveRomScanDir else "Not set",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (effectiveRomScanDir.isNotBlank())
-                            MaterialTheme.colorScheme.onSurface
-                        else
-                            MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Button(onClick = { showFolderPicker = true }, modifier = Modifier.gsFocusRing()) {
-                    Icon(
-                        Icons.Default.FolderOpen,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
+                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(4.dp))
                     Text("Browse")
                 }
             }
+        }
 
-            if (romScanDir.isNotBlank() && emudeckDir.isBlank()) {
-                OutlinedButton(
-                    onClick = { romScanDir = "" },
-                    modifier = Modifier.fillMaxWidth().gsFocusRing()
-                ) {
-                    Text("Clear ROM Directory")
-                }
-            }
-
-            // ROM scan diagnostic
-            val romScanResults by viewModel.romScanResults.collectAsState()
-            OutlinedButton(
-                onClick = { viewModel.runRomScanDiagnostic(romScanDir) },
-                modifier = Modifier.fillMaxWidth().gsFocusRing()
-            ) {
-                Text("Test ROM Scan")
-            }
-
-            // Prepare canonical per-system folders so catalog downloads
-            // land in predictable places instead of inventing stray
-            // folder names.  Existing files/folders are never touched.
-            val prepareMessage by viewModel.prepareFoldersMessage.collectAsState()
-            OutlinedButton(
-                onClick = { viewModel.prepareRomFolders(romScanDir) },
-                modifier = Modifier.fillMaxWidth().gsFocusRing(),
-                enabled = effectiveRomScanDir.isNotBlank(),
-            ) {
-                Text("Prepare ROM Folders")
-            }
-            Text(
-                text = "Creates the standard per-system folders " +
-                    "(PS1, GBA, SEGACD, …) under your ROM directory. " +
-                    "Existing folders are left alone.",
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            prepareMessage?.let { msg ->
-                Text(
-                    text = msg,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = GsColors.Ok,
-                )
-            }
-            if (romScanResults.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Systems found in ROM directory:",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                romScanResults.forEach { (system, count) ->
-                    val ok = count > 0
-                    Text(
-                        text = "${if (ok) "✓" else "✗"}  $system  —  $count ROM${if (count != 1) "s" else ""}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (ok) GsColors.Ok else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // --- Per-system folder overrides ---
-            HorizontalDivider()
-            Text("System Folders", style = MaterialTheme.typography.titleMedium)
-            Text(
-                text = "GameSync auto-detects which subfolder of your ROM directory belongs " +
-                       "to each system. Override any folder here — useful when a folder has " +
-                       "a non-standard name (e.g. \"Saturn\" instead of \"SAT\").",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                val overrides = settings.romDirOverrides
-                val allSystems = (detectedFolders.keys + overrides.keys).toSortedSet()
-                Text(
-                    text = "${allSystems.size} system${if (allSystems.size != 1) "s" else ""} detected",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                OutlinedButton(onClick = { viewModel.detectSystemFolders() }) {
-                    Text("Detect", style = MaterialTheme.typography.labelMedium)
-                }
-            }
-
-            val overrides = settings.romDirOverrides
-            val allSystems = (detectedFolders.keys + overrides.keys).toSortedSet()
-
-            if (allSystems.isEmpty() && effectiveRomScanDir.isNotBlank()) {
-                Text(
-                    text = "No system folders detected yet — press Detect.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            allSystems.forEach { system ->
-                val effectivePath = overrides[system] ?: detectedFolders[system] ?: return@forEach
-                val isOverridden = system in overrides
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // System badge
-                    SystemChip(system)
-                    Spacer(Modifier.width(8.dp))
-                    // Folder path (shrinks to fill remaining space)
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = effectivePath.substringAfterLast('/'),
-                            style = MaterialTheme.typography.bodySmall,
-                            fontWeight = if (isOverridden) FontWeight.Bold else FontWeight.Normal,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        if (isOverridden) {
-                            Text(
-                                text = effectivePath,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                        }
-                    }
-                    // Browse button
-                    IconButton(onClick = { folderPickerForSystem = system }) {
-                        Icon(
-                            Icons.Default.FolderOpen,
-                            contentDescription = "Change folder",
-                            modifier = Modifier.size(20.dp),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    // Clear override button (only shown when user has set an override)
-                    if (isOverridden) {
-                        IconButton(onClick = { viewModel.clearRomDirOverride(system) }) {
-                            Icon(
-                                Icons.Default.Close,
-                                contentDescription = "Reset to auto-detected",
-                                modifier = Modifier.size(20.dp),
-                                tint = MaterialTheme.colorScheme.error
-                            )
-                        }
-                    }
-                }
-            }
-
-            // Add a custom system folder not yet auto-detected
-            val knownAddSystems = listOf(
-                "SAT", "DC", "PS1", "PS2", "PSP", "GBA", "GBC", "GB", "SNES", "NES",
-                "N64", "NDS", "3DS", "GC", "WII", "MD", "SMS", "GG", "SEGACD",
-                "PCE", "PCECD", "NEOCD",
-                "NGP", "WSWAN", "WSWANC", "A2600", "A7800", "LYNX", "MAME", "ARCADE"
-            ).filter { it !in allSystems }
-
-            if (knownAddSystems.isNotEmpty()) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    ExposedDropdownMenuBox(
-                        expanded = addSystemExpanded,
-                        onExpandedChange = { addSystemExpanded = it },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        OutlinedTextField(
-                            value = addSystemSelected.ifBlank { "Add system…" },
-                            onValueChange = {},
-                            readOnly = true,
-                            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(addSystemExpanded) },
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .menuAnchor(),
-                            textStyle = MaterialTheme.typography.bodySmall
-                        )
-                        ExposedDropdownMenu(
-                            expanded = addSystemExpanded,
-                            onDismissRequest = { addSystemExpanded = false }
-                        ) {
-                            knownAddSystems.forEach { sys ->
-                                DropdownMenuItem(
-                                    text = { Text(sys, style = MaterialTheme.typography.bodySmall) },
-                                    onClick = {
-                                        addSystemSelected = sys
-                                        addSystemExpanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    Button(
-                        onClick = { folderPickerForSystem = addSystemSelected },
-                        enabled = addSystemSelected.isNotBlank()
-                    ) {
-                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Browse")
-                    }
-                }
-            }
-
-            // RetroArch path diagnostics
-            val retroPaths by viewModel.retroArchPaths.collectAsState()
-            if (retroPaths.isNotEmpty()) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "RetroArch detected paths:",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                for ((path, found) in retroPaths) {
-                    Text(
-                        text = "${if (found) "✓" else "✗"}  $path",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (found) GsColors.Ok else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-            OutlinedButton(
-                onClick = { viewModel.checkRetroArchPaths() },
-                modifier = Modifier.fillMaxWidth().gsFocusRing()
-            ) {
-                Text("Diagnose RetroArch Paths")
-            }
-
-            HorizontalDivider()
-
-            // (Dolphin GC memory card folder moved to the Emulator
-            // Configuration screen alongside the other emulator save-folder
-            // overrides.  The legacy `dolphinMemCardDir` value is auto-merged
-            // into `saveDirOverrides["Dolphin"]` on first read so existing
-            // installs keep working.)
-
-            // --- App info ---
+        // RetroArch path diagnostics
+        val retroPaths by viewModel.retroArchPaths.collectAsState()
+        if (retroPaths.isNotEmpty()) {
             Spacer(Modifier.height(4.dp))
             Text(
-                text = "GameSync v${BuildConfig.VERSION_NAME}",
-                style = MaterialTheme.typography.bodySmall,
+                "RetroArch detected paths:",
+                style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
-            Text(
-                text = "Console ID: ${settings.consoleId}",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            for ((path, found) in retroPaths) {
+                Text(
+                    text = "${if (found) "✓" else "✗"}  $path",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (found) GsColors.Ok else MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
+        OutlinedButton(
+            onClick = { viewModel.checkRetroArchPaths() },
+            modifier = Modifier.fillMaxWidth().gsFocusRing()
+        ) {
+            Text("Diagnose RetroArch Paths")
+        }
+
+        HorizontalDivider()
+
+        // (Dolphin GC memory card folder moved to the Emulator
+        // Configuration screen alongside the other emulator save-folder
+        // overrides.  The legacy `dolphinMemCardDir` value is auto-merged
+        // into `saveDirOverrides["Dolphin"]` on first read so existing
+        // installs keep working.)
+
+        // --- App info ---
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = "GameSync v${BuildConfig.VERSION_NAME}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            text = "Console ID: ${settings.consoleId}",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 
     // Folder picker dialog — shown outside the Scaffold so it overlays everything
@@ -924,3 +906,13 @@ fun SettingsScreen(
         )
     }
 }
+
+/** Settings has no header actions; its hints never change. */
+private val SETTINGS_CHROME = GsChromeSpec(
+    hints = listOf(
+        GsHint(GsButton.DPAD, "Move"),
+        GsHint(GsButton.A, "Select"),
+        GsHint(GsButton.L1, "Tabs"),
+        GsHint(GsButton.START, "Exit"),
+    ),
+)

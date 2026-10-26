@@ -31,7 +31,6 @@ import androidx.compose.runtime.Stable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -130,22 +129,6 @@ class GsNotifier(
 }
 
 val LocalGsNotifier = staticCompositionLocalOf<GsNotifier> { error("GsNotifier not provided") }
-
-/**
- * Footer heights currently on screen, keyed per footer instance, so the
- * snackbar can sit above the controller hints.  Keyed rather than a single
- * value because during a screen transition two footers exist for a moment
- * and the leaving one must not zero the arriving one's height.
- */
-@Stable
-class GsFooterHeights {
-    private val heights = mutableStateMapOf<Any, Int>()
-    val maxPx: Int get() = heights.values.maxOrNull() ?: 0
-    fun set(key: Any, px: Int) { if (heights[key] != px) heights[key] = px }
-    fun remove(key: Any) { heights.remove(key) }
-}
-
-val LocalFooterHeight = staticCompositionLocalOf<GsFooterHeights?> { null }
 
 private fun kindColor(kind: GsNoticeKind): Color = when (kind) {
     GsNoticeKind.Success -> GsColors.Ok

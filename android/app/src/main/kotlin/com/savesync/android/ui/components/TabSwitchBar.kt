@@ -46,8 +46,9 @@ val LocalServerOnline = compositionLocalOf<Boolean?> { null }
 /**
  * The header bar every GameSync client draws: the app name, the top-level
  * tabs between L1 / R1 glyphs (active tab = teal pill with ink text), the
- * screen's touch actions and the server status dot.  Below it an optional
- * sub-tab chip row (system filter etc. — what SELECT steps through).
+ * screen's touch actions and the server status dot.  Drawn once, by MainApp
+ * (see GsChrome.kt); a screen's sub-tab chips live in its own content
+ * ([GsSubTabRow]).
  *
  * Wide screens (landscape / tablets) keep the name, tabs and actions on one
  * line; narrow phones put the tab strip on a second, horizontally
@@ -59,7 +60,6 @@ fun GsTopBar(
     onTabClick: (Int) -> Unit,
     modifier: Modifier = Modifier,
     actions: @Composable RowScope.() -> Unit = {},
-    subTabs: (@Composable RowScope.() -> Unit)? = null,
 ) {
     val online = LocalServerOnline.current
     Column(
@@ -109,20 +109,6 @@ fun GsTopBar(
                     )
                 }
             }
-        }
-        if (subTabs != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(GsColors.Bg)
-                    .horizontalScroll(rememberScrollState())
-                    // No vertical padding: each chip carries its own 48dp
-                    // touch target.
-                    .padding(horizontal = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                content = subTabs,
-            )
         }
         Box(
             Modifier

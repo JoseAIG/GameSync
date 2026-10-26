@@ -27,7 +27,10 @@ bool ui_is_new3ds(void) {
     return new3ds;
 }
 
+static void job_shutdown(void);
+
 void ui_exit(void) {
+    job_shutdown();
     gui_exit();
 }
 
@@ -446,20 +449,18 @@ static float smooth_progress(const UiProgress *p) {
 static GuiRect progress_cancel_rect;   // touch rect of the last card's Cancel pill
 static bool progress_cancel_shown;
 
-void ui_progress(const UiProgress *p) {
-    if (!p->cancel_hint) progress_cancelling = false;   // another operation
-    bool cancelling = p->cancel_hint && progress_cancelling;
-    float bar_frac = smooth_progress(p);
-    gui_begin(false);
-    gui_screen(GUI_TOP);
-    ui_draw_backdrop_top();
-    gui_screen(GUI_BOTTOM);
-    ui_draw_backdrop_bottom();
-    // A bare frame: the card at rest over a full scrim (which then fades
-    // out over whatever is drawn next)
-    gui_scrim_full();
-    gui_dim();
+// What a card shows beyond its UiProgress
+typedef struct {
+    const char *wait_line;   // "Waiting for the server... 0:07", or NULL
+    bool pill;               // the Cancel pill
+    bool pill_pressed;
+    bool cancelling;         // "Cancelling...", muted bar
+} ProgressExtras;
 
+// The progress card itself (the scrim and any entry motion are the
+// caller's). Leaves the pill's touch rect in progress_cancel_rect.
+static void draw_progress_card(const UiProgress *p, float bar_frac, const ProgressExtras *x) {
+    bool cancelling = x->cancelling;
     u32 hex = ui_tone_hex(p->tone);
     float lh_small = gui_line_h(GUI_S_SMALL);
     float h = 24 + 12;
@@ -468,14 +469,15 @@ void ui_progress(const UiProgress *p) {
     if (p->frac <= 1) h += 14 + lh_small + 6;
     if (p->info1) h += lh_small;
     if (p->info2) h += lh_small;
-    if (p->cancel_hint) h += DLG_BTN_AREA;
+    if (x->wait_line) h += lh_small;
+    if (x->pill) h += DLG_BTN_AREA;
     h += 6;
     float y = (GUI_H - h) / 2;
     gui_card(DLG_X, y, DLG_W, h, p->title ? p->title : "Working", hex);
 
-    float x = DLG_X + 12, w = DLG_W - 24, ty = y + 24 + 10;
+    float tx = DLG_X + 12, w = DLG_W - 24, ty = y + 24 + 10;
     if (p->name) {
-        gui_text_fit(x, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w, p->name);
+        gui_text_fit(tx, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w, p->name);
         ty += gui_line_h(GUI_S_BODY) + 2;
     }
     if (p->status) {
@@ -486,38 +488,310 @@ void ui_progress(const UiProgress *p) {
             status = cancel_status;
         }
         if (p->frac < 0) {
-            gui_spinner(x + 5, ty + lh_small / 2 + 1, 5, gui_rgb(cancelling ? HEX_MUTED : hex));
-            gui_text_fit(x + 16, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, status);
+            gui_spinner(tx + 5, ty + lh_small / 2 + 1, 5, gui_rgb(cancelling ? HEX_MUTED : hex));
+            gui_text_fit(tx + 16, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, status);
         } else {
-            gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, status);
+            gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, status);
         }
         ty += lh_small + 4;
     }
     if (p->frac <= 1) {
-        gui_bar(x, ty, w, 10, bar_frac, gui_rgb(cancelling ? HEX_MUTED : hex));
+        gui_bar(tx, ty, w, 10, bar_frac, gui_rgb(cancelling ? HEX_MUTED : hex));
         ty += 14;
-        if (p->left) gui_text(x, ty, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, p->left);
-        if (p->right) gui_text(x + w, ty, GUI_S_SMALL, gui_rgb(hex), GUI_RIGHT, p->right);
+        if (p->left) gui_text(tx, ty, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, p->left);
+        if (p->right) gui_text(tx + w, ty, GUI_S_SMALL, gui_rgb(hex), GUI_RIGHT, p->right);
         ty += lh_small + 6;
     }
     if (p->info1) {
-        gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info1);
+        gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info1);
         ty += lh_small;
     }
     if (p->info2) {
-        gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info2);
+        gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info2);
         ty += lh_small;
     }
-    progress_cancel_shown = p->cancel_hint;
-    if (p->cancel_hint) {
+    if (x->wait_line) {
+        gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_WARN), GUI_LEFT, w, x->wait_line);
+        ty += lh_small;
+    }
+    if (x->pill) {
         GuiRect draw;
         card_buttons(y, h, 1, &draw, &progress_cancel_rect);
-        gui_btn(draw, "B", "Cancel", GUI_BTN_TONAL, hex, cancelling);
+        gui_btn(draw, "B", "Cancel", GUI_BTN_TONAL, hex, x->pill_pressed);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Background jobs
+// ---------------------------------------------------------------------------
+//
+// Threads: the main thread owns the GPU (citro2d), HID and APT; it runs
+// ui_run_job()'s loop, which draws the backdrop and the card, reads the
+// input and sets the cancel flag. The worker runs only the job's fn: the
+// network (httpc), the save archives (FS) and the hashing it already did on
+// the main thread before. Its ui_progress() / ui_busy() calls don't draw:
+// they copy the report (strings included) under job.lock for the main
+// thread to pick up, and ui_progress_cancel_poll() just reads the flag.
+// One worker at a time, at a lower priority on the same core, so it runs
+// while the main thread waits for the vblank.
+
+#define UI_JOB_STACK (64 * 1024)
+
+static struct {
+    Thread thread;          // a worker not yet joined (NULL = none)
+    Thread self;            // set by the worker itself: ui_progress() from it doesn't draw
+    UiJobFn fn;
+    void *ctx;
+    int done, cancel;       // atomics
+    bool result;
+    LightLock lock;         // guards report, has_report, serial, news_ms
+    bool lock_ready;
+    UiProgressCopy report;
+    bool has_report;
+    u32 serial;
+    u64 news_ms;
+    void *ctx_mem;          // ui_job_ctx() storage
+} job;
+
+static bool job_on_worker(void) {
+    Thread cur = threadGetCurrent();   // NULL on the main thread
+    return cur != NULL && cur == __atomic_load_n(&job.self, __ATOMIC_ACQUIRE);
+}
+
+static bool job_done(void) {
+    return __atomic_load_n(&job.done, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void job_entry(void *arg) {
+    (void)arg;
+    __atomic_store_n(&job.self, threadGetCurrent(), __ATOMIC_RELEASE);
+    job.result = job.fn(job.ctx);
+    __atomic_store_n(&job.done, 1, __ATOMIC_RELEASE);
+}
+
+// The worker's ui_progress(): hand the report over, never draw
+static void job_report(const UiProgress *p) {
+    LightLock_Lock(&job.lock);
+    ui_progress_copy(&job.report, p);
+    job.has_report = true;
+    job.news_ms = gui_clock_ms();
+    job.serial++;
+    LightLock_Unlock(&job.lock);
+}
+
+static void job_join(void) {
+    if (!job.thread) return;
+    threadJoin(job.thread, U64_MAX);
+    threadFree(job.thread);
+    job.thread = NULL;
+    __atomic_store_n(&job.self, NULL, __ATOMIC_RELEASE);
+}
+
+bool ui_job_cancelled(void) {
+    return __atomic_load_n(&job.cancel, __ATOMIC_ACQUIRE) != 0;
+}
+
+void ui_job_settle(void) {
+    if (!job.thread) return;
+    if (!job_done()) {
+        // A job the user cancelled is still waiting on the server; nothing
+        // else may use the network (or the save it reads) until it's done
+        C3D_FrameRate(30.0f);
+        char status[64];
+        snprintf(status, sizeof(status), "Finishing the request you cancelled%s", gui_ellipsis());
+        UiProgress p = { 0 };
+        p.title = "One moment";
+        p.status = status;
+        p.frac = -1;
+        ProgressExtras x = { NULL, false, false, false };
+        hidScanInput();
+        ui_input_latch_touch();
+        GuiModal modal;
+        modal_open(&modal, GUI_H / 2.0f);
+        UiInput in;
+        while (!job_done() && ui_input_scan(&in)) {
+            gui_begin(true);
+            gui_screen(GUI_TOP);
+            ui_draw_backdrop_top();
+            gui_screen(GUI_BOTTOM);
+            ui_draw_backdrop_bottom();
+            gui_modal_begin(&modal);
+            draw_progress_card(&p, -1, &x);
+            gui_modal_end(&modal);
+            gui_end();
+        }
+        gui_modal_close(&modal);
+        C3D_FrameRate(60.0f);
+        ui_input_latch_touch();
+    }
+    job_join();   // also when the app is closing: it must not outlive the services
+}
+
+// App exit: no worker may outlive the services (main.c settles before
+// closing them; this is the last resort)
+static void job_shutdown(void) {
+    ui_job_settle();
+    free(job.ctx_mem);
+    job.ctx_mem = NULL;
+}
+
+void *ui_job_ctx(size_t size) {
+    ui_job_settle();
+    free(job.ctx_mem);
+    job.ctx_mem = calloc(1, size ? size : 1);
+    return job.ctx_mem;
+}
+
+void ui_job_release(void *ctx) {
+    if (!ctx || ctx != job.ctx_mem || job.thread) return;   // a cancelled worker may still use it
+    free(job.ctx_mem);
+    job.ctx_mem = NULL;
+}
+
+bool ui_run_job_ex(UiJobFn fn, void *ctx, const UiProgress *initial, u32 flags, bool *cancelled_out) {
+    if (cancelled_out) *cancelled_out = false;
+    ui_job_settle();
+    // Only job-owned storage may outlive this call (a cancelled worker
+    // carries on with it): anything else can't be cancelled
+    bool cancellable = (flags & UI_JOB_CANCELLABLE) && ctx && ctx == job.ctx_mem;
+    bool quiet = (flags & UI_JOB_QUIET) != 0;
+
+    if (!job.lock_ready) {
+        LightLock_Init(&job.lock);
+        job.lock_ready = true;
+    }
+    job.fn = fn;
+    job.ctx = ctx;
+    job.result = false;
+    __atomic_store_n(&job.self, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&job.done, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&job.cancel, 0, __ATOMIC_RELEASE);
+    ui_progress_copy(&job.report, initial);
+    job.has_report = initial != NULL;
+    job.serial = 0;
+    job.news_ms = gui_clock_ms();
+
+    // A larger number is a lower priority: the worker runs while the main
+    // thread waits for the vblank, never in the middle of a frame
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (prio < 0x3F) prio++;
+    job.thread = threadCreate(job_entry, NULL, UI_JOB_STACK, prio, -2, false);
+    if (!job.thread) {
+        // No thread (out of memory): run it here, as before, the card at rest
+        if (initial && !quiet) ui_progress(initial);
+        return fn(ctx);
+    }
+
+    C3D_FrameRate(30.0f);
+    hidScanInput();
+    ui_input_latch_touch();
+    GuiModal modal;
+    bool card = false, pill = false, pill_drawn = false, cancelled = false, closing = false;
+    UiTap tap = UI_TAP_INIT;
+    UiProgressCopy shown;
+    ui_progress_copy(&shown, initial);
+    u32 seen = 0;
+    UiInput in;
+    while (!job_done()) {
+        if (!ui_input_scan(&in)) {
+            closing = true;
+            break;
+        }
+        LightLock_Lock(&job.lock);
+        bool has = job.has_report;
+        u64 news = job.news_ms;
+        if (job.serial != seen) {
+            ui_progress_copy(&shown, &job.report.p);
+            seen = job.serial;
+        }
+        LightLock_Unlock(&job.lock);
+
+        UiJobWait w = ui_job_wait_state(in.t_ms, news, cancellable, shown.p.cancel_hint);
+        pill |= w.cancel;   // once offered, it stays
+        if (has && !card && (!quiet || w.waiting || pill)) {
+            modal_open(&modal, GUI_H / 2.0f);
+            card = true;
+        }
+        int pressed = -1;
+        if (card && pill_drawn) {
+            // Commits on touch-up (the loop sees every frame), or B
+            if (ui_tap_buttons(&tap, &in, &progress_cancel_rect, 1, &pressed) == 0 || (in.down & KEY_B)) {
+                cancelled = true;
+                break;
+            }
+        }
+
+        char wait_line[64], clock[16];
+        if (w.waiting) {
+            ui_format_wait(w.seconds, clock, sizeof(clock));
+            snprintf(wait_line, sizeof(wait_line), "Waiting for the server%s %s", gui_ellipsis(), clock);
+        }
+        float bar = smooth_progress(&shown.p);
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        ui_draw_backdrop_top();
+        gui_screen(GUI_BOTTOM);
+        ui_draw_backdrop_bottom();
+        if (card) {
+            ProgressExtras x = { w.waiting ? wait_line : NULL, pill, pressed == 0, false };
+            gui_modal_begin(&modal);
+            draw_progress_card(&shown.p, bar, &x);
+            gui_modal_end(&modal);
+            pill_drawn = pill;
+        }
+        gui_end();
+    }
+    C3D_FrameRate(60.0f);
+    if (card) gui_modal_close(&modal);
+    ui_input_latch_touch();
+
+    if (cancelled || closing) __atomic_store_n(&job.cancel, 1, __ATOMIC_RELEASE);
+    if (cancelled) {
+        // The result is abandoned: the worker finishes on its own (into
+        // its job-owned ctx) and the next job or network use waits for it
+        if (cancelled_out) *cancelled_out = true;
+        return false;
+    }
+    // Done, or the app is closing: a write that has begun is never cut off
+    job_join();
+    if (closing && cancellable) {
+        if (cancelled_out) *cancelled_out = true;
+        return false;
+    }
+    return job.result;
+}
+
+bool ui_run_job(UiJobFn fn, void *ctx, const UiProgress *initial, bool cancellable, bool *cancelled_out) {
+    return ui_run_job_ex(fn, ctx, initial, cancellable ? UI_JOB_CANCELLABLE : 0, cancelled_out);
+}
+
+void ui_progress(const UiProgress *p) {
+    if (job_on_worker()) {
+        job_report(p);
+        return;
+    }
+    if (!p->cancel_hint) progress_cancelling = false;   // another operation
+    bool cancelling = p->cancel_hint && progress_cancelling;
+    float bar_frac = smooth_progress(p);
+    gui_begin(false);
+    gui_screen(GUI_TOP);
+    ui_draw_backdrop_top();
+    gui_screen(GUI_BOTTOM);
+    ui_draw_backdrop_bottom();
+    // A bare frame (no loop around it to animate in, frames come when the
+    // work has news): the card at rest over a full scrim
+    gui_scrim_full();
+    gui_scrim_draw();
+    ProgressExtras x = { NULL, p->cancel_hint, cancelling, cancelling };
+    draw_progress_card(p, bar_frac, &x);
+    progress_cancel_shown = p->cancel_hint;
     gui_end();
 }
 
 bool ui_progress_cancel_poll(void) {
+    // Inside a job: the main thread reads the input and sets the flag
+    if (job_on_worker()) return ui_job_cancelled();
     if (progress_cancelling) return true;
     UiInput in;
     if (!ui_input_scan(&in)) {
@@ -2145,6 +2419,7 @@ static void probe_answer(int row, bool ok, const char *version) {
 // address do requests use from now on (the primary when it answers, else
 // the alternate if that does, as at startup). Informs, never blocks.
 static void check_server(AppConfig *config, int row) {
+    ui_job_settle();   // a cancelled job may still be talking to the server
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
     AppConfig probe = *config;
@@ -2174,6 +2449,7 @@ static void check_server(AppConfig *config, int row) {
 
 // After the API key was saved: the cheapest request that needs it
 static void check_key(const AppConfig *config) {
+    ui_job_settle();
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the key%s", gui_ellipsis());
     ui_busy("Settings", msg);

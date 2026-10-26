@@ -157,6 +157,37 @@ static void clear_marks(void) {
         set_title_marked(&titles[i], false);
 }
 
+// Game names from the server, on the worker (a copy of the titles goes
+// with it; the names come back once it is done). Cancelled, or no memory
+// for the copy: the titles keep their product codes.
+typedef struct {
+    AppConfig config;
+    int count;
+    TitleInfo titles[MAX_TITLES];
+} NamesJob;
+
+static bool names_job(void *ctx) {
+    NamesJob *j = ctx;
+    titles_fetch_names(&j->config, j->titles, j->count);
+    return true;
+}
+
+static void fetch_names(void) {
+    NamesJob *j = ui_job_ctx(sizeof(NamesJob));
+    if (!j) return;
+    j->config = config;
+    j->count = title_count;
+    memcpy(j->titles, titles, (size_t)title_count * sizeof(TitleInfo));
+    UiProgress p = { 0 };
+    p.title = "Loading";
+    p.status = "Fetching game names...";
+    p.frac = -1;
+    bool cancelled = false;
+    if (ui_run_job(names_job, j, &p, true, &cancelled) && !cancelled)
+        for (int i = 0; i < title_count; i++) memcpy(titles[i].name, j->titles[i].name, sizeof(titles[i].name));
+    ui_job_release(j);
+}
+
 static void scan_titles(void) {
     // The selected title, to find it again in the new (re-sorted) list
     char keep_id[17] = "";
@@ -170,13 +201,13 @@ static void scan_titles(void) {
         keep_nds = titles[idx].is_nds;
     }
 
+    ui_job_settle();   // a cancelled job may still be reading a save
     ui_busy("Loading", "Scanning titles...");
     title_count = titles_scan(titles, MAX_TITLES, config.nds_dir);
 
     // Fetch game names from server
     if (title_count > 0) {
-        ui_busy("Loading", "Fetching game names...");
-        titles_fetch_names(&config, titles, title_count);
+        fetch_names();
         qsort(titles, title_count, sizeof(TitleInfo), title_compare);
     }
 
@@ -321,7 +352,10 @@ static void wait_for_start(UiTone tone, const char *title, const char *body) {
 // Actions
 // ---------------------------------------------------------------------------
 
-static bool compare_title(int idx, const char *what);
+// A compare: done (last_details holds it), this console's save couldn't
+// be read (out of memory), or the user cancelled it (nothing changed)
+typedef enum { CMP_OK = 0, CMP_UNREADABLE, CMP_CANCELLED } CompareResult;
+static CompareResult compare_title(int idx, const char *what);
 static bool compare_ready(int idx, const char *what);
 
 // What a failed upload / download means for the save, by SyncResult. No
@@ -398,14 +432,86 @@ static bool transfer_failed_card(const TitleInfo *t, SyncResult res, bool upload
     return ui_error_card(title, sync_result_str(res), f.safety, f.next, f.retry);
 }
 
+// The History list, on the worker
+typedef struct {
+    AppConfig config;
+    char title_id[17];
+    HistoryVersion versions[MAX_HISTORY_VERSIONS];
+    int count;
+} HistoryJob;
+
+static bool history_job(void *ctx) {
+    HistoryJob *j = ctx;
+    j->count = sync_get_history(&j->config, j->title_id, j->versions, MAX_HISTORY_VERSIONS);
+    return j->count >= 0;
+}
+
+// -1 failed, -2 cancelled, else the number of versions (in `versions`)
+static int load_history(int idx, HistoryVersion *versions) {
+    HistoryJob *j = ui_job_ctx(sizeof(HistoryJob));
+    if (!j) {
+        ui_busy("History", "Loading saved versions...");
+        return sync_get_history(&config, titles[idx].title_id_hex, versions, MAX_HISTORY_VERSIONS);
+    }
+    j->config = config;
+    memcpy(j->title_id, titles[idx].title_id_hex, sizeof(j->title_id));
+    UiProgress p = { 0 };
+    p.title = "History";
+    p.name = titles[idx].name;
+    p.status = "Loading saved versions...";
+    p.frac = -1;
+    bool cancelled = false;
+    ui_run_job(history_job, j, &p, true, &cancelled);
+    int count = cancelled ? -2 : j->count;
+    if (count > 0) memcpy(versions, j->versions, (size_t)count * sizeof(HistoryVersion));
+    ui_job_release(j);
+    return count;
+}
+
+// A transfer of one title on the worker (upload, download or a History
+// version). Not cancellable: once it has begun it runs to the end, and the
+// main thread leaves `titles` alone meanwhile.
+typedef enum { XFER_UPLOAD, XFER_DOWNLOAD, XFER_HISTORY } XferKind;
+typedef struct {
+    XferKind kind;
+    const TitleInfo *title;
+    const char *timestamp;   // XFER_HISTORY
+    SyncResult res;
+} XferJob;
+
+static bool xfer_job(void *ctx) {
+    XferJob *j = ctx;
+    switch (j->kind) {
+        case XFER_UPLOAD:   j->res = sync_title(&config, j->title, sync_progress); break;
+        case XFER_DOWNLOAD: j->res = sync_download_title(&config, j->title, sync_progress); break;
+        case XFER_HISTORY:  j->res = sync_download_history(&config, j->title, j->timestamp, sync_progress); break;
+    }
+    return j->res == SYNC_OK;
+}
+
+// `first` = the card shown until the transfer reports its own progress
+static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timestamp, const char *first) {
+    XferJob j = { kind, t, timestamp, SYNC_ERR_NETWORK };
+    UiProgress p = { 0 };
+    p.title = op_title;
+    p.name = t->name;
+    p.status = first;
+    p.frac = -1;
+    ui_run_job(xfer_job, &j, &p, false, NULL);
+    return j.res;
+}
+
 static void do_history(void) {
     int idx = sel_title_idx();
     if (idx < 0) return;
     HistoryVersion versions[MAX_HISTORY_VERSIONS];
     int count;
     for (;;) {
-        ui_busy("History", "Loading saved versions...");
-        count = sync_get_history(&config, titles[idx].title_id_hex, versions, MAX_HISTORY_VERSIONS);
+        count = load_history(idx, versions);
+        if (count == -2) {
+            set_status(UI_TONE_ACCENT, "History cancelled, nothing changed");
+            return;
+        }
         if (count >= 0) break;
         if (!ui_error_card("Couldn't load History",
                            network_last_error()[0] ? network_last_error() : "The server didn't send the list.",
@@ -428,12 +534,14 @@ static void do_history(void) {
             if (strcmp(versions[i].timestamp, selected_ts) == 0) vi = i;
         // Overwriting the console's save: show what's there now and ask first
         bool read = vi >= 0;
-        while (read && !compare_title(idx, "Restore")) {
+        CompareResult cr = CMP_UNREADABLE;
+        while (read && (cr = compare_title(idx, "Restore")) == CMP_UNREADABLE) {
             read = ui_error_card("Couldn't read this console's save", "Not enough memory to read it.",
                                  "Nothing was changed.", "Try again.", true);
         }
-        if (!read) {
-            set_status(UI_TONE_ERR, "Restore not started, nothing changed");
+        if (!read || cr == CMP_CANCELLED) {
+            if (cr == CMP_CANCELLED) set_status(UI_TONE_ACCENT, "Restore cancelled, nothing changed");
+            else set_status(UI_TONE_ERR, "Restore not started, nothing changed");
             free(selected_ts);
             return;
         }
@@ -445,8 +553,7 @@ static void do_history(void) {
         }
         for (;;) {
             op_title = "Restoring";
-            sync_progress("Downloading history version...");
-            SyncResult res = sync_download_history(&config, &titles[idx], selected_ts, sync_progress);
+            SyncResult res = run_xfer(XFER_HISTORY, &titles[idx], selected_ts, "Downloading history version...");
             if (res == SYNC_OK) {
                 set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
                            had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");
@@ -554,6 +661,26 @@ static void run_failures_card(const char *title, int total, const char *counts) 
                  &(UiDialogOpts){ 0, true });
 }
 
+// Every marked save uploaded on the worker, one after the other; the main
+// thread applies the results afterwards (it alone changes `titles`)
+typedef struct {
+    int marked;
+    u8 res[MAX_TITLES];   // SyncResult per entry of titles[] (marked ones)
+} BatchJob;
+
+static bool batch_job(void *ctx) {
+    BatchJob *j = ctx;
+    int n = 0;
+    for (int i = 0; i < title_count; i++) {
+        if (!titles[i].marked) continue;
+        char msg[160];
+        snprintf(msg, sizeof(msg), "Uploading %d/%d: %s", ++n, j->marked, titles[i].title_id_hex);
+        sync_progress(msg);
+        j->res[i] = (u8)sync_title(&config, &titles[i], NULL);
+    }
+    return true;
+}
+
 static void do_batch_upload(int marked) {
     // Say plainly when an upload replaces a server copy that changed too
     int conflicts = 0;
@@ -588,13 +715,18 @@ static void do_batch_upload(int marked) {
     int ok_count = 0, fail_count = 0;
     op_title = "Uploading marked saves";
     memset(run_failures, 0, sizeof(run_failures));
+    static BatchJob batch;   // a result per title: off the stack
+    batch.marked = marked;
+    char first[48];
+    snprintf(first, sizeof(first), "Uploading 1/%d", marked);
+    UiProgress p = { 0 };
+    p.title = op_title;
+    p.status = first;
+    p.frac = 0;
+    ui_run_job(batch_job, &batch, &p, false, NULL);
     for (int i = 0; i < title_count; i++) {
         if (!titles[i].marked) continue;
-        char msg[160];
-        snprintf(msg, sizeof(msg), "Uploading %d/%d: %s", ok_count + fail_count + 1, marked,
-                 titles[i].title_id_hex);
-        sync_progress(msg);
-        SyncResult res = sync_title(&config, &titles[i], NULL);
+        SyncResult res = (SyncResult)batch.res[i];
         if (res == SYNC_OK) {
             ok_count++;
             titles[i].in_conflict = false;
@@ -617,21 +749,48 @@ static void do_batch_upload(int marked) {
     set_status(fail_count ? UI_TONE_WARN : UI_TONE_OK, "Batch upload: %d uploaded, %d failed", ok_count, fail_count);
 }
 
-// Fetch the server's view of title `idx` into last_details; false only
-// when this console's save couldn't be read at all (out of memory)
-static bool compare_title(int idx, const char *what) {
+// The compare on the worker: reads this console's save, hashes it and asks
+// the server, all on copies (it may outlive a cancel)
+typedef struct {
+    AppConfig config;
+    TitleInfo title;
+    SaveDetails details;
+} CompareJob;
+
+static bool compare_job(void *ctx) {
+    CompareJob *j = ctx;
+    return sync_get_save_details(&j->config, &j->title, &j->details);
+}
+
+// Fetch the server's view of title `idx` into last_details. The spinner
+// keeps turning while the server thinks; after a while the card offers
+// Cancel, which leaves everything as it was.
+static CompareResult compare_title(int idx, const char *what) {
     TitleInfo *t = &titles[idx];
     UiProgress pr = { 0 };
     pr.title = what;
     pr.name = t->name;
     pr.status = "Comparing with the server...";
     pr.frac = -1;
-    ui_progress(&pr);
+
+    bool ok, cancelled = false;
+    CompareJob *j = ui_job_ctx(sizeof(CompareJob));
+    if (j) {
+        j->config = config;
+        j->title = *t;
+        ok = ui_run_job(compare_job, j, &pr, true, &cancelled);
+        if (cancelled) return CMP_CANCELLED;
+        if (ok) last_details = j->details;
+        ui_job_release(j);
+    } else {
+        ui_progress(&pr);
+        ok = sync_get_save_details(&config, t, &last_details);
+    }
 
     synced_ms = 0;
-    if (!sync_get_save_details(&config, t, &last_details)) {
+    if (!ok) {
         last_details_idx = -1;
-        return false;
+        return CMP_UNREADABLE;
     }
     last_details_idx = idx;
     switch (sync_decide(&last_details)) {
@@ -643,7 +802,7 @@ static bool compare_title(int idx, const char *what) {
         case SYNC_ACTION_SERVER_ERROR: break;
         default:                   set_title_state(t, TSTATE_SYNCED); break;
     }
-    return true;
+    return CMP_OK;
 }
 
 // Compare, and when that can't be done say what happened, that nothing
@@ -652,7 +811,12 @@ static bool compare_title(int idx, const char *what) {
 // failed query).
 static bool compare_ready(int idx, const char *what) {
     for (;;) {
-        if (!compare_title(idx, what)) {
+        CompareResult cr = compare_title(idx, what);
+        if (cr == CMP_CANCELLED) {
+            set_status(UI_TONE_ACCENT, "Compare cancelled, nothing changed");
+            return false;
+        }
+        if (cr == CMP_UNREADABLE) {
             if (ui_error_card("Couldn't compare", "Not enough memory to read this console's save.",
                               "Nothing was changed.", "Try again.", true))
                 continue;
@@ -718,7 +882,7 @@ static void details_after_sync(const TitleInfo *t, bool uploaded) {
 static void upload_title(TitleInfo *t) {
     for (;;) {
         op_title = "Uploading";
-        SyncResult res = sync_title(&config, t, sync_progress);
+        SyncResult res = run_xfer(XFER_UPLOAD, t, NULL, "Reading the save...");
         if (res == SYNC_OK) {
             set_status(UI_TONE_OK, "Uploaded: %.40s", t->name);
             t->in_conflict = false;
@@ -740,7 +904,7 @@ static void upload_title(TitleInfo *t) {
 static void download_title(TitleInfo *t) {
     for (;;) {
         op_title = "Downloading";
-        SyncResult res = sync_download_title(&config, t, sync_progress);
+        SyncResult res = run_xfer(XFER_DOWNLOAD, t, NULL, "Asking the server...");
         if (res == SYNC_OK) {
             set_status(UI_TONE_OK, "Downloaded: %.40s", t->name);
             t->in_conflict = false;
@@ -867,6 +1031,10 @@ static void do_smart_sync(void) {
     }
 }
 
+static bool sync_all_job(void *ctx) {
+    return sync_all(&config, titles, title_count, sync_progress, (SyncSummary *)ctx);
+}
+
 static void do_sync_all(void) {
     static char title_errors[MAX_TITLES][TITLE_ERROR_LEN];
     static SyncSummary summary;   // ~1 KB: off the main thread's stack
@@ -878,7 +1046,12 @@ static void do_sync_all(void) {
         op_title = "Sync all";
         memset(title_errors, 0, sizeof(title_errors));
         summary.title_error = title_errors;
-        bool ok = sync_all(&config, titles, title_count, sync_progress, &summary);
+        // On the worker; not cancellable (it uploads and downloads as it goes)
+        UiProgress p = { 0 };
+        p.title = op_title;
+        p.status = "Comparing every save with the server...";
+        p.frac = -1;
+        bool ok = ui_run_job(sync_all_job, &summary, &p, false, NULL);
         last_details_idx = -1;
         if (ok) break;
         // sync_all() only gives up before it uploads or downloads anything
@@ -951,6 +1124,17 @@ static void do_sync_all(void) {
     }
 }
 
+// The update check on the worker
+typedef struct {
+    AppConfig config;
+    UpdateInfo info;
+} UpdateJob;
+
+static bool update_job(void *ctx) {
+    UpdateJob *j = ctx;
+    return update_check(&j->config, &j->info);
+}
+
 // Settings > Check for updates. Returns true if the app should exit
 // (update installed, not relaunched).
 static bool do_update(void) {
@@ -963,10 +1147,24 @@ static bool do_update(void) {
         return false;
     }
 
-    ui_busy("Update", "Checking for updates...");
-
+    UpdateJob *j = ui_job_ctx(sizeof(UpdateJob));
     UpdateInfo update_info;
-    if (!update_check(&config, &update_info)) {
+    bool checked, cancelled = false;
+    if (j) {
+        j->config = config;
+        UiProgress p = { 0 };
+        p.title = "Update";
+        p.status = "Checking for updates...";
+        p.frac = -1;
+        checked = ui_run_job(update_job, j, &p, true, &cancelled);
+        if (cancelled) return false;   // nothing changed
+        update_info = j->info;
+        ui_job_release(j);
+    } else {
+        ui_busy("Update", "Checking for updates...");
+        checked = update_check(&config, &update_info);
+    }
+    if (!checked) {
         ui_message(UI_TONE_ERR, "Update", "Update check failed.\n\n" UI_DIM "Check WiFi and the server URL.");
         return false;
     }
@@ -1387,7 +1585,8 @@ int main(int argc, char *argv[]) {
         tab = (tab + (nav == UI_NAV_NEXT ? 1 : UI_TAB_COUNT - 1)) % UI_TAB_COUNT;
     }
 
-    // Cleanup
+    // Cleanup: no worker may outlive the network service
+    ui_job_settle();
     catalog_exit();
     network_exit();
     card_spi_exit();

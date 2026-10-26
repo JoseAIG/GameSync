@@ -166,12 +166,12 @@ static void draw_frame(Catalog *cat);
 // ---------------------------------------------------------------------------
 
 // GET with one retry when the server didn't answer at all
-static u8 *cat_get(const Catalog *cat, const char *path, u32 *size, u32 *status) {
+static u8 *cat_get_cfg(const AppConfig *config, const char *path, u32 *size, u32 *status) {
     *status = 0;
-    u8 *body = network_get(cat->config, path, size, status);
+    u8 *body = network_get(config, path, size, status);
     if (!body && *status == 0) {
         svcSleepThread(1000000000LL);
-        body = network_get(cat->config, path, size, status);
+        body = network_get(config, path, size, status);
     }
     // No real HTTP status (seen as -1 when nothing answered): no answer
     if (*status < 100 || *status > 599) {
@@ -180,6 +180,10 @@ static u8 *cat_get(const Catalog *cat, const char *path, u32 *size, u32 *status)
         *status = 0;
     }
     return body;
+}
+
+static u8 *cat_get(const Catalog *cat, const char *path, u32 *size, u32 *status) {
+    return cat_get_cfg(cat->config, path, size, status);
 }
 
 static void describe_failure(u32 status, char *out, size_t size) {
@@ -323,6 +327,7 @@ static bool load_catalog(Catalog *cat, LoadSummary *sum) {
     for (int i = 0; i < CAT_MAX_SYSTEMS; i++) sum->rows[i] = -1;
     unload_lists(cat);
 
+    ui_job_settle();   // a cancelled job may still be talking to the server
     ui_busy("Game Catalog", "Contacting the server...");
     u32 size = 0, status = 0;
     u8 *body = cat_get(cat, "/roms/fingerprints", &size, &status);
@@ -430,10 +435,32 @@ static bool apply_filter(Catalog *cat) {
     return true;
 }
 
-static void show_loading(Catalog *cat) {
-    cat->loading = true;
-    draw_frame(cat);
-    cat->loading = false;
+// A live page, fetched on the worker (see ui_run_job): everything it needs
+// is copied in, everything it finds is copied out by the main thread
+typedef struct {
+    AppConfig config;
+    char path[320];
+    CatEntry win[CAT_WINDOW];
+    int n;                   // entries parsed, -1 bad reply
+    CatPageInfo info;
+    bool ok;                 // a 200 that parsed
+    char error[96];
+} PageJob;
+
+static bool page_job(void *ctx) {
+    PageJob *j = ctx;
+    u32 size = 0, status = 0;
+    u8 *body = cat_get_cfg(&j->config, j->path, &size, &status);
+    j->error[0] = '\0';
+    if (body && status == 200) {
+        j->n = cat_parse_page((const char *)body, size, j->win, CAT_WINDOW, &j->info);
+        if (j->n < 0) snprintf(j->error, sizeof(j->error), "Bad catalog reply");
+        else j->ok = true;
+    } else {
+        describe_failure(body ? status : 0, j->error, sizeof(j->error));
+    }
+    free(body);
+    return j->ok;
 }
 
 // Load the page starting at `offset` into the window
@@ -461,27 +488,41 @@ static void fetch_window(Catalog *cat, int offset) {
              cat->systems[cat->sys], CAT_WINDOW, offset,
              cat->ra_only ? "&has_ra=true" : "", search);
 
-    show_loading(cat);
-    u32 size = 0, status = 0;
-    u8 *body = cat_get(cat, path, &size, &status);
-    cat->error[0] = '\0';
-    if (body && status == 200) {
-        CatPageInfo info;
-        int n = cat_parse_page((const char *)body, size, cat->win, CAT_WINDOW, &info);
-        if (n < 0) {
-            snprintf(cat->error, sizeof(cat->error), "Bad catalog reply");
-            cat->win_count = 0;
-        } else {
-            cat->win_off = offset;
-            cat->win_count = n;
-            cat->total = info.total;
-            cat->filter_ignored = cat->ra_only && info.has_ra != 1;
-        }
+    PageJob *j = ui_job_ctx(sizeof(PageJob));
+    if (!j) {
+        snprintf(cat->error, sizeof(cat->error), "Out of memory");
+        cat->win_count = 0;
+        return;
+    }
+    j->config = *cat->config;
+    snprintf(j->path, sizeof(j->path), "%s", path);
+    // The list stays live underneath, showing its "Loading..." rows and the
+    // header spinner; a card only appears if the server is slow
+    UiProgress p = { 0 };
+    p.title = "Game Catalog";
+    p.status = "Loading the list...";
+    p.frac = -1;
+    bool cancelled = false;
+    cat->loading = true;
+    ui_run_job_ex(page_job, j, &p, UI_JOB_CANCELLABLE | UI_JOB_QUIET, &cancelled);
+    cat->loading = false;
+    if (cancelled) {
+        // Nothing changed; A asks again
+        snprintf(cat->error, sizeof(cat->error), "Loading cancelled");
+        cat->win_count = 0;
+        return;
+    }
+    snprintf(cat->error, sizeof(cat->error), "%s", j->error);
+    if (j->ok) {
+        memcpy(cat->win, j->win, (size_t)j->n * sizeof(CatEntry));
+        cat->win_off = offset;
+        cat->win_count = j->n;
+        cat->total = j->info.total;
+        cat->filter_ignored = cat->ra_only && j->info.has_ra != 1;
     } else {
-        describe_failure(body ? status : 0, cat->error, sizeof(cat->error));
         cat->win_count = 0;
     }
-    free(body);
+    ui_job_release(j);
 }
 
 // Entry `index` of the filtered list, or NULL while it isn't loaded. In
@@ -1103,6 +1144,7 @@ static void append_error_body(const NetDlInfo *info, char *out, size_t size) {
 
 // Run one install; returns true if the user asked to retry as a file
 static bool run_install(Catalog *cat, const CatEntry *e, const CatPlan *plan, InstallMode mode) {
+    ui_job_settle();   // a cancelled job may still be talking to the server
     bool cia = (mode == MODE_CIA);
     char target[CAT_FILE_LEN];
     const char *ext = ".nds";
@@ -1529,6 +1571,23 @@ static void wipe_cache(void) {
     }
 }
 
+// GET /roms/scan on the worker: the server answers when its rescan is done
+typedef struct {
+    AppConfig config;
+    u32 status;
+    int count;
+} ScanJob;
+
+static bool scan_job(void *ctx) {
+    ScanJob *j = ctx;
+    u32 len = 0;
+    u8 *body = network_get_timeout(&j->config, "/roms/scan", &len, &j->status, RESCAN_TIMEOUT_S);
+    if (!body || j->status < 100 || j->status > 599) j->status = 0;
+    j->count = (body && j->status == 200) ? cat_parse_scan_count((const char *)body, len) : -1;
+    free(body);
+    return true;
+}
+
 void catalog_refresh(const AppConfig *config, char *report, size_t size) {
     Catalog *cat = get_catalog(config);
     if (!cat) {
@@ -1536,14 +1595,31 @@ void catalog_refresh(const AppConfig *config, char *report, size_t size) {
         return;
     }
 
-    // 1. Ask the server to walk its ROM folder again (it answers when done)
-    ui_busy("Refresh catalog", "Asking the server to rescan its ROMs...");
-    u32 len = 0, status = 0;
-    u8 *body = network_get_timeout(config, "/roms/scan", &len, &status, RESCAN_TIMEOUT_S);
+    // 1. Ask the server to walk its ROM folder again (it answers when done,
+    // which can take minutes: the card offers Cancel once it has waited)
+    u32 status = 0;
+    int count = -1;
+    ScanJob *j = ui_job_ctx(sizeof(ScanJob));
+    if (j) {
+        j->config = *config;
+        UiProgress p = { 0 };
+        p.title = "Refresh catalog";
+        p.status = "Asking the server to rescan its ROMs...";
+        p.frac = -1;
+        bool cancelled = false;
+        ui_run_job(scan_job, j, &p, true, &cancelled);
+        if (cancelled) {
+            // The cached catalog stays as it is
+            snprintf(report, size, "Refresh cancelled.\n\n" UI_DIM
+                     "The server may still finish its rescan. The cached catalog was kept; "
+                     "run Refresh catalog again later to fetch it.");
+            return;
+        }
+        status = j->status;
+        count = j->count;
+        ui_job_release(j);
+    }
     char rescan[128];
-    if (!body || status < 100 || status > 599) status = 0;
-    int count = (body && status == 200) ? cat_parse_scan_count((const char *)body, len) : -1;
-    free(body);
     if (status == 200 && count >= 0)
         snprintf(rescan, sizeof(rescan), "Server rescan: %d ROMs.", count);
     else if (status == 200)

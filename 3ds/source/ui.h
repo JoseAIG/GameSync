@@ -14,6 +14,8 @@
 #include "ui_format.h"
 #include "folder_scan.h"
 #include "ui_gesture.h"
+#include "ui_types.h"
+#include "ui_job.h"
 
 void ui_init(void);
 void ui_exit(void);
@@ -63,13 +65,7 @@ void ui_draw_backdrop_bottom(void);
 // Dialogs and progress
 // ---------------------------------------------------------------------------
 
-typedef enum {
-    UI_TONE_ACCENT = 0,
-    UI_TONE_OK,
-    UI_TONE_WARN,
-    UI_TONE_INFO,
-    UI_TONE_ERR,
-} UiTone;
+// UiTone and UiProgress: ui_types.h
 
 u32 ui_tone_hex(UiTone tone);
 
@@ -115,19 +111,6 @@ void ui_message(UiTone tone, const char *title, const char *body);
 // A = yes, B = no
 bool ui_confirm(UiTone tone, const char *title, const char *body, const char *yes_label);
 
-typedef struct {
-    const char *title;    // card title
-    const char *name;     // what's being worked on (bold line)
-    const char *status;   // line under the name
-    float frac;           // 0..1; < 0 = indeterminate; > 1 = no bar
-    const char *left;     // under the bar, left ("12 MB / 64 MB")
-    const char *right;    // under the bar, right ("18%")
-    const char *info1;    // extra lines (speed, time)
-    const char *info2;
-    bool cancel_hint;     // a "B Cancel" pill (see ui_progress_cancel_poll)
-    UiTone tone;
-} UiProgress;
-
 // Draw one frame: backdrop + progress card. Doesn't wait for vsync.
 void ui_progress(const UiProgress *p);
 // For work that polls between progress frames: reads the input and returns
@@ -140,9 +123,58 @@ bool ui_progress_cancel_poll(void);
 // Indeterminate progress card with a message
 void ui_busy(const char *title, const char *message);
 
-// The next modal (dialog or choice list) grows out of screen y `y` on the
-// bottom screen instead of its own centre, e.g. the row a menu is about.
-// Used once.
+// ---------------------------------------------------------------------------
+// Background jobs
+// ---------------------------------------------------------------------------
+//
+// Blocking work (network requests, hashing a save) runs on a worker thread
+// while the main thread keeps drawing the backdrop and a progress card at
+// 30 Hz, so the spinner turns and the lists under the scrim keep their
+// motion. After UI_JOB_WAIT_MS without news the card says "Waiting for the
+// server... 0:07" and, for a cancellable job, adds the Cancel pill (B or a
+// tap, on release).
+//
+// What runs where:
+// - main thread: everything that draws (citro2d), reads HID or calls APT;
+//   it changes no app state while the job runs.
+// - worker: only `fn`. It may read app state the main thread leaves alone
+//   during the job, writes its results into `ctx`, and reports through
+//   ui_progress()/ui_busy() (copied, never drawn) and asks
+//   ui_progress_cancel_poll()/ui_job_cancelled() (the flag only). It must
+//   not call citro2d, hidScanInput(), aptMainLoop() or any dialog.
+//
+// Cancelling abandons the result: ui_run_job returns at once while the
+// worker finishes on its own. So a cancellable job's ctx must come from
+// ui_job_ctx() (job-owned; any other ctx makes the job uncancellable), and
+// `fn` must copy what it reads from app state into it first. The next job,
+// ui_job_ctx() and ui_job_settle() wait for such a worker ("Finishing the
+// request you cancelled...") before anything else uses the network.
+typedef bool (*UiJobFn)(void *ctx);
+
+#define UI_JOB_CANCELLABLE 0x1   // offer the Cancel pill once it has waited
+#define UI_JOB_QUIET       0x2   // no card until it has waited (the backdrop shows the work)
+
+// Runs fn(ctx) on the worker, showing `initial` (may be NULL: no card until
+// the worker reports). Returns fn's result, false when cancelled
+// (*cancelled_out, may be NULL, then true). With no thread available it
+// runs fn here, as before.
+bool ui_run_job(UiJobFn fn, void *ctx, const UiProgress *initial, bool cancellable, bool *cancelled_out);
+bool ui_run_job_ex(UiJobFn fn, void *ctx, const UiProgress *initial, u32 flags, bool *cancelled_out);
+// For the worker: has the user cancelled (or is the app closing)?
+bool ui_job_cancelled(void);
+// Zeroed job-owned storage for a cancellable job's ctx, valid until the
+// next ui_job_ctx() (NULL when out of memory). Waits for a cancelled worker.
+void *ui_job_ctx(size_t size);
+// Give `ctx` back early once its results were read (ignored while a
+// cancelled worker may still use it)
+void ui_job_release(void *ctx);
+// Wait for a cancelled job's worker, if one is still running: call before
+// using the network or a save outside a job, and before exit
+void ui_job_settle(void);
+
+// The next modal (dialog, choice list or job card) grows out of screen y
+// `y` on the bottom screen instead of its own centre, e.g. the row a menu
+// is about. Used once.
 void ui_set_modal_origin(float y);
 
 // Pick one of `count` items from a list card (A picks, B cancels, D-pad /

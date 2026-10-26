@@ -47,11 +47,6 @@ static void format_size(u32 bytes, char *out, int out_size) {
     ui_format_size_str(bytes, out, out_size);
 }
 
-// ISO 8601 "YYYY-MM-DDTHH:MM:SS..." -> "YYYY-MM-DD HH:MM"
-static void format_date(const char *iso, char *out, int out_size) {
-    ui_format_date_str(iso, out, out_size);
-}
-
 static char local_console_id[17];
 static int utc_offset_minutes;
 
@@ -780,6 +775,85 @@ static void draw_status_toast(const char *status, UiTone tone) {
     gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
 }
 
+static void size_files(u32 size, int files, char *out, size_t out_size);
+
+// The last compare of a save, in words (the Saves top screen): what
+// changed, the server's copy, when it was last synced. No hashes.
+typedef struct {
+    u32 hex;
+    char head[64];     // "Only the server changed"
+    char sub[96];      // "Another device · AB12, Oct 12 21:14" / a reason
+    char server[64];   // "Server: 12.0 KB · 2 files"
+    char last[64];     // "Last synced: just now"
+} SavesVerdict;
+
+static void saves_verdict(const SaveDetails *d, u64 synced_ms, SavesVerdict *out) {
+    char ago[32] = "", when[40], device[40];
+    if (synced_ms) ui_format_ago(gui_clock_ms() - synced_ms, ago, sizeof(ago));
+    ui_format_when(d->server_last_sync, when, sizeof(when));
+    ui_device_label(d->server_console_id, device, sizeof(device));
+    out->sub[0] = out->server[0] = out->last[0] = '\0';
+
+    SyncAction a = sync_decide(d);
+    switch (a) {
+        case SYNC_ACTION_SERVER_ERROR:
+            out->hex = HEX_ERR;
+            snprintf(out->head, sizeof(out->head), "Couldn't reach the server");
+            if (d->server_status)
+                snprintf(out->sub, sizeof(out->sub), "It answered with HTTP %lu. Nothing was changed.",
+                         (unsigned long)d->server_status);
+            else
+                snprintf(out->sub, sizeof(out->sub), "%s", d->server_error_msg[0] ? d->server_error_msg
+                                                                                  : "No answer. Nothing was changed.");
+            return;
+        case SYNC_ACTION_UPLOAD:
+            out->hex = HEX_WARN;
+            snprintf(out->head, sizeof(out->head), "%s",
+                     d->server_exists ? "Only this console changed" : "Not on the server yet");
+            break;
+        case SYNC_ACTION_DOWNLOAD:
+            out->hex = HEX_INFO;
+            if (d->local_exists) {
+                snprintf(out->head, sizeof(out->head), "Only the server changed");
+                snprintf(out->sub, sizeof(out->sub), "%s, %s", device, when);
+            } else {
+                snprintf(out->head, sizeof(out->head), "No save on this console yet");
+            }
+            break;
+        case SYNC_ACTION_CONFLICT:
+            out->hex = HEX_ERR;
+            snprintf(out->head, sizeof(out->head), "%s",
+                     d->has_last_synced ? "Both changed" : "Differs, no sync record");
+            break;
+        default:
+            out->hex = HEX_OK;
+            if (!d->local_exists && !d->server_exists)
+                snprintf(out->head, sizeof(out->head), "No save anywhere yet");
+            else if (ago[0])
+                snprintf(out->head, sizeof(out->head), "Matches the server \xC2\xB7 %s", ago);
+            else
+                snprintf(out->head, sizeof(out->head), "Matches the server");
+            break;
+    }
+    if (d->server_exists) {
+        char sf[48];
+        size_files(d->server_size, d->server_file_count, sf, sizeof(sf));
+        snprintf(out->server, sizeof(out->server), "Server: %s", sf);
+    } else {
+        snprintf(out->server, sizeof(out->server), "Server: no save");
+    }
+    // When it was last synced: this session (monotonic), else the server's
+    // date when its copy is the one last synced here
+    if (ago[0])
+        snprintf(out->last, sizeof(out->last), "Last synced: %s", ago);
+    else if (d->has_last_synced && d->server_exists && strcmp(d->last_synced_hash, d->server_hash) == 0)
+        snprintf(out->last, sizeof(out->last), "Last synced: %s", when);
+    else if (!d->has_last_synced)
+        snprintf(out->last, sizeof(out->last), "Never synced from here");
+    else if (d->server_exists)
+        snprintf(out->last, sizeof(out->last), "Server copy from %s", when);
+}
+
 // "zel" in quotes, cut to 10 characters
 static void search_label(const char *search, char *out, size_t size) {
     char q[64];
@@ -847,61 +921,51 @@ void ui_draw_saves_top(const SavesView *v) {
         gui_text_mid(pxx + 14, y, 15, GUI_S_TINY, gui_rgb(hex), GUI_LEFT, 0, state);
         pxx += sw + 5;
     }
-    y += 22;
+    y += 19;
+    // The ids stay visible, but as a caption
+    gui_textf(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "%s \xC2\xB7 %s", t->title_id_hex,
+              t->product_code[0] ? t->product_code : "no product code");
+    y += gui_line_h(GUI_S_SMALL) + 5;
 
-    // Left column: the title. Right column: the last compare.
+    // Left column: where the save lives. Right column: what the last
+    // compare found, in words.
     float colw = (pw - 36) / 2, lh = gui_line_h(GUI_S_SMALL) + 1;
     float lx = x, rx = x + colw + 12;
-    gui_rect(rx - 7, y, 1, ph - (y - py) - 10, gui_rgb(HEX_LINE));
+    gui_rect(rx - 7, y, 1, ph - (y - py) - 8, gui_rgb(HEX_LINE));
 
-    kv(lx, y, 54, colw, "Title ID", t->title_id_hex, HEX_TEXT);
-    kv(lx, y + lh, 54, colw, "Product", t->product_code[0] ? t->product_code : "-", HEX_TEXT);
     const char *media = t->is_nds ? (is_cart(t) ? "DS game card" : "SD card (.sav)")
                                   : (is_cart(t) ? "Game card" : "SD card");
-    kv(lx, y + 2 * lh, 54, colw, "Storage", media, HEX_TEXT);
+    kv(lx, y, 54, colw, "Storage", media, HEX_TEXT);
     if (t->is_nds && !is_cart(t) && t->sav_path[0]) {
         const char *base = strrchr(t->sav_path, '/');
-        kv(lx, y + 3 * lh, 54, colw, "Save file", base ? base + 1 : t->sav_path, HEX_DIM);
+        kv(lx, y + lh, 54, colw, "Save file", base ? base + 1 : t->sav_path, HEX_DIM);
     } else if (is_cart(t)) {
-        gui_text_fit(lx, y + 3 * lh, GUI_S_SMALL, gui_rgb(HEX_CART), GUI_LEFT, colw,
-                     "Cartridge: not part of Sync All");
+        gui_text_wrap(lx, y + lh, GUI_S_SMALL, gui_rgb(HEX_CART), colw, 2,
+                      "Cartridge: not part of Sync All. Sync it with A.");
     }
 
-    const SaveDetails *d = v->details;
-    if (d) {
-        char size[24], line[96];
-        if (d->local_exists) {
-            format_size(d->local_size, size, sizeof(size));
-            snprintf(line, sizeof(line), "%s \xC2\xB7 %.8s", size, d->local_hash);
-        } else {
-            snprintf(line, sizeof(line), "No save");
+    if (v->details) {
+        SavesVerdict sv;
+        saves_verdict(v->details, v->synced_ms, &sv);
+        float ry = y;
+        int n = gui_text_wrap(rx, ry, GUI_S_BODY, gui_rgb(sv.hex), colw, 2, sv.head);
+        ry += n * gui_line_h(GUI_S_BODY) + 1;
+        if (sv.sub[0]) {
+            n = gui_text_wrap(rx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), colw, 2, sv.sub);
+            ry += n * lh;
         }
-        kv(rx, y, 50, colw, "Console", line, HEX_TEXT);
-        if (d->server_error) {
-            if (d->server_status)
-                snprintf(line, sizeof(line), "Error (HTTP %lu)", (unsigned long)d->server_status);
-            else
-                snprintf(line, sizeof(line), "No response");
-        } else if (d->server_exists) {
-            format_size(d->server_size, size, sizeof(size));
-            snprintf(line, sizeof(line), "%s \xC2\xB7 %.8s", size, d->server_hash);
-        } else {
-            snprintf(line, sizeof(line), "Not uploaded");
+        if (sv.server[0]) {
+            gui_text_fit(rx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, colw, sv.server);
+            ry += lh;
         }
-        kv(rx, y + lh, 50, colw, "Server", line, d->server_error ? HEX_ERR : HEX_TEXT);
-        char date[32];
-        // Synced this session: say how long ago (monotonic), not a date
-        if (v->synced_ms) ui_format_ago(gui_clock_ms() - v->synced_ms, date, sizeof(date));
-        else format_date(d->server_last_sync, date, sizeof(date));
-        kv(rx, y + 2 * lh, 50, colw, "Synced", d->server_exists ? date : "-", HEX_DIM);
-        kv(rx, y + 3 * lh, 50, colw, "Last ok", d->has_last_synced ? d->last_synced_hash : "never", HEX_DIM);
+        if (sv.last[0]) gui_text_fit(rx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, colw, sv.last);
     } else {
-        gui_text(rx, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Save");
-        float bx = rx;
-        bx += gui_text(bx, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Press ") ;
-        bx += gui_button(bx, y + lh + lh / 2 - 0.5f, "A") + 3;
-        gui_text(bx, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "to compare");
-        gui_text(rx, y + 2 * lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "with the server copy.");
+        // A runs Smart Sync, which compares first and always asks
+        float cy = y + gui_line_h(GUI_S_BODY) / 2;
+        float bx = rx + gui_button(rx, cy, "A") + 6;
+        gui_text(bx, y, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, "Check and sync");
+        gui_text_wrap(rx, y + gui_line_h(GUI_S_BODY) + 2, GUI_S_SMALL, gui_rgb(HEX_DIM), colw, 3,
+                      "Compares first and asks before changing anything.");
     }
 
     draw_status_toast(v->status, v->status_tone);

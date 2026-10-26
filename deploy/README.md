@@ -25,8 +25,8 @@ Apunta tu túnel o proxy inverso a `http://gamesync:8000` dentro de la red
 viaja en el header `X-API-Key`.
 
 Capas extra recomendadas, si tu proxy o CDN las ofrece:
-- Bloquear `/docs`, `/redoc`, `/openapi.json` y `/api/v1/update*`. El servidor
-  ya las apaga; esto es un refuerzo.
+- Bloquear `/docs`, `/redoc`, `/openapi.json`, `/api/v1/update*` y
+  `/api/v1/emulators/*`. El servidor ya las apaga; esto es un refuerzo.
 - Limitar la tasa en `/api/v1/` por IP, por ejemplo 50 peticiones cada 10 s.
   Frena a quien intente adivinar la key.
 
@@ -57,5 +57,6 @@ pausa (`docker compose pause` / `unpause`).
 - Sin RetroAchievements.
 - Sin documentación pública.
 - Sin proxy de actualizaciones.
+- Sin índice de juegos para emuladores (`GameIndex.yaml` de PS5SX2).
 - Key solo por header.
 - Sin access log de uvicorn.

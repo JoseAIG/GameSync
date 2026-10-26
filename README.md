@@ -50,6 +50,7 @@ Configuration is done via environment variables:
 | `SYNC_MAX_DECOMPRESSED_BYTES` | `268435456` | Largest uncompressed bundle payload (256 MiB) |
 | `SYNC_UPDATE_REPO` | `pepasjc/GameSync` | GitHub repo used by the 3DS/NDS update proxy |
 | `SYNC_UPDATE_PROXY_ENABLED` | `true` | Disable the update proxy entirely with `false` |
+| `SYNC_EMULATOR_INDEX_ENABLED` | `true` | Disable the PS5SX2 `GameIndex.yaml` fetch from GitHub with `false` |
 
 See [server/README.md](server/README.md#configuration) for the full list.
 

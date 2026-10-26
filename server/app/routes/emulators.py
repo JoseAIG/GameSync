@@ -7,6 +7,9 @@ card filters. Its own installer copies the file, but an install of just the
 app (a store such as ProsperoStore) leaves it out, and the PS5 client speaks
 plain HTTP to IP addresses only, so it can't get it from GitHub. The server
 fetches it from the repository at the latest release's tag and serves it.
+
+``SYNC_EMULATOR_INDEX_ENABLED=false`` turns the endpoint off: it answers 404
+and never reaches GitHub (not even to refresh an existing cached copy).
 """
 
 from __future__ import annotations
@@ -114,6 +117,8 @@ async def get_game_index() -> tuple[bytes, dict]:
 @router.get("/emulators/ps5sx2/game-index")
 async def ps5sx2_game_index():
     """PCSX2's game database as PS5SX2 ships it, for /data/PCSX2/resources/."""
+    if not settings.emulator_index_enabled:
+        raise HTTPException(status_code=404, detail="Emulator game index is disabled")
     try:
         data, meta = await get_game_index()
     except Exception as exc:  # GitHub unreachable and nothing cached

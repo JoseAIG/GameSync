@@ -27,6 +27,7 @@ services:
       SYNC_DISABLE_DOCS: "true"        # sin /docs ni /openapi.json públicos
       SYNC_ALLOW_QUERY_API_KEY: "false" # la key solo por header X-API-Key
       SYNC_UPDATE_PROXY_ENABLED: "false" # sin proxy de descargas (y sin SSRF)
+      SYNC_EMULATOR_INDEX_ENABLED: "false" # sin descarga del GameIndex.yaml de PS5SX2 desde GitHub
     volumes:
       - ${GAMESYNC_DATA_DIR:-./data}:/data
     # Blindaje: sin root, raíz de solo lectura, sin capacidades extra.

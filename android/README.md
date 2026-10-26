@@ -64,6 +64,23 @@ SELECT glyphs) show whenever a gamepad is attached or the screen is in
 landscape; on a phone in portrait the app is driven by touch as before (tap a
 tab, tap a row, the toolbar icons).
 
+Messages appear in one place at the bottom of the screen, above the button
+hints. A new message replaces the one showing instead of waiting behind it,
+and it stays up when you leave the screen, so the save detail screen goes back
+as soon as an action finishes. Errors stay up longer and have a close button.
+"Server URL not configured" offers a **Settings** shortcut and a failed ROM
+download offers **Retry**; both are touch shortcuts for things the controller
+reaches through the tabs. Successes and errors also give a short vibration
+when the system's touch feedback is on.
+
+Moving between tabs cross-fades; the save detail and emulator screens slide
+in from the right and leave the way they came. With the system's *Remove
+animations* accessibility setting on, every slide becomes a short fade and
+list scrolling jumps instead of gliding. On Android 14 and later the system
+*Contrast* setting (medium or high) brightens secondary text and outlines the
+status pills and banners. Rotating the screen keeps the selected row, the
+search and the filters.
+
 ## Controls
 
 The same scheme on every screen (shared by all GameSync console clients):
@@ -79,6 +96,10 @@ The same scheme on every screen (shared by all GameSync console clients):
 | START | Exit (asks first: START again or A exits, B stays) |
 
 The touch / system Back gesture behaves as before.
+
+Holding A doesn't repeat it: one press is one action, so a held A can't open a
+dialog and confirm it too. Inside a dialog the D-pad never moves onto a button;
+each choice answers only to the button drawn on it.
 
 ### Saves
 

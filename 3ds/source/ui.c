@@ -237,7 +237,45 @@ bool ui_confirm(UiTone tone, const char *title, const char *body, const char *ye
     return (ui_dialog(tone, title, body, b, 2) & KEY_A) != 0;
 }
 
+// The bar's shown fraction glides toward the reported one (progress frames
+// come at irregular times, a few per second) but never runs ahead of it and
+// snaps to full at the end. A new operation (title, name or an
+// indeterminate phase) starts from its own value, not the last one's.
+static float smooth_progress(const UiProgress *p) {
+    static GuiSpring shown;
+    static char last_title[48], last_name[96];
+    static u64 last_ms;
+    const char *title = p->title ? p->title : "";
+    const char *name = p->name ? p->name : "";
+    u64 now = gui_clock_ms();
+    float frac = p->frac;
+
+    bool changed = strncmp(title, last_title, sizeof(last_title) - 1) != 0 ||
+                   strncmp(name, last_name, sizeof(last_name) - 1) != 0;
+    if (changed || frac < 0) {
+        snprintf(last_title, sizeof(last_title), "%s", title);
+        snprintf(last_name, sizeof(last_name), "%s", name);
+        gui_spring_set(&shown, frac > 0 ? (frac < 1 ? frac : 1) : 0);
+        last_ms = now;
+        return frac;
+    }
+    if (frac > 1) return frac;   // no bar
+    if (frac >= 1) {
+        gui_spring_set(&shown, 1);
+        last_ms = now;
+        return 1;
+    }
+    float dt = now > last_ms ? (float)(now - last_ms) / 1000.0f : 0;
+    if (dt > 0.25f) dt = 0.25f;
+    last_ms = now;
+    gui_spring_always(&shown, frac, GUI_RESP_PROGRESS, dt);
+    if (shown.x > frac) gui_spring_set(&shown, frac);
+    if (shown.x < 0) gui_spring_set(&shown, 0);
+    return shown.x;
+}
+
 void ui_progress(const UiProgress *p) {
+    float bar_frac = smooth_progress(p);
     gui_begin(false);
     gui_screen(GUI_TOP);
     ui_draw_backdrop_top();
@@ -273,7 +311,7 @@ void ui_progress(const UiProgress *p) {
         ty += lh_small + 4;
     }
     if (p->frac <= 1) {
-        gui_bar(x, ty, w, 10, p->frac, gui_rgb(hex));
+        gui_bar(x, ty, w, 10, bar_frac, gui_rgb(hex));
         ty += 14;
         if (p->left) gui_text(x, ty, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, p->left);
         if (p->right) gui_text(x + w, ty, GUI_S_SMALL, gui_rgb(hex), GUI_RIGHT, p->right);

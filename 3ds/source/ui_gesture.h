@@ -24,6 +24,9 @@ u64 ui_gesture_now(void);
 typedef struct {
     u32 down, held, up, rep;     // hidKeysDown / Held / Up / DownRepeat (+ accelerated repeat)
     bool t_down, t_held, t_up;   // touch edges, after the latch and the spike filter
+    bool t_cancel;               // with t_up: the touch ended on an unconfirmed jump
+                                 // (a flick that left on its first fast frame, or a
+                                 // release glitch): never a tap
     float tx, ty;                // current point; on t_up the LAST HELD sample
     float tx0, ty0;              // point at touch-down
     float moved;                 // max distance from (tx0, ty0) during this touch
@@ -33,10 +36,15 @@ typedef struct {
 // Touch tracker: one finger, raw samples in, filtered edges out.
 //
 // Spike rejection (not a speed limit): a held sample more than 40 px from
-// the last accepted one is held back a frame. The next sample within 16 px
-// of it confirms it (a real fast flick); otherwise it was a resistive-panel
-// glitch and is dropped. A jump on the last frame before release is
-// dropped. Ordinary samples pass with no delay.
+// both the last accepted one and where the finger's last step would carry
+// it is held back a frame. The next sample confirms it (a real fast flick)
+// if it lies within 16 px of it or carries on the same way (further along
+// the jump, inside a ~27 degree cone); both are then accepted in order.
+// A sample that turns back was a resistive-panel glitch: the jump is
+// dropped. Once a flick is confirmed, its speed is the prediction, so
+// constant fast motion passes with no further delay. A jump on the last
+// frame before release is dropped and the release is flagged t_cancel.
+// Ordinary samples pass with no delay.
 //
 // Latch: after ui_touch_latch() a finger already on the screen is ignored
 // until it lifts, so the touch that opened or closed a dialog never taps or
@@ -45,6 +53,7 @@ typedef struct {
     bool down;          // a touch is being tracked
     bool latched;       // ignore the screen until it is released
     float ax, ay;       // last accepted sample
+    float sx, sy;       // last accepted step (accepted minus the one before)
     bool pending;       // a far jump waiting for confirmation
     float px, py;
     float x0, y0, moved;

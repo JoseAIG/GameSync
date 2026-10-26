@@ -55,11 +55,92 @@ static void test_spike_filter(void) {
     in = touch(&t, true, 101, 205);
     CHECK(in.ty == 205);
 
-    // A jump on the last frame before release is dropped
+    // A jump on the last frame before release is dropped, and the release
+    // is no tap
     in = touch(&t, true, 101, 20);
     CHECK(in.ty == 205);
     in = touch(&t, false, 0, 0);
-    CHECK(in.t_up && in.ty == 205);
+    CHECK(in.t_up && in.ty == 205 && in.t_cancel);
+    // An ordinary release is not cancelled
+    touch(&t, true, 50, 50);
+    in = touch(&t, false, 0, 0);
+    CHECK(in.t_up && !in.t_cancel);
+}
+
+// A finger moving faster than 40 px a frame: held back one frame, then
+// tracked every frame (the confirmed step is the prediction)
+static void test_spike_filter_fast_motion(void) {
+    static const float speeds[] = { 42, 45, 50, 60, 80 };
+    for (unsigned k = 0; k < sizeof(speeds) / sizeof(speeds[0]); k++) {
+        float v = speeds[k];
+        UiTouchTrack t = { 0 };
+        touch(&t, true, 100, 230);
+        UiInput in = touch(&t, true, 100, 230 - v);
+        CHECK(in.ty == 230);                       // the first jump waits a frame
+        for (int f = 2; 230 - f * v >= 0; f++) {
+            in = touch(&t, true, 100, 230 - f * v);
+            CHECK(in.ty == 230 - f * v);           // then every sample is kept
+            CHECK(NEAR(in.moved, f * v, 1e-3f));
+        }
+        in = touch(&t, false, 0, 0);
+        CHECK(in.t_up && !in.t_cancel);
+    }
+
+    // Decelerating or turning slightly still confirms; a glitch that turns
+    // back does not
+    UiTouchTrack t = { 0 };
+    touch(&t, true, 100, 200);
+    touch(&t, true, 100, 150);                     // held back
+    UiInput in = touch(&t, true, 110, 120);        // further along, a bit off line
+    CHECK(in.ty == 120 && in.tx == 110);
+    UiTouchTrack g = { 0 };
+    touch(&g, true, 100, 200);
+    touch(&g, true, 100, 150);
+    in = touch(&g, true, 100, 180);                // back toward the start: a glitch
+    CHECK(in.ty == 180 && in.moved < 21);
+
+    // A glitch in the middle of a fast flick costs at most a frame or two
+    UiTouchTrack f = { 0 };
+    touch(&f, true, 100, 230);
+    touch(&f, true, 100, 185);
+    touch(&f, true, 100, 140);                     // tracking at 45 px/frame
+    in = touch(&f, true, 300, 20);                 // glitch
+    CHECK(in.ty == 140);
+    touch(&f, true, 100, 95);
+    in = touch(&f, true, 100, 50);
+    CHECK(in.ty == 50);
+}
+
+// A button slid off fast is never committed: neither a tracked slide nor
+// one whose only far sample was the last before release
+static void test_tap_fast_slide_off(void) {
+    GuiRect r[1] = { { 10, 200, 100, 38 } };
+    UiTap tap = UI_TAP_INIT;
+    UiTouchTrack t = { 0 };
+    int pressed;
+    UiInput in = touch(&t, true, 50, 215);
+    ui_tap_buttons(&tap, &in, r, 1, &pressed);
+    CHECK(pressed == 0);
+    for (float y = 215 - 45; y >= 80; y -= 45) {
+        in = touch(&t, true, 50, y);
+        ui_tap_buttons(&tap, &in, r, 1, &pressed);
+    }
+    in = touch(&t, false, 0, 0);
+    CHECK(ui_tap_buttons(&tap, &in, r, 1, &pressed) == -1);
+
+    in = touch(&t, true, 50, 215);
+    ui_tap_buttons(&tap, &in, r, 1, &pressed);
+    in = touch(&t, true, 50, 150);                 // one fast frame, then gone
+    ui_tap_buttons(&tap, &in, r, 1, &pressed);
+    in = touch(&t, false, 0, 0);
+    CHECK(in.t_cancel);
+    CHECK(ui_tap_buttons(&tap, &in, r, 1, &pressed) == -1);
+
+    // An ordinary tap still commits
+    in = touch(&t, true, 50, 215);
+    ui_tap_buttons(&tap, &in, r, 1, &pressed);
+    in = touch(&t, false, 0, 0);
+    CHECK(ui_tap_buttons(&tap, &in, r, 1, &pressed) == 0);
 }
 
 static void test_latch(void) {
@@ -240,6 +321,43 @@ static void test_list_tap(void) {
     sim_frame(&s, true, 215, 0);
     ev = sim_frame(&s, false, 0, 0);
     CHECK(ev.kind == UI_LIST_NONE && s.selected == 2);
+}
+
+// A flick faster than 40 px a frame is a drag with momentum, never a tap,
+// whichever row it starts on (the selected one included)
+static void test_list_fast_flick(void) {
+    static const float speeds[] = { 42, 45, 50, 60 };
+    for (unsigned k = 0; k < sizeof(speeds) / sizeof(speeds[0]); k++) {
+        float v = speeds[k];
+        Sim s;
+        sim_init(&s, 40);
+        s.selected = 7;                            // the row under y 195
+        sim_frame(&s, false, 0, 0);
+        UiListEvent ev = sim_frame(&s, true, 195, 0);
+        CHECK(ev.kind == UI_LIST_NONE);
+        bool dragged = false;
+        for (int f = 1; f <= 4; f++) {
+            ev = sim_frame(&s, true, 195 - f * v, 0);
+            CHECK(ev.kind == UI_LIST_NONE);
+            dragged |= s.a.dragging;
+        }
+        CHECK(dragged && s.a.dragging);
+        ev = sim_frame(&s, false, 0, 0);
+        CHECK(ev.kind == UI_LIST_NONE && s.selected == 7);
+        CHECK(s.a.release_v > 0 && s.a.coasting);
+        sim_settle(&s, 600);
+        CHECK(s.scroll > 0);
+    }
+
+    // Touch-down, one fast frame, release: the jump is dropped and the
+    // release is no tap (not of the row under the touch-down either)
+    Sim s;
+    sim_init(&s, 40);
+    sim_frame(&s, false, 0, 0);
+    sim_frame(&s, true, 80, 0);
+    sim_frame(&s, true, 20, 0);
+    UiListEvent ev = sim_frame(&s, false, 0, 0);
+    CHECK(ev.kind == UI_LIST_NONE && s.selected == 0);
 }
 
 static void test_list_drag(void) {
@@ -539,11 +657,14 @@ int main(void) {
     ui_gesture_set_clock(fake_clock);
     test_touch_edges();
     test_spike_filter();
+    test_spike_filter_fast_motion();
     test_latch();
     test_repeat();
     test_tap();
+    test_tap_fast_slide_off();
     test_rubberband();
     test_list_tap();
+    test_list_fast_flick();
     test_list_drag();
     test_list_rubber_band();
     test_list_flick();

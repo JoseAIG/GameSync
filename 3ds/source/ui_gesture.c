@@ -18,10 +18,33 @@ static float dist(float ax, float ay, float bx, float by) {
 // ---------------------------------------------------------------------------
 
 static void track_accept(UiTouchTrack *t, float x, float y) {
+    t->sx = x - t->ax;
+    t->sy = y - t->ay;
     t->ax = x;
     t->ay = y;
     float d = dist(x, y, t->x0, t->y0);
     if (d > t->moved) t->moved = d;
+}
+
+// Far from the last accepted sample and from where the last step points
+static bool track_far(const UiTouchTrack *t, float x, float y) {
+    return dist(x, y, t->ax, t->ay) > UI_TOUCH_SPIKE_PX &&
+           dist(x, y, t->ax + t->sx, t->ay + t->sy) > UI_TOUCH_SPIKE_PX;
+}
+
+// The sample after a held-back jump confirms it: it stays on the jump, or
+// carries on the way the jump went (a finger still moving that fast). A
+// glitch is followed by a sample back near where the finger really is,
+// i.e. behind the jump.
+static bool track_confirms(const UiTouchTrack *t, float x, float y) {
+    if (dist(x, y, t->px, t->py) <= UI_TOUCH_CONFIRM_PX) return true;
+    float jx = t->px - t->ax, jy = t->py - t->ay;
+    float jl = sqrtf(jx * jx + jy * jy);
+    if (jl <= 0) return false;
+    float dx = x - t->px, dy = y - t->py;
+    float along = (dx * jx + dy * jy) / jl;
+    float across = fabsf(dx * jy - dy * jx) / jl;
+    return along > 0 && across <= UI_TOUCH_CONFIRM_PX + 0.5f * along;
 }
 
 static void track_fill(const UiTouchTrack *t, UiInput *in) {
@@ -33,12 +56,15 @@ static void track_fill(const UiTouchTrack *t, UiInput *in) {
 }
 
 void ui_touch_update(UiTouchTrack *t, bool raw_held, float x, float y, UiInput *in) {
-    in->t_down = in->t_held = in->t_up = false;
+    in->t_down = in->t_held = in->t_up = in->t_cancel = false;
     if (!raw_held) {
         if (t->down) {
-            // Released: report the last accepted sample; a jump still
-            // waiting for confirmation was the panel glitching on release
+            // Released: report the last accepted sample. A jump still
+            // waiting for confirmation was the panel glitching on release,
+            // or a flick that left on its first fast frame: either way
+            // this release is no tap.
             t->down = false;
+            in->t_cancel = t->pending;
             t->pending = false;
             in->t_up = true;
         }
@@ -55,17 +81,19 @@ void ui_touch_update(UiTouchTrack *t, bool raw_held, float x, float y, UiInput *
         t->pending = false;
         t->x0 = t->ax = x;
         t->y0 = t->ay = y;
+        t->sx = t->sy = 0;
         t->moved = 0;
         in->t_down = true;
     } else if (t->pending) {
-        if (dist(x, y, t->px, t->py) <= UI_TOUCH_CONFIRM_PX) {
-            // The finger really is there: a fast flick, keep it
+        if (track_confirms(t, x, y)) {
+            // The finger really went there: a fast flick, keep both
             t->pending = false;
+            track_accept(t, t->px, t->py);
             track_accept(t, x, y);
         } else {
             // A glitch: drop it and judge this sample on its own
             t->pending = false;
-            if (dist(x, y, t->ax, t->ay) > UI_TOUCH_SPIKE_PX) {
+            if (track_far(t, x, y)) {
                 t->pending = true;
                 t->px = x;
                 t->py = y;
@@ -73,7 +101,7 @@ void ui_touch_update(UiTouchTrack *t, bool raw_held, float x, float y, UiInput *
                 track_accept(t, x, y);
             }
         }
-    } else if (dist(x, y, t->ax, t->ay) > UI_TOUCH_SPIKE_PX) {
+    } else if (track_far(t, x, y)) {
         t->pending = true;
         t->px = x;
         t->py = y;
@@ -134,7 +162,7 @@ int ui_tap_buttons(UiTap *t, const UiInput *in, const GuiRect *r, int n, int *pr
             if (inside) pressed = t->armed;
         } else {
             // Released (commit if still on it), or the touch was dropped
-            if (in->t_up && inside) committed = t->armed;
+            if (in->t_up && !in->t_cancel && inside) committed = t->armed;
             t->armed = -1;
         }
     }
@@ -521,7 +549,8 @@ UiListEvent ui_list_input(UiListAnim *a, const UiListGeom *g, int count, int *se
     // Released (t_up), or the touch was dropped by a latch
     a->tracking = false;
     float v = (in->t_up && a->dragging) ? release_velocity(a, in->t_ms) : 0;
-    if (in->t_up && !a->dragging && !a->no_tap && a->pressed_row >= 0 && in->moved < UI_LIST_DRAG_PX &&
+    if (in->t_up && !in->t_cancel && !a->dragging && !a->no_tap && a->pressed_row >= 0 &&
+        in->moved < UI_LIST_DRAG_PX &&
         gui_rect_contains(rect, in->tx, in->ty)) {
         int row = (int)floorf(ui_list_view(a) + (in->ty - g->y) / g->row_h);
         if (row == a->pressed_row) {

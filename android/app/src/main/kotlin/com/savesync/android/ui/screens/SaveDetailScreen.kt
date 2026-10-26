@@ -1,6 +1,46 @@
 package com.savesync.android.ui.screens
 
 import androidx.compose.foundation.BorderStroke
+import android.content.res.Configuration
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.IntrinsicSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.ripple.rememberRipple
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.GsBanner
+import com.savesync.android.ui.components.GsInputMode
+import com.savesync.android.ui.components.GsPill
+import com.savesync.android.ui.components.LocalInputMode
+import com.savesync.android.ui.components.LocalShowButtonHints
+import com.savesync.android.ui.newerSide
+import com.savesync.android.ui.theme.GsShapes
+import com.savesync.android.ui.theme.LocalHighContrast
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsExpandIn
+import com.savesync.android.ui.theme.gsShrinkOut
+import com.savesync.android.ui.theme.gsTextMuted
+import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -37,7 +77,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -103,9 +142,6 @@ import com.savesync.android.ui.detailSyncStatus
 import androidx.compose.runtime.produceState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -115,6 +151,8 @@ fun SaveDetailScreen(
     syncStateEntities: List<SyncStateEntity>,
     onNavigateBack: () -> Unit,
     onNavigateToTab: (Int) -> Unit = {},
+    /** Opened from a conflict (detail/{titleId}?reason=conflict): show the conflict card. */
+    openedFromConflict: Boolean = false,
 ) {
     // Unfiltered: a status change that drops this game from the filtered
     // list must not empty the screen.
@@ -323,12 +361,33 @@ fun SaveDetailScreen(
             hints = listOf(
                 GsHint(GsButton.DPAD, "Move"),
                 GsHint(GsButton.A, "Select"),
+                GsHint(GsButton.Y, "Details"),
                 GsHint(GsButton.B, "Back"),
                 GsHint(GsButton.L1, "Tabs"),
             ),
         )
     }
     GsScreenChrome("detail/$titleId", chromeSpec)
+
+    // Coming back from the emulator: refresh the server's side and re-read
+    // this device's files (the first ON_RESUME is the screen opening).
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var resumeTick by remember { mutableIntStateOf(0) }
+    val currentSystem by rememberUpdatedState(entry?.systemName)
+    DisposableEffect(lifecycleOwner, titleId) {
+        var opened = false
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                if (opened) {
+                    resumeTick++
+                    viewModel.fetchServerMeta(titleId, currentSystem)
+                }
+                opened = true
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     if (entry == null) {
         Box(
@@ -351,27 +410,38 @@ fun SaveDetailScreen(
         else -> entry.saveFile?.lastModified() ?: entry.saveDir?.lastModified() ?: 0L
     }
     // Hashing and walking a save folder read files: off the main thread.
-    val localHash by produceState<String?>(null, entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
+    val localHash by produceState<String?>(null, entry.titleId, fileModTime, saturnArchiveSelectionVersion, resumeTick) {
         value = viewModel.detailLocalHash(entry)
     }
-    val localSize by produceState(0L, entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
+    val localSize by produceState(0L, entry.titleId, fileModTime, saturnArchiveSelectionVersion, resumeTick) {
         value = withContext(Dispatchers.IO) { viewModel.detailLocalSize(entry) }
     }
-    // The header pill: the same three values the Server block below shows
+    // "Modified": the newest file of the save — the same timestamp sync sends.
+    val modifiedAt by produceState(0L, entry.titleId, fileModTime, resumeTick) {
+        value = viewModel.detailModifiedAt(entry)
+    }
+    // The header pill: the same three values the Server facts below show
     // (local hash, last-synced hash, server hash), so the two agree.
     val serverSide = when (val m = serverMeta) {
         is ServerMetaState.Found -> if (m.hash.isBlank() || m.hash == "—") ServerSide.Unknown else ServerSide.Hash(m.hash)
         is ServerMetaState.NotFound -> ServerSide.Missing
         else -> ServerSide.Unknown
     }
+    val conflictIds by viewModel.conflictTitleIds.collectAsState()
+    val conflictInfos by viewModel.conflictInfo.collectAsState()
+    val inConflictSet = titleId in conflictIds
     val rowStatus = allRows.firstOrNull { it.entry.titleId == titleId }?.status
     val headerStatus = detailSyncStatus(
-        hasLocal = viewModel.canUploadFromDetail(entry),
+        hasLocal = canUploadSave,
         localHash = localHash,
         lastSyncedHash = syncState?.lastSyncedHash,
         server = serverSide,
         fallback = rowStatus,
+        conflict = inConflictSet,
     )
+    val showConflictCard = headerStatus == SaveSyncStatus.CONFLICT || (openedFromConflict && inConflictSet)
+    val serverTime = (serverMeta as? ServerMetaState.Found)?.timestamp ?: 0L
+    val newer = newerSide(modifiedAt, serverTime)
 
     // ── ROM availability (needed before we build the action list) ──
     val romAvailable by viewModel.romAvailable.collectAsState()
@@ -385,36 +455,34 @@ fun SaveDetailScreen(
     val focusRequester = remember { FocusRequester() }
     var selectedActionIndex by remember { mutableIntStateOf(0) }
 
-    // Hoist theme colors out of Composable scope so they're usable
-    // inside the plain-Kotlin buildList below.
-    val primaryColor = MaterialTheme.colorScheme.primary
-    val surfaceVariantColor = MaterialTheme.colorScheme.surfaceVariant
-    val onSurfaceVariantColor = MaterialTheme.colorScheme.onSurfaceVariant
-
-    // Derive the ordered list of gamepad-selectable action buttons.
-    // The list order dictates D-pad up/down traversal.
+    // The ordered, gamepad-selectable actions; list order is D-pad order
+    // (unchanged).  Smart Sync is the one filled primary; the overrides are
+    // outlined (Force Download's icon in Warn: it overwrites), ROM rows
+    // tonal, Normalize tertiary.
     val actions: List<DetailAction> = buildList {
         add(DetailAction(
             label = if (isBusy && detailState.isSync) "Syncing…" else "Smart Sync",
             icon = Icons.Default.Sync,
             enabled = !isBusy && (!entry.isServerOnly || canDownloadSave),
-            containerColor = primaryColor,
+            style = ActionStyle.Primary,
             isBusy = isBusy && detailState.isSync,
             onClick = { viewModel.syncSave(entry) }
         ))
         add(DetailAction(
-            label = if (isBusy && detailState.isUpload) "Uploading…" else "Force Upload ↑",
+            label = if (isBusy && detailState.isUpload) "Uploading…" else "Force Upload",
             icon = Icons.Default.CloudUpload,
             enabled = !isBusy && canUploadSave,
-            containerColor = GsColors.Info,
+            style = ActionStyle.Outlined,
             isBusy = isBusy && detailState.isUpload,
+            headerAbove = "Override",
             onClick = { viewModel.uploadSave(entry) }
         ))
         add(DetailAction(
-            label = if (isBusy && detailState.isDownload) "Downloading…" else "Force Download ↓",
+            label = if (isBusy && detailState.isDownload) "Downloading…" else "Force Download",
             icon = Icons.Default.CloudDownload,
+            iconTint = GsColors.Warn,
             enabled = !isBusy && canDownloadSave,
-            containerColor = GsColors.Ok,
+            style = ActionStyle.Outlined,
             isBusy = isBusy && detailState.isDownload,
             onClick = { viewModel.downloadSave(entry) }
         ))
@@ -424,12 +492,12 @@ fun SaveDetailScreen(
                 add(DetailAction(
                     label = when (romDownloadState) {
                         is MainViewModel.RomDownloadState.Downloading -> "Downloading ROM…"
-                        is MainViewModel.RomDownloadState.Success -> "✓ ROM Downloaded"
+                        is MainViewModel.RomDownloadState.Success -> "ROM downloaded"
                         else -> "Download ROM"
                     },
                     icon = Icons.Default.CloudDownload,
                     enabled = !isBusy && !romBusy && rom != null,
-                    containerColor = GsColors.Accent2,
+                    style = ActionStyle.Tonal,
                     isBusy = romBusy,
                     onClick = {
                         if (rom != null) {
@@ -449,12 +517,12 @@ fun SaveDetailScreen(
                     add(DetailAction(
                         label = when (romDownloadState) {
                             is MainViewModel.RomDownloadState.Downloading -> "Downloading ${rom.filename}…"
-                            is MainViewModel.RomDownloadState.Success -> "✓ ${rom.filename} downloaded"
+                            is MainViewModel.RomDownloadState.Success -> "${rom.filename} downloaded"
                             else -> "Download ${rom.filename}"
                         },
                         icon = Icons.Default.CloudDownload,
                         enabled = !isBusy && !romBusy,
-                        containerColor = GsColors.Accent2,
+                        style = ActionStyle.Tonal,
                         isBusy = romBusy,
                         headerAbove = if (index == 0) "Available ROMs" else null,
                         onClick = {
@@ -477,10 +545,8 @@ fun SaveDetailScreen(
                     entry.canonicalName?.let { "Normalize (→ $it)" } ?: "Normalize Name",
                 icon = Icons.Default.Edit,
                 enabled = !isBusy,
-                containerColor = surfaceVariantColor,
-                contentColor = onSurfaceVariantColor,
+                style = ActionStyle.Tertiary,
                 isBusy = isBusy && detailState.isNormalize,
-                dividerAbove = true,
                 onClick = { viewModel.normalizeRomAndSave(entry) }
             ))
         }
@@ -497,7 +563,9 @@ fun SaveDetailScreen(
     }
 
     // Per-action requesters so D-pad/stick scrolls the selected button
-    // into the visible window on smaller screens (verticalScroll).
+    // into the visible window on smaller screens (verticalScroll).  Every
+    // block above the actions (hero, conflict card, facts) scrolls with
+    // them, so the selected action stays reachable on a 360dp-tall screen.
     val bringRequesters = remember(actions.size) {
         List(actions.size) { BringIntoViewRequester() }
     }
@@ -505,9 +573,29 @@ fun SaveDetailScreen(
         bringRequesters.getOrNull(selectedActionIndex)?.bringIntoView()
     }
 
+    // Technical details: collapsed; Y (unused here otherwise) or a tap on
+    // its header toggles it, and an expand brings it into view without
+    // moving the action cursor.
+    var detailsExpanded by rememberSaveable { mutableStateOf(false) }
+    val detailsTransition = remember { MutableTransitionState(false) }
+    detailsTransition.targetState = detailsExpanded
+    val detailsRequester = remember { BringIntoViewRequester() }
+    LaunchedEffect(detailsExpanded) {
+        if (detailsExpanded) {
+            withFrameNanos { }
+            detailsRequester.bringIntoView()
+            snapshotFlow { detailsTransition.isIdle }.first { it }
+            detailsRequester.bringIntoView()
+        }
+    }
+
     // Claim focus on entry so the D-pad/stick immediately drive nav.
     LaunchedEffect(Unit) {
         runCatching { focusRequester.requestFocus() }
+    }
+
+    val wide = LocalConfiguration.current.let {
+        it.orientation == Configuration.ORIENTATION_LANDSCAPE || it.screenWidthDp >= 600
     }
 
     Column(
@@ -539,6 +627,11 @@ fun SaveDetailScreen(
                             ?.takeIf { it.enabled }?.onClick?.invoke()
                         true
                     }
+                    // Y: technical details (Y = details, as on the lists).
+                    Key.ButtonY -> {
+                        if (event.nativeKeyEvent.repeatCount == 0) detailsExpanded = !detailsExpanded
+                        true
+                    }
                     Key.ButtonB, Key.Escape, Key.Back -> {
                         onNavigateBack()
                         true
@@ -546,7 +639,7 @@ fun SaveDetailScreen(
                     else -> false
                 }
             },
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Server conditions that change what the statuses below mean.
         StatusBanners(
@@ -556,139 +649,384 @@ fun SaveDetailScreen(
             ),
             onOpenSettings = { onNavigateToTab(SETTINGS_TAB) },
         )
-        // System badge + sync status badge + picker for RETRO
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            SystemChip(entry.systemName)
-            SyncStatusBadge(headerStatus)
-            if (entry.systemName == "RETRO") {
-                Text("Unknown — set below:", style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-        }
-        if (entry.systemName == "RETRO") {
-            SystemPicker(onSystemSelected = { viewModel.setSaveSystem(entry, it) })
-        }
 
-        HorizontalDivider()
-        InfoRow("Title ID", entry.titleId)
-        InfoRow("File", entry.saveDir?.name ?: entry.saveFile?.name ?: "—")
-        entry.canonicalName?.let { canonical ->
-            InfoRow("Canonical name", canonical)
-        }
-
-        HorizontalDivider()
-
-        // ── Local vs Server comparison ──────────────────────────────
-        Text("Status", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-
-        // LOCAL
-        Text("📱 Local", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        InfoRow("  Size", formatSize(localSize))
-        InfoRow("  Hash", localHash?.take(16)?.let { "$it…" } ?: "—")
-        syncState?.lastSyncedAt?.takeIf { it > 0 }?.let {
-            InfoRow("  Last synced", formatTimestampFull(it))
-        } ?: InfoRow("  Last synced", "Never")
-
-        Spacer(Modifier.height(4.dp))
-
-        // SERVER
-        Text("☁ Server", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        when (val meta = serverMeta) {
-            is ServerMetaState.Loading ->
-                Text("  Fetching…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            is ServerMetaState.NotFound ->
-                Text("  No save on server yet", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            is ServerMetaState.Found -> {
-                InfoRow("  Size", formatSize(meta.sizeBytes))
-                InfoRow("  Hash", meta.hash.take(16).let { "$it…" })
-                if (meta.timestamp > 0) InfoRow("  Saved at", formatTimestampFull(meta.timestamp))
-                meta.source?.let { InfoRow("  Source", it) }
-                // Match indicator
-                val matches = localHash != null && localHash == meta.hash
-                Text(
-                    text = if (matches) "  ✓ In sync" else "  ≠ Out of sync",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Bold,
-                    color = if (matches) GsColors.Ok else MaterialTheme.colorScheme.error
-                )
-            }
-            is ServerMetaState.Error ->
-                Text("  Error: ${meta.message}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-            is ServerMetaState.Idle -> {}
-        }
-
-        HorizontalDivider()
-
-        // ── Gamepad-navigable action buttons ────────────────────────
-        actions.forEachIndexed { index, action ->
-            if (action.dividerAbove) {
-                HorizontalDivider()
-            }
-            action.headerAbove?.let { header ->
-                Text(
-                    header,
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-            ActionButton(
-                label = action.label,
-                icon = action.icon,
-                enabled = action.enabled,
-                containerColor = action.containerColor,
-                contentColor = action.contentColor,
-                isBusy = action.isBusy,
-                isSelected = index == selectedActionIndex,
-                onClick = action.onClick,
-                modifier = Modifier.bringIntoViewRequester(bringRequesters[index]),
-            )
-        }
-
-        // ROM download result banner (not a gamepad-selectable item).
-        when (val s = romDownloadState) {
-            is MainViewModel.RomDownloadState.Success ->
-                Text(
-                    "  ✓ Saved to ${s.file.absolutePath}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = GsColors.Ok
-                )
-            is MainViewModel.RomDownloadState.Error ->
-                Text(
-                    "  ✗ ${s.message}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error
-                )
-            else -> {}
-        }
-        if (entry.isServerOnly && !canDownloadSave) {
+        // ── Hero: the game, its system and where it stands ─────────
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(
-                text = "Download the ROM first, then rescan to create a local save target for this server-only save.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
+                text = entry.displayName,
+                style = MaterialTheme.typography.headlineSmall,
+                color = GsColors.Text,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
             )
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                SystemChip(entry.systemName)
+                SyncStatusBadge(headerStatus)
+                if (entry.systemName == "RETRO") {
+                    Text("Unknown — set below:", style = MaterialTheme.typography.labelSmall, color = gsTextMuted())
+                }
+            }
+            if (entry.systemName == "RETRO") {
+                SystemPicker(onSystemSelected = { viewModel.setSaveSystem(entry, it) })
+            }
+        }
+
+        // ── Conflict: both copies changed; the user chooses ─────────
+        if (showConflictCard) {
+            val info = conflictInfos[titleId]
+            val serverFound = serverMeta as? ServerMetaState.Found
+            ConflictCard(
+                wide = wide,
+                local = ConflictSide(
+                    title = "This device",
+                    time = formatWhen(modifiedAt),
+                    size = formatSize(localSize),
+                    console = "This device",
+                    newer = newer < 0,
+                ),
+                server = ConflictSide(
+                    title = "Server",
+                    time = formatWhen(serverTime),
+                    size = formatSize(serverFound?.sizeBytes ?: info?.server_size ?: 0L),
+                    console = when {
+                        info?.same_console == true -> "This device (an earlier upload)"
+                        serverFound != null -> serverFound.source
+                        info?.server_console_id != null -> "Device ${info.server_console_id.takeLast(4)}"
+                        else -> "Unknown device"
+                    },
+                    newer = newer > 0,
+                ),
+            )
+        }
+
+        // ── Facts: this device, then the server ─────────────────────
+        FactsGroup(
+            title = "This device",
+            facts = listOf(
+                Fact("Modified", if (canUploadSave) formatWhen(modifiedAt) else "No save yet", newer = newer < 0),
+                Fact("Size", if (canUploadSave) formatSize(localSize) else "—"),
+                Fact("Last synced", formatWhen(syncState?.lastSyncedAt ?: 0L)),
+            ),
+        )
+        when (val meta = serverMeta) {
+            is ServerMetaState.Found -> FactsGroup(
+                title = "Server",
+                facts = listOf(
+                    Fact("Saved at", formatWhen(meta.timestamp), newer = newer > 0),
+                    Fact("From", meta.source),
+                    Fact(
+                        "Size",
+                        formatSize(meta.sizeBytes) + (meta.fileCount?.let { n ->
+                            " · " + if (n == 1) "1 file" else "$n files"
+                        } ?: ""),
+                    ),
+                ),
+            )
+            is ServerMetaState.NotFound -> FactsGroup("Server", note = "No save on the server yet")
+            is ServerMetaState.Error -> FactsGroup("Server", note = "Couldn't reach the server: ${meta.message}", noteIsError = true)
+            is ServerMetaState.Loading -> FactsGroup("Server", note = "Checking the server…")
+            is ServerMetaState.Idle -> if (settings.serverUrl.isBlank()) FactsGroup("Server", note = "No server set")
+        }
+
+        // ── Gamepad-navigable actions ───────────────────────────────
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            actions.forEachIndexed { index, action ->
+                action.headerAbove?.let { header ->
+                    Text(
+                        header,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = gsTextMuted(),
+                        modifier = Modifier.padding(start = 10.dp, top = 4.dp),
+                    )
+                }
+                DetailActionRow(
+                    action = action,
+                    isSelected = index == selectedActionIndex,
+                    onClick = {
+                        selectedActionIndex = index
+                        action.onClick()
+                    },
+                    modifier = Modifier.bringIntoViewRequester(bringRequesters[index]),
+                )
+            }
+
+            // ROM download result (not a gamepad-selectable item).
+            when (val s = romDownloadState) {
+                is MainViewModel.RomDownloadState.Success ->
+                    Text(
+                        "Saved to ${s.file.absolutePath}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = GsColors.OkText,
+                    )
+                is MainViewModel.RomDownloadState.Error ->
+                    Text(
+                        s.message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = GsColors.ErrText,
+                    )
+                else -> {}
+            }
+            if (entry.isServerOnly && !canDownloadSave) {
+                Text(
+                    text = "Download the ROM first, then rescan to create a local save target for this server-only save.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = gsTextMuted(),
+                )
+            }
+        }
+
+        // ── Technical details (collapsed) ───────────────────────────
+        Column(modifier = Modifier.bringIntoViewRequester(detailsRequester)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 48.dp)
+                    .focusProperties { canFocus = false }
+                    .clickable(role = Role.Button) { detailsExpanded = !detailsExpanded },
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    "Technical details",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = gsTextMuted(),
+                    modifier = Modifier.weight(1f),
+                )
+                if (LocalShowButtonHints.current) ButtonGlyph(GsButton.Y)
+                Icon(
+                    if (detailsExpanded) Icons.Filled.ExpandLess else Icons.Filled.ExpandMore,
+                    contentDescription = if (detailsExpanded) "Hide details" else "Show details",
+                    tint = gsTextMuted(),
+                )
+            }
+            val reduce = LocalReduceMotion.current
+            AnimatedVisibility(
+                visibleState = detailsTransition,
+                enter = gsExpandIn(reduce),
+                exit = gsShrinkOut(reduce),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    InfoRow("Title ID", entry.titleId)
+                    InfoRow("File", entry.saveDir?.name ?: entry.saveFile?.name ?: "—")
+                    entry.canonicalName?.let { InfoRow("Canonical name", it) }
+                    InfoRow("Local hash", localHash?.take(16)?.let { "$it…" } ?: "—")
+                    InfoRow(
+                        "Server hash",
+                        (serverMeta as? ServerMetaState.Found)?.hash?.takeIf { it != "—" }?.take(16)?.let { "$it…" } ?: "—",
+                    )
+                }
+            }
         }
     }
 }
 
+/** How a detail action is drawn: one filled primary, then lighter tiers. */
+private enum class ActionStyle { Primary, Outlined, Tonal, Tertiary }
+
 /**
- * One gamepad-selectable action on the detail screen.
- *
- * `dividerAbove` / `headerAbove` control the non-selectable separators
- * that precede the button (e.g. the "Available ROMs" header, or the
- * divider before "Normalize Name") so the visual grouping survives the
- * move from hand-rolled Composables to a list-driven render.
+ * One gamepad-selectable action on the detail screen.  [headerAbove] is a
+ * small non-selectable label before it ("Override", "Available ROMs").
  */
 private data class DetailAction(
     val label: String,
     val icon: ImageVector,
     val enabled: Boolean,
-    val containerColor: Color,
-    val contentColor: Color = GsColors.Ink,
+    val style: ActionStyle,
     val isBusy: Boolean,
-    val dividerAbove: Boolean = false,
+    val iconTint: Color? = null,
     val headerAbove: String? = null,
     val onClick: () -> Unit,
 )
+
+/**
+ * A detail action.  In Pad mode the selected one is drawn like a selected
+ * GsListRow: a 4dp Accent bar beside it, a PanelHi lift and a 1dp Accent
+ * border (Smart Sync, already Accent, gets a Text border instead).  The bar's
+ * gutter is always reserved, so selection never shifts anything.  Pressing
+ * scales it slightly, in both input modes.
+ */
+@Composable
+private fun DetailActionRow(
+    action: DetailAction,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val selected = isSelected && LocalInputMode.current == GsInputMode.Pad
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale = rememberPressScale(pressed, GS_BUTTON_PRESS_SCALE)
+    val lifted = selected || pressed
+    val high = LocalHighContrast.current
+    val selectedBorder = if (high) GsColors.Accent else GsColors.Accent.copy(alpha = 0.55f)
+    val shape = GsShapes.Card
+    val (background, content) = when (action.style) {
+        ActionStyle.Primary -> GsColors.Accent to GsColors.Ink
+        ActionStyle.Outlined -> (if (lifted) GsColors.PanelHi else GsColors.Panel) to GsColors.Text
+        ActionStyle.Tonal -> GsColors.PanelHi to GsColors.Text
+        ActionStyle.Tertiary -> (if (lifted) GsColors.PanelHi else Color.Transparent) to gsTextMuted()
+    }
+    val border: BorderStroke? = when {
+        action.style == ActionStyle.Primary -> if (selected) BorderStroke(2.dp, GsColors.Text) else null
+        selected -> BorderStroke(1.dp, selectedBorder)
+        action.style == ActionStyle.Outlined -> BorderStroke(1.dp, GsColors.Line)
+        else -> null
+    }
+    Row(modifier = modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+        Box(
+            Modifier
+                .width(4.dp)
+                .fillMaxHeight()
+                .clip(RoundedCornerShape(2.dp))
+                .background(if (selected) GsColors.Accent else Color.Transparent)
+        )
+        Spacer(Modifier.width(6.dp))
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .heightIn(min = if (action.style == ActionStyle.Primary) 52.dp else 48.dp)
+                .graphicsLayer {
+                    val s = scale.value
+                    scaleX = s
+                    scaleY = s
+                }
+                .clip(shape)
+                .background(background)
+                .then(if (border != null) Modifier.border(border, shape) else Modifier)
+                .focusProperties { canFocus = false }
+                .clickable(
+                    interactionSource = source,
+                    indication = rememberRipple(),
+                    enabled = action.enabled,
+                    role = Role.Button,
+                    onClick = onClick,
+                )
+                .alpha(if (action.enabled) 1f else 0.38f)
+                .padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (action.isBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(18.dp),
+                    strokeWidth = 2.dp,
+                    color = content,
+                )
+            } else {
+                Icon(action.icon, contentDescription = null, tint = action.iconTint ?: content, modifier = Modifier.size(18.dp))
+            }
+            Spacer(Modifier.width(10.dp))
+            Text(
+                action.label,
+                color = content,
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = if (action.style == ActionStyle.Primary) FontWeight.SemiBold else FontWeight.Medium,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** One labelled fact; [newer] adds the Info "Newer" pill beside the value. */
+private data class Fact(val label: String, val value: String, val newer: Boolean = false)
+
+/**
+ * A titled group of facts in a two-column grid (label above value), or a
+ * single [note] when there is nothing to list.  Groups are separated by
+ * spacing, not dividers.
+ */
+@Composable
+private fun FactsGroup(
+    title: String,
+    facts: List<Fact> = emptyList(),
+    note: String? = null,
+    noteIsError: Boolean = false,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleSmall, color = gsTextMuted())
+        if (note != null) {
+            Text(
+                note,
+                style = MaterialTheme.typography.bodyMedium,
+                color = if (noteIsError) GsColors.ErrText else gsTextMuted(),
+            )
+        }
+        facts.chunked(2).forEach { pair ->
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                pair.forEach { fact -> FactCell(fact, Modifier.weight(1f)) }
+                if (pair.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun FactCell(fact: Fact, modifier: Modifier = Modifier) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(fact.label, style = MaterialTheme.typography.labelMedium, color = gsTextMuted())
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                fact.value,
+                style = MaterialTheme.typography.bodyMedium,
+                color = GsColors.Text,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (fact.newer) GsPill(text = "Newer", color = GsColors.Info)
+        }
+    }
+}
+
+/** One side of a conflict, as its panel shows it. */
+private data class ConflictSide(
+    val title: String,
+    val time: String,
+    val size: String,
+    val console: String,
+    val newer: Boolean,
+)
+
+/**
+ * The conflict decision: a banner saying both copies changed, then the two
+ * copies side by side (landscape / wide) or stacked (portrait).  The choice
+ * itself is the Force Upload / Force Download actions below.
+ */
+@Composable
+private fun ConflictCard(wide: Boolean, local: ConflictSide, server: ConflictSide) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        GsBanner(
+            text = "Both copies changed since the last sync — choose which to keep",
+            color = GsColors.Err,
+        )
+        if (wide) {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.height(IntrinsicSize.Min)) {
+                ConflictPanel(local, Modifier.weight(1f).fillMaxHeight())
+                ConflictPanel(server, Modifier.weight(1f).fillMaxHeight())
+            }
+        } else {
+            ConflictPanel(local, Modifier.fillMaxWidth())
+            ConflictPanel(server, Modifier.fillMaxWidth())
+        }
+    }
+}
+
+@Composable
+private fun ConflictPanel(side: ConflictSide, modifier: Modifier = Modifier) {
+    Column(
+        modifier = modifier
+            .clip(GsShapes.Card)
+            .background(GsColors.Panel)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Text(side.title, style = MaterialTheme.typography.titleSmall, color = GsColors.Text)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(side.time, style = MaterialTheme.typography.bodyMedium, color = GsColors.Text, modifier = Modifier.weight(1f, fill = false))
+            if (side.newer) GsPill(text = "Newer", color = GsColors.Info)
+        }
+        Text(side.size, style = MaterialTheme.typography.bodySmall, color = gsTextMuted())
+        Text(side.console, style = MaterialTheme.typography.bodySmall, color = gsTextMuted())
+    }
+}
 
 private val knownSystems = listOf(
     "GBA", "SNES", "NES", "GB", "GBC", "N64",
@@ -738,71 +1076,20 @@ private fun SystemPicker(onSystemSelected: (String) -> Unit) {
 private fun InfoRow(label: String, value: String) {
     Row(
         modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Text(
             text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontWeight = FontWeight.Medium
+            style = MaterialTheme.typography.labelMedium,
+            color = gsTextMuted(),
         )
         Text(
             text = value,
-            style = MaterialTheme.typography.bodySmall
+            style = MaterialTheme.typography.bodySmall,
+            color = GsColors.Text,
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.End,
         )
-    }
-}
-
-@Composable
-private fun ActionButton(
-    label: String,
-    icon: ImageVector,
-    enabled: Boolean,
-    containerColor: Color,
-    isBusy: Boolean,
-    onClick: () -> Unit,
-    contentColor: Color = GsColors.Ink,
-    isSelected: Boolean = false,
-    modifier: Modifier = Modifier,
-) {
-    // Same press scale in Touch and Pad mode: a handheld's screen is touched too.
-    val source = remember { MutableInteractionSource() }
-    val pressed by source.collectIsPressedAsState()
-    val scale = rememberPressScale(pressed, GS_BUTTON_PRESS_SCALE)
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        interactionSource = source,
-        modifier = Modifier
-            .fillMaxWidth()
-            .then(modifier)
-            .graphicsLayer {
-                val s = scale.value
-                scaleX = s
-                scaleY = s
-            },
-        colors = ButtonDefaults.buttonColors(
-            containerColor = containerColor,
-            contentColor = contentColor
-        ),
-        // 3dp onSurface border when gamepad cursor is on this button, so
-        // it's visible against both the dark primary + purple ROM buttons
-        // and the neutral Normalize button.
-        border = if (isSelected) {
-            BorderStroke(3.dp, MaterialTheme.colorScheme.onSurface)
-        } else null,
-    ) {
-        if (isBusy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(18.dp),
-                strokeWidth = 2.dp,
-                color = contentColor
-            )
-        } else {
-            Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-        }
-        Spacer(Modifier.width(8.dp))
-        Text(label)
     }
 }
 
@@ -815,9 +1102,4 @@ private fun formatSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"
     bytes < 1024 * 1024 -> "${"%.1f".format(bytes / 1024.0)} KB"
     else -> "${"%.2f".format(bytes / (1024.0 * 1024))} MB"
-}
-
-private fun formatTimestampFull(millis: Long): String {
-    val sdf = SimpleDateFormat("MMM d yyyy, HH:mm:ss", Locale.getDefault())
-    return sdf.format(Date(millis))
 }

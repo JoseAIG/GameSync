@@ -149,6 +149,8 @@ fun SavesScreen(
     viewModel: MainViewModel,
     syncStateEntities: List<SyncStateEntity>,
     onNavigateToDetail: (String) -> Unit = {},
+    /** The detail screen opened for a conflict (its conflict card shows). */
+    onNavigateToConflict: (String) -> Unit = onNavigateToDetail,
     onNavigateToTab: (Int) -> Unit = {},
     /** The emulator save-folder screen (missing-folder banner and notice). */
     onNavigateToEmulators: () -> Unit = {},
@@ -282,7 +284,7 @@ fun SavesScreen(
                     // Conflict found: reject haptic on the same frame as the
                     // navigation that shows it.
                     haptics?.perform(GsHaptic.Reject)
-                    onNavigateToDetail(conflictTitle)
+                    onNavigateToConflict(conflictTitle)
                 } else {
                     val kind = noticeKindForSaveMessage(s.message)
                     notifier.show(

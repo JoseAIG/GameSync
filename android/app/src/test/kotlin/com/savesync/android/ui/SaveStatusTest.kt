@@ -144,4 +144,20 @@ class SaveStatusTest {
         val e = SaveEntry("T", "T", "3DS", saveFile = null, saveDir = dir)
         assertEquals(2_000_000L to 15L, e.statFingerprint())
     }
+
+    @Test
+    fun `server source prefers the server's label, then platform and console`() {
+        assertEquals("3ds_emu", serverSourceLabel("3ds_emu", "android", "abcdef1234"))
+        assertEquals("android · 1234", serverSourceLabel(null, "android", "abcdef1234"))
+        assertEquals("android", serverSourceLabel("", "android", null))
+        assertEquals("Unknown device", serverSourceLabel(null, null, null))
+    }
+
+    @Test
+    fun `newer side is display only and tolerates clock noise`() {
+        assertEquals(-1, newerSide(localMs = 10_000L, serverMs = 5_000L))
+        assertEquals(1, newerSide(localMs = 5_000L, serverMs = 10_000L))
+        assertEquals(0, newerSide(localMs = 5_000L, serverMs = 6_000L))
+        assertEquals(0, newerSide(localMs = 0L, serverMs = 6_000L))
+    }
 }

@@ -51,6 +51,7 @@ import com.savesync.android.sync.SaturnSaveFormatConverter
 import com.savesync.android.sync.SyncEngine
 import com.savesync.android.sync.SyncResult
 import com.savesync.android.sync.localSyncHash
+import com.savesync.android.sync.localSaveTimestamp
 import com.savesync.android.workers.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -159,8 +160,12 @@ sealed class ServerMetaState {
     data class Found(
         val hash: String,
         val sizeBytes: Long,
+        /** When the server's copy was saved (client time first), ms; 0 = unknown. */
         val timestamp: Long,
-        val source: String?
+        /** Which device it came from, as shown under "From". */
+        val source: String,
+        /** Files in the server's copy, when the server says. */
+        val fileCount: Int? = null,
     ) : ServerMetaState()
     object NotFound : ServerMetaState()
     data class Error(val message: String) : ServerMetaState()
@@ -2377,7 +2382,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     hash = meta.save_hash ?: "—",
                     sizeBytes = meta.save_size ?: 0L,
                     timestamp = parseServerDisplayTimestamp(meta),
-                    source = meta.platform
+                    source = serverSourceLabel(meta.last_sync_source, meta.platform, meta.console_id),
+                    fileCount = meta.file_count,
                 )
             } catch (e: retrofit2.HttpException) {
                 _serverMeta.value = if (e.code() == 404) ServerMetaState.NotFound
@@ -2388,21 +2394,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * "Saved at": the client's timestamp (when the save was made on the
+     * device that uploaded it), falling back to when the server stored it.
+     */
     private fun parseServerDisplayTimestamp(meta: com.savesync.android.api.SaveMeta): Long {
+        val raw = meta.client_timestamp ?: 0L
+        val client = when {
+            raw <= 0L -> 0L
+            raw in 946684800000L..4102444800000L -> raw
+            raw in 946684800L..4102444800L -> raw * 1000L
+            else -> 0L
+        }
+        if (client > 0L) return client
         meta.server_timestamp?.let { iso ->
             try {
                 return OffsetDateTime.parse(iso).toInstant().toEpochMilli()
             } catch (_: DateTimeParseException) {
             }
         }
+        return 0L
+    }
 
-        val raw = meta.client_timestamp ?: return 0L
-        return when {
-            raw <= 0L -> 0L
-            raw in 946684800000L..4102444800000L -> raw
-            raw in 946684800L..4102444800L -> raw * 1000L
-            else -> 0L
-        }
+    /** When [entry] last changed on this device (the timestamp sync sends); off the main thread. */
+    suspend fun detailModifiedAt(entry: SaveEntry): Long = withContext(Dispatchers.IO) {
+        val format = settingsStore.settingsFlow.first().saturnSyncFormat
+        runCatching { localSaveTimestamp(entry, format) }.getOrDefault(0L)
     }
 
     fun clearServerMeta() {

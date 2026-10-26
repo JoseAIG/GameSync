@@ -62,4 +62,11 @@ class NavMotionTest {
         assertEquals(NavMotion.FADE, navMotionFor(null, "saves", reduce = false))
         assertEquals(NavMotion.FADE, navMotionFor("saves", null, reduce = false))
     }
+
+    @Test
+    fun `the detail route with its conflict argument still pushes and pops`() {
+        val detail = "detail/{titleId}?reason={reason}"
+        assertEquals(NavMotion.PUSH, navMotionFor("saves", detail, reduce = false))
+        assertEquals(NavMotion.POP, navMotionFor(detail, "saves", reduce = false))
+    }
 }

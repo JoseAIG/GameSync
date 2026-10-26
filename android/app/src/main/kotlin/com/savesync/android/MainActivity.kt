@@ -57,6 +57,8 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.screens.DownloadsScreen
 import com.savesync.android.ui.screens.EmulatorsScreen
@@ -617,6 +619,9 @@ private fun MainApp() {
                         viewModel = viewModel,
                         syncStateEntities = syncStateEntities,
                         onNavigateToDetail = { titleId -> navController.navigate("detail/$titleId") },
+                        // A smart sync that found a conflict opens the
+                        // detail with its conflict card.
+                        onNavigateToConflict = { titleId -> navController.navigate("detail/$titleId?reason=conflict") },
                         onNavigateToTab = onNavigateToTab,
                         onNavigateToEmulators = { navController.navigate("emulators") },
                     )
@@ -652,7 +657,16 @@ private fun MainApp() {
                         onNavigateBack = { navController.popBackStack() }
                     )
                 }
-                composable("detail/{titleId}") { backStackEntry ->
+                composable(
+                    "detail/{titleId}?reason={reason}",
+                    arguments = listOf(
+                        navArgument("reason") {
+                            type = NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
+                    ),
+                ) { backStackEntry ->
                     val titleId = backStackEntry.arguments?.getString("titleId") ?: return@composable
                     SaveDetailScreen(
                         titleId = titleId,
@@ -660,6 +674,7 @@ private fun MainApp() {
                         syncStateEntities = syncStateEntities,
                         onNavigateBack = { navController.popBackStack() },
                         onNavigateToTab = onNavigateToTab,
+                        openedFromConflict = backStackEntry.arguments?.getString("reason") == "conflict",
                     )
                 }
             }

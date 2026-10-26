@@ -63,6 +63,29 @@ fun CenterMessage(title: String, detail: String = "") {
     }
 }
 
+/**
+ * A time as relative-plus-absolute text: "Today 21:14 · 26 Oct 2026",
+ * "Yesterday 08:02 · 25 Oct 2026", else "19 Oct 2026 · 21:14".  "Never"
+ * for 0 or less.  [now] and [zone] are parameters for tests.
+ */
+fun formatWhen(
+    ms: Long,
+    now: Long = System.currentTimeMillis(),
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    if (ms <= 0L) return "Never"
+    val at = java.time.Instant.ofEpochMilli(ms).atZone(zone)
+    val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+    val time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", locale).format(at)
+    val date = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", locale).format(at)
+    return when (at.toLocalDate()) {
+        today -> "Today $time · $date"
+        today.minusDays(1) -> "Yesterday $time · $date"
+        else -> "$date · $time"
+    }
+}
+
 /** Human-readable byte count.  "1.50 GB", "720 KB", "12 B". */
 fun formatBytes(bytes: Long): String {
     if (bytes <= 0) return ""

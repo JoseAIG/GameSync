@@ -49,7 +49,12 @@ data class SaveMeta(
     val save_size: Long?,
     val client_timestamp: Long?,
     val platform: String?,
-    val server_timestamp: String? = null
+    val server_timestamp: String? = null,
+    // Returned by the v055 server's GET /saves/{id}/meta; parsed only.
+    val console_id: String? = null,
+    val file_count: Int? = null,
+    val last_sync: String? = null,
+    val last_sync_source: String? = null
 )
 
 data class UploadResponse(

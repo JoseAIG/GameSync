@@ -160,3 +160,32 @@ fun resolveSelection(titleIds: List<String>, selectedTitleId: String?, lastIndex
     val same = selectedTitleId?.let { titleIds.indexOf(it) } ?: -1
     return if (same >= 0) same else lastIndex.coerceIn(0, titleIds.size - 1)
 }
+
+/**
+ * The detail screen's "From" for the server copy: the server's
+ * last_sync_source, else the platform plus the last four characters of the
+ * console id ("android · 3f9a"), else "Unknown device".
+ */
+fun serverSourceLabel(lastSyncSource: String?, platform: String?, consoleId: String?): String {
+    lastSyncSource?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    val tail = consoleId?.trim()?.takeIf { it.isNotEmpty() }?.takeLast(4)
+    val plat = platform?.trim()?.takeIf { it.isNotEmpty() }
+    return when {
+        plat != null && tail != null -> "$plat · $tail"
+        plat != null -> plat
+        tail != null -> "Device $tail"
+        else -> "Unknown device"
+    }
+}
+
+/**
+ * Which side's time is later, for the "Newer" pill: -1 this device, 1 the
+ * server, 0 neither (unknown, or within [toleranceMs]).  Display only: the
+ * sync decision stays hash-based.
+ */
+fun newerSide(localMs: Long, serverMs: Long, toleranceMs: Long = 2_000L): Int = when {
+    localMs <= 0L || serverMs <= 0L -> 0
+    localMs - serverMs > toleranceMs -> -1
+    serverMs - localMs > toleranceMs -> 1
+    else -> 0
+}

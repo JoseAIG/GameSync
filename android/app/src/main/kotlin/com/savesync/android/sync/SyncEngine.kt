@@ -382,13 +382,7 @@ class SyncEngine(
         }
     }
 
-    private fun localTimestamp(entry: SaveEntry): Long {
-        return when {
-            isSharedYabaSanshiroContainer(entry) && entry.saveFile?.exists() == true ->
-                entry.saveFile.lastModified()
-            else -> entry.getTimestamp()
-        }
-    }
+    private fun localTimestamp(entry: SaveEntry): Long = localSaveTimestamp(entry, saturnSyncFormat)
 
     private suspend fun writeDownloadedBytes(entry: SaveEntry, canonicalBytes: ByteArray): Boolean {
         val prev = syncStateForBackup(entry)
@@ -1125,6 +1119,19 @@ internal fun saturnCanonicalBytes(entry: SaveEntry, saturnSyncFormat: SaturnSync
     } else {
         SaturnSaveFormatConverter.toCanonical(saveFile.readBytes())
     }
+}
+
+/**
+ * When [entry] last changed, in ms: the `timestamp` sync sends.  The newest
+ * file of a PSP slot, of saveFile + extraFiles, or under a multi-file folder
+ * (for Azahar, the newest file under data/00000001/) — see
+ * [SaveEntry.getTimestamp] — except YabaSanshiro's shared container, whose
+ * own mtime is used.  Reads the disk.
+ */
+fun localSaveTimestamp(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): Long = when {
+    isSharedYabaSanshiroSave(entry, saturnSyncFormat) && entry.saveFile?.exists() == true ->
+        entry.saveFile.lastModified()
+    else -> entry.getTimestamp()
 }
 
 /**

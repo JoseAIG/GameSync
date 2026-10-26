@@ -440,9 +440,10 @@ fun SavesScreen(
                             }
                             true
                         }
-                        // A → smart sync the selected save
+                        // A → smart sync the selected save.  A held A's
+                        // repeats are ignored, so one press is one action.
                         Key.ButtonA -> {
-                            smartSyncSelected()
+                            if (event.nativeKeyEvent.repeatCount == 0) smartSyncSelected()
                             true
                         }
                         // Enter (keyboard) keeps opening the detail screen

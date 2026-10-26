@@ -452,9 +452,13 @@ fun RomCatalogScreen(
                             }
                             true
                         }
-                        // A / Enter → open the download-confirm dialog
+                        // A / Enter → open the download-confirm dialog.  A
+                        // held A's repeats are ignored, so it can't open the
+                        // dialog and confirm it in one press.
                         Key.ButtonA, Key.Enter -> {
-                            filtered.getOrNull(selectedIndex)?.let { confirmTarget = it }
+                            if (event.nativeKeyEvent.repeatCount == 0) {
+                                filtered.getOrNull(selectedIndex)?.let { confirmTarget = it }
+                            }
                             true
                         }
                         // X (Square) → RetroAchievements games only / all

@@ -439,6 +439,14 @@ data class GsDialogChoice(
  *
  * A Dialog is its own window, so its keys never reach MainActivity's
  * dispatchKeyEvent or the screen behind it — they are handled here.
+ *
+ * Input safety: the choice buttons never take D-pad focus (so a focus ring
+ * can't sit on "Cancel" while A runs "Delete"), key repeats of a held
+ * A/X/Y/START/Enter are ignored (a held A can't open and confirm in one
+ * press), and the D-pad is consumed so focus can't wander.  A body with its
+ * own cursor passes [onNavigate], which receives Up/Down as -1/+1; it draws
+ * its rows with `GsListRow(isSelected = …)` and brings the selected row into
+ * view itself.
  */
 @Composable
 fun GsDialog(
@@ -447,6 +455,7 @@ fun GsDialog(
     choices: List<GsDialogChoice>,
     message: String = "",
     startConfirms: Boolean = false,
+    onNavigate: ((dy: Int) -> Unit)? = null,
     body: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     val focusRequester = remember { FocusRequester() }
@@ -466,14 +475,22 @@ fun GsDialog(
                     if (event.type != KeyEventType.KeyDown) {
                         return@onPreviewKeyEvent false
                     }
+                    val repeat = event.nativeKeyEvent.repeatCount > 0
                     when (event.key) {
                         Key.ButtonA, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
-                            choiceFor(GsButton.A)?.onClick?.invoke(); true
+                            if (!repeat) choiceFor(GsButton.A)?.onClick?.invoke()
+                            true
                         }
-                        Key.ButtonX -> { choiceFor(GsButton.X)?.onClick?.invoke(); true }
-                        Key.ButtonY -> { choiceFor(GsButton.Y)?.onClick?.invoke(); true }
+                        Key.ButtonX -> {
+                            if (!repeat) choiceFor(GsButton.X)?.onClick?.invoke()
+                            true
+                        }
+                        Key.ButtonY -> {
+                            if (!repeat) choiceFor(GsButton.Y)?.onClick?.invoke()
+                            true
+                        }
                         Key.ButtonStart -> {
-                            if (startConfirms) choiceFor(GsButton.A)?.onClick?.invoke()
+                            if (!repeat && startConfirms) choiceFor(GsButton.A)?.onClick?.invoke()
                             true
                         }
                         Key.ButtonB, Key.Escape -> {
@@ -481,6 +498,10 @@ fun GsDialog(
                             if (b != null) b.onClick() else onDismiss()
                             true
                         }
+                        Key.DirectionUp -> { onNavigate?.invoke(-1); true }
+                        Key.DirectionDown -> { onNavigate?.invoke(1); true }
+                        // Nothing in a dialog moves sideways; keep focus put.
+                        Key.DirectionLeft, Key.DirectionRight -> true
                         else -> false
                     }
                 },
@@ -598,8 +619,11 @@ private fun DialogChoice(
 ) {
     Row(
         modifier = Modifier
-            .heightIn(min = 40.dp)
-            .clip(RoundedCornerShape(20.dp))
+            // Pressed by its button or tapped, never focused by the D-pad:
+            // canFocus only affects key focus, not touch or TalkBack.
+            .focusProperties { canFocus = false }
+            .heightIn(min = 48.dp)
+            .clip(GsShapes.Choice)
             .background(background)
             .clickable(onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 8.dp),

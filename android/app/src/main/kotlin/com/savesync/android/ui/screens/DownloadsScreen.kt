@@ -65,6 +65,15 @@ import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
 import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.theme.gsDim
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.theme.textVariantOf
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.text.style.TextOverflow
 import kotlinx.coroutines.launch
 
 /**
@@ -225,8 +234,12 @@ fun DownloadsScreen(
                     when (event.key) {
                         Key.DirectionDown -> { moveTo(selectedIndex + 1); true }
                         Key.DirectionUp -> { moveTo(selectedIndex - 1); true }
+                        // A held A's repeats are ignored: one press, one
+                        // pause / resume, never a pause-then-resume flicker.
                         Key.ButtonA, Key.Enter -> {
-                            downloads.getOrNull(selectedIndex)?.let { primaryAction(it) }
+                            if (event.nativeKeyEvent.repeatCount == 0) {
+                                downloads.getOrNull(selectedIndex)?.let { primaryAction(it) }
+                            }
                             true
                         }
                         // B: pause the running download (the selected one

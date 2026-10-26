@@ -327,8 +327,12 @@ fun InstalledGamesScreen(
                             }
                             true
                         }
+                        // A held A's repeats are ignored, so it can't open
+                        // the action sheet and confirm it in one press.
                         Key.ButtonA, Key.Enter -> {
-                            filtered.getOrNull(selectedIndex)?.let { confirmTarget = it }
+                            if (event.nativeKeyEvent.repeatCount == 0) {
+                                filtered.getOrNull(selectedIndex)?.let { confirmTarget = it }
+                            }
                             true
                         }
                         Key.ButtonY -> {

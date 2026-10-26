@@ -120,15 +120,16 @@ fun InstalledGamesScreen(
     val notifier = LocalGsNotifier.current
     val scope = rememberCoroutineScope()
 
-    var query by remember { mutableStateOf("") }
-    var systemFilter by remember { mutableStateOf<String?>(null) }
+    // Saveable, so rotation keeps the filter, the search and the cursor.
+    var query by rememberSaveable { mutableStateOf("") }
+    var systemFilter by rememberSaveable { mutableStateOf<String?>(null) }
     var confirmTarget by remember { mutableStateOf<InstalledRom?>(null) }
     // Second step of Delete: "really delete?" (can't be undone).
     var deleteTarget by remember { mutableStateOf<InstalledRom?>(null) }
-    var searchVisible by remember { mutableStateOf(false) }
+    var searchVisible by rememberSaveable { mutableStateOf(false) }
 
     // ── Gamepad navigation state ────────────────────────────────────────
-    var selectedIndex by remember { mutableIntStateOf(0) }
+    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     // Hold-to-accelerate state for d-pad left/right (page → alphabet jump).
     val holdNav = rememberHoldNavState()

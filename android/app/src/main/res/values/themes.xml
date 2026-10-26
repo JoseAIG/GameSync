@@ -1,5 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Base application theme - using AppCompat DayNight so Compose can control everything -->
-    <style name="Theme.GameSync" parent="Theme.AppCompat.DayNight.NoActionBar" />
+    <!--
+      Always dark, like every console client.  The window background, status
+      bar and navigation bar start out in GsColors.Bg (#0F1720), so launch
+      and rotation never flash white before Compose draws its first frame.
+    -->
+    <style name="Theme.GameSync" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/gs_bg</item>
+        <item name="android:statusBarColor">@color/gs_bg</item>
+        <item name="android:navigationBarColor">@color/gs_bg</item>
+    </style>
 </resources>

@@ -143,13 +143,14 @@ fun SavesScreen(
     // can open that save's detail screen (where Force Upload / Download live).
     var pendingSyncTitle by remember { mutableStateOf<String?>(null) }
 
-    var searchVisible by remember { mutableStateOf(false) }
+    // Saveable, so rotation keeps the search open and the cursor in place.
+    var searchVisible by rememberSaveable { mutableStateOf(false) }
     var showSyncConfirmDialog by remember { mutableStateOf(false) }
 
     // ── Manual D-pad selection state ─────────────────────────────────────
     // We track the selected index ourselves and scroll the list manually so
     // the gamepad cursor doesn't leak to the toolbar actions above it.
-    var selectedIndex by remember { mutableIntStateOf(0) }
+    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
     // Hold-to-accelerate state for d-pad left/right: page scroll → faster

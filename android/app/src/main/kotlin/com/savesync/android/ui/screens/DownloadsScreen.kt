@@ -138,7 +138,8 @@ fun DownloadsScreen(
     val finishedCount = downloads.count { it.isTerminal }
 
     // ── Gamepad cursor ──────────────────────────────────────────────────
-    var selectedIndex by remember { mutableIntStateOf(0) }
+    // Saveable, so rotation keeps the cursor on the same row.
+    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
     val holdNav = rememberHoldNavState()

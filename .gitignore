@@ -180,3 +180,6 @@ server/restic-backup.log
 ps2/_mmce_src/
 ps2/source/irx_mods.c
 ps2/include/irx_mods.h
+
+# inciarte fork: versionar el lockfile del servidor para despliegues reproducibles
+!server/uv.lock

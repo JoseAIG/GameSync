@@ -1,0 +1,57 @@
+# GameSync server: despliegue con Docker Compose.
+#
+#   cd deploy && cp .env.example .env   # y poner una SYNC_API_KEY fuerte
+#   docker compose up -d --build
+#
+# Opcional: si un túnel o proxy inverso corre en otro contenedor, une el
+# servicio a su red Docker (GAMESYNC_TUNNEL_NETWORK). El proxy alcanza el
+# servidor como http://gamesync:8000.
+name: gamesync
+
+services:
+  gamesync:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: gamesync:fork
+    container_name: gamesync
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # Fijos del despliegue (no dependen del .env).
+      SYNC_SAVE_DIR: /data/saves
+      SYNC_TMP_DIR: /tmp
+      SYNC_LAN_ADMIN: "false"          # nunca expuesto a Internet: inyecta la key en la web
+      SYNC_TRUST_PROXY_AUTH: "false"   # solo si un proxy con Basic Auth pone X-Remote-User
+      SYNC_RA_ENABLED: "false"         # sin catálogo de ROMs, no hace falta RetroAchievements
+      SYNC_DISABLE_DOCS: "true"        # sin /docs ni /openapi.json públicos
+      SYNC_ALLOW_QUERY_API_KEY: "false" # la key solo por header X-API-Key
+      SYNC_UPDATE_PROXY_ENABLED: "false" # sin proxy de descargas (y sin SSRF)
+    volumes:
+      - ${GAMESYNC_DATA_DIR:-./data}:/data
+    # Blindaje: sin root, raíz de solo lectura, sin capacidades extra.
+    user: "${GAMESYNC_UID:-10001}:${GAMESYNC_GID:-10001}"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 768m
+    pids_limit: 256
+    ports:
+      # Acceso por LAN (los clientes que no hablan TLS moderno, como la 3DS,
+      # sincronizan por aquí). Comentar si no se usa.
+      - "${GAMESYNC_LAN_PORT:-8000}:8000"
+    networks:
+      - tunnel
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  tunnel:
+    # Red Docker del túnel/proxy. Debe existir de antemano
+    # (docker network create <nombre>).
+    name: ${GAMESYNC_TUNNEL_NETWORK:-gamesync_proxy}
+    external: true

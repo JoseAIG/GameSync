@@ -492,7 +492,7 @@ static bool is_cart(const TitleInfo *t) {
 static const char *system_tag(const TitleInfo *t, u32 *hex) {
     if (is_cart(t)) {
         *hex = HEX_CART;
-        return "CART";
+        return "Cart";
     }
     if (t->is_nds) {
         *hex = HEX_NDS;
@@ -503,7 +503,7 @@ static const char *system_tag(const TitleInfo *t, u32 *hex) {
 }
 
 static void kv(float x, float y, float label_w, float w, const char *label, const char *value, u32 color) {
-    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, label);
+    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, label);
     gui_text_fit(x + label_w, y, GUI_S_SMALL, gui_rgb(color), GUI_LEFT, w - label_w, value);
 }
 
@@ -549,7 +549,7 @@ void ui_draw_saves_top(const SavesView *v) {
     const char *tag = system_tag(t, &hex);
     float pxx = x;
     pxx += gui_pill(pxx, y, 15, GUI_S_TINY, gui_mix(HEX_PANEL, hex, 0.3f), gui_rgb(hex), tag) + 5;
-    if (t->marked) pxx += gui_pill(pxx, y, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "MARKED") + 5;
+    if (t->marked) pxx += gui_pill(pxx, y, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Marked") + 5;
     const char *state = state_label(t, &hex);
     if (state) {
         float sw = gui_pill_w(15, GUI_S_TINY, state) + 10;
@@ -605,7 +605,7 @@ void ui_draw_saves_top(const SavesView *v) {
         kv(rx, y + 2 * lh, 50, colw, "Synced", d->server_exists ? date : "-", HEX_DIM);
         kv(rx, y + 3 * lh, 50, colw, "Last ok", d->has_last_synced ? d->last_synced_hash : "never", HEX_DIM);
     } else {
-        gui_text(rx, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, "Save");
+        gui_text(rx, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Save");
         float bx = rx;
         bx += gui_text(bx, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Press ") ;
         bx += gui_button(bx, y + lh + lh / 2 - 0.5f, "A") + 3;
@@ -766,7 +766,7 @@ static void compare_top(void *ctx) {
     gui_header(c->section);
 
     gui_text_fit(12, 32, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 24, c->title->name);
-    gui_textf(12, 32 + gui_line_h(GUI_S_TITLE), GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT,
+    gui_textf(12, 32 + gui_line_h(GUI_S_TITLE), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
               "%s%s", c->title->title_id_hex,
               c->title->media_type == MEDIATYPE_GAME_CARD ? "  \xC2\xB7  game card" : "");
 
@@ -788,7 +788,7 @@ static void compare_top(void *ctx) {
 
     // Last synced hash
     y += 82;
-    gui_text(10, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, "Last synced");
+    gui_text(10, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Last synced");
     gui_text_fit(84, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 94,
                  d->has_last_synced ? d->last_synced_hash : "never synced from this console");
 
@@ -912,7 +912,7 @@ static void history_row(void *ctx, int index, float x, float y, float w, float h
     format_size(hv->size, size, sizeof(size));
     u32 text = gui_mix(HEX_TEXT, HEX_INK, hl), dim = gui_mix(HEX_DIM, HEX_INK, hl);
     gui_text_mid(x + 10, y, h, GUI_S_BODY, text, GUI_LEFT, 0, date);
-    if (index == 0) gui_text_mid(x + 134, y, h, GUI_S_TINY, gui_mix(HEX_ACCENT2, HEX_INK, hl), GUI_LEFT, 0, "NEWEST");
+    if (index == 0) gui_text_mid(x + 134, y, h, GUI_S_TINY, gui_mix(HEX_ACCENT2, HEX_INK, hl), GUI_LEFT, 0, "Newest");
     gui_text_mid(x + w - 70, y, h, GUI_S_SMALL, dim, GUI_RIGHT, 0, size);
     char files[16];
     snprintf(files, sizeof(files), "%d file%s", hv->file_count, hv->file_count == 1 ? "" : "s");
@@ -1231,7 +1231,7 @@ static void edit_top(void *ctx) {
     if (e->cursor < e->len)
         gui_text_fit(x + cw + 3, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT,
                      bx + bw - (x + cw + 3) - 6, e->text + e->cursor + 1);
-    gui_text(20, 140, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT,
+    gui_text(20, 140, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
              "The system keyboard is unavailable: edit with the D-pad.");
     gui_footer(NULL, 0);
 }

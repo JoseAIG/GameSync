@@ -600,7 +600,7 @@ static const char *plan_label(const CatPlan *plan) {
 }
 
 static void kv(float x, float y, float label_w, float w, const char *label, const char *value, u32 color) {
-    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, label);
+    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, label);
     gui_text_fit(x + label_w, y, GUI_S_SMALL, gui_rgb(color), GUI_LEFT, w - label_w, value);
 }
 
@@ -659,13 +659,13 @@ static void draw_top(void *ctx) {
                         : "Loading...";
         gui_text(GUI_TOP_W / 2.0f, 92, GUI_S_TITLE, gui_rgb(HEX_DIM), GUI_CENTER, msg);
         if (!cat->ready && cat->error[0])
-            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_CENTER,
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
                      "A: try again   (check WiFi and the server URL in Settings)");
         else if (cat->ready && cat->total == 0 && cat->search[0])
-            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_CENTER,
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
                      "Y: new search   B: clear the search");
         else if (cat->ready && cat->total == 0 && cat->ra_only)
-            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_CENTER, "X: show all games");
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER, "X: show all games");
     } else {
         float x = px + 12, w = pw - 24;
         int lines = gui_text_wrap(x, py + 8, GUI_S_TITLE, gui_rgb(HEX_TEXT), w, 2, entry_name(e));
@@ -690,10 +690,10 @@ static void draw_top(void *ctx) {
         }
         bool inst = is_installed(cat, e);
         if (inst) {
-            float iw = gui_pill_w(15, GUI_S_TINY, "INSTALLED") + 12;
+            float iw = gui_pill_w(15, GUI_S_TINY, "Installed") + 12;
             gui_rrect(pxx, y, iw, 15, 7.5f, gui_mix(HEX_PANEL, HEX_OK, 0.25f));
             gui_icon_check(pxx + 8, y + 7.5f, 7, gui_rgb(HEX_OK));
-            gui_text_mid(pxx + 15, y, 15, GUI_S_TINY, gui_rgb(HEX_OK), GUI_LEFT, 0, "INSTALLED");
+            gui_text_mid(pxx + 15, y, 15, GUI_S_TINY, gui_rgb(HEX_OK), GUI_LEFT, 0, "Installed");
         }
         y += 22;
 
@@ -785,9 +785,9 @@ static void draw_bottom(void *ctx) {
     // SELECT cycles the systems: the glyph sits before the segmented control
     if (cat->nsystems > 1) x += gui_button(x, GUI_HEADER_H / 2.0f, "SELECT") + 4;
     if (cat->nsystems > 0) x = gui_tabs(x, 4, 18, labels, cat->nsystems, cat->sys) + 6;
-    if (cat->ra_only) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_RA), gui_rgb(HEX_INK), "RA ONLY") + 4;
-    if (cat->search[0]) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "SEARCH") + 4;
-    if (cat->offline) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_WARN), gui_rgb(HEX_INK), "OFFLINE") + 4;
+    if (cat->ra_only) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_RA), gui_rgb(HEX_INK), "RA only") + 4;
+    if (cat->search[0]) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Search") + 4;
+    if (cat->offline) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_WARN), gui_rgb(HEX_INK), "Offline") + 4;
     if (cat->loading) {
         gui_spinner(GUI_BOT_W - 14, GUI_HEADER_H / 2.0f, 6, gui_rgb(HEX_ACCENT));
     } else if (has_rows) {

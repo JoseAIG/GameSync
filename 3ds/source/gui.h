@@ -23,11 +23,13 @@
 #define GUI_FOOTER_H 22
 #define GUI_FOOTER_Y (GUI_H - GUI_FOOTER_H)
 
-// Text scales
-#define GUI_S_TITLE 0.62f
-#define GUI_S_BODY 0.50f
-#define GUI_S_SMALL 0.43f
-#define GUI_S_TINY 0.37f
+// Text scales. The system font has one weight, so colour carries the rest
+// of the hierarchy: titles and values in HEX_TEXT, labels, captions and
+// hints in HEX_DIM.
+#define GUI_S_TITLE 0.62f  // game name, screen title
+#define GUI_S_BODY 0.50f   // values, rows, dialog body
+#define GUI_S_SMALL 0.43f  // labels, captions, hints
+#define GUI_S_TINY 0.40f   // pills and tags only
 
 // Palette (0xRRGGBB)
 #define HEX_BG 0x0F1720
@@ -37,7 +39,7 @@
 #define HEX_LINE 0x33465C
 #define HEX_TEXT 0xE6EDF3
 #define HEX_DIM 0x8DA2B5
-#define HEX_MUTED 0x5E7286
+#define HEX_MUTED 0x6E8396   // disabled / placeholder text only
 #define HEX_ACCENT 0x2EC4B6
 #define HEX_ACCENT2 0x3DDBD9
 #define HEX_OK 0x3FB950

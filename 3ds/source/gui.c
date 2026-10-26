@@ -44,7 +44,7 @@ void gui_init(void) {
     C2D_Prepare();
     target_top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     target_bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
-    text_buf = C2D_TextBufNew(4096);
+    text_buf = C2D_TextBufNew(6144);
     fontEnsureMapped();
     tick0 = frame_tick = svcGetSystemTick();
 

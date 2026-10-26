@@ -395,10 +395,22 @@ SyncResult sync_download_title(const AppConfig *config, const TitleInfo *title,
     return download_title(config, title, progress);
 }
 
+// titles[i] failed with `r`: count it, and record how and why (the text
+// for the save list, when the caller asked for it)
+static void note_title_failed(SyncSummary *s, int i, SyncResult r, bool upload, const char *why) {
+    s->failed++;
+    if (i < 0 || i >= MAX_TITLES) return;
+    s->title_state[i] = TSTATE_FAILED;
+    s->title_result[i] = (u8)r;
+    s->title_upload[i] = upload;
+    if (s->title_error) snprintf(s->title_error[i], TITLE_ERROR_LEN, "%s", why);
+}
+
 bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
               SyncProgressCb progress, SyncSummary *summary) {
     // Initialize summary
     SyncSummary local_summary = {0};
+    local_summary.title_error = summary ? summary->title_error : NULL;
 
     if (progress) progress("Preparing sync metadata...");
 
@@ -486,8 +498,10 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                     fc == ARCHIVE_ERR_TOO_MANY_FILES ? "too many files" : "read error");
                 if (progress) progress(msg);
                 hash_cache[i][0] = '\0';
-                local_summary.failed++;
-                if (i < MAX_TITLES) local_summary.title_state[i] = TSTATE_FAILED;
+                note_title_failed(&local_summary, i,
+                                  fc == ARCHIVE_ERR_TOO_MANY_FILES ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_ARCHIVE,
+                                  true, fc == ARCHIVE_ERR_TOO_MANY_FILES
+                                  ? "Can't read the save: too many files" : "Can't read the save");
                 continue;
             }
             if (fc < 0) fc = 0;
@@ -626,13 +640,13 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                     i + 1, upload_count, upload_ids[i]);
                 if (progress) progress(msg);
 
-                bool ok = upload_title_with_hash(config, &titles[j], NULL, hash_cache[j]) == SYNC_OK;
-                if (ok)
+                SyncResult r = upload_title_with_hash(config, &titles[j], NULL, hash_cache[j]);
+                if (r == SYNC_OK) {
                     local_summary.uploaded++;
-                else
-                    local_summary.failed++;
-                if (j < MAX_TITLES)
-                    local_summary.title_state[j] = ok ? TSTATE_UPLOADED : TSTATE_FAILED;
+                    if (j < MAX_TITLES) local_summary.title_state[j] = TSTATE_UPLOADED;
+                } else {
+                    note_title_failed(&local_summary, j, r, true, sync_result_str(r));
+                }
                 break;
             }
         }
@@ -650,13 +664,13 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                     ++dl_done, total_dl, download_ids[i]);
                 if (progress) progress(msg);
 
-                bool ok = download_title(config, &titles[j], NULL) == SYNC_OK;
-                if (ok)
+                SyncResult r = download_title(config, &titles[j], NULL);
+                if (r == SYNC_OK) {
                     local_summary.downloaded++;
-                else
-                    local_summary.failed++;
-                if (j < MAX_TITLES)
-                    local_summary.title_state[j] = ok ? TSTATE_DOWNLOADED : TSTATE_FAILED;
+                    if (j < MAX_TITLES) local_summary.title_state[j] = TSTATE_DOWNLOADED;
+                } else {
+                    note_title_failed(&local_summary, j, r, false, sync_result_str(r));
+                }
                 break;
             }
         }
@@ -675,16 +689,14 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                     ++dl_done, total_dl, server_only_ids[i]);
                 if (progress) progress(msg);
 
-                bool ok = download_title(config, &titles[j], NULL) == SYNC_OK;
-                if (ok) {
+                SyncResult r = download_title(config, &titles[j], NULL);
+                local_summary.skipped--; // Was counted as skipped, now downloaded or failed
+                if (r == SYNC_OK) {
                     local_summary.downloaded++;
-                    local_summary.skipped--; // Was counted as skipped, now downloaded
+                    if (j < MAX_TITLES) local_summary.title_state[j] = TSTATE_DOWNLOADED;
                 } else {
-                    local_summary.failed++;
-                    local_summary.skipped--;
+                    note_title_failed(&local_summary, j, r, false, sync_result_str(r));
                 }
-                if (j < MAX_TITLES)
-                    local_summary.title_state[j] = ok ? TSTATE_DOWNLOADED : TSTATE_FAILED;
                 break;
             }
         }
@@ -917,67 +929,9 @@ int sync_get_history(const AppConfig *config, const char *title_id_hex,
         return -1;
     }
     resp_str[resp_size] = '\0';
-    char *json = (char *)resp_str;
-
-    // Find versions array
-    const char *arr = json_find_key(json, "versions");
-    if (!arr || *arr != '[') {
-        free(resp_str);
-        return 0;
-    }
-    arr++; // skip '['
-
-    int count = 0;
-    while (*arr && *arr != ']' && count < max_versions) {
-        // Find next object
-        const char *obj = strchr(arr, '{');
-        if (!obj) break;
-        obj++;
-        const char *obj_end = strchr(obj, '}');
-        if (!obj_end) break;
-
-        // Extract timestamp and size from this object
-        char timestamp[32] = "";
-        int size = 0, file_count = 0;
-
-        // Quick parse: find "timestamp":"value"
-        const char *ts_start = strstr(obj, "\"timestamp\":\"");
-        if (ts_start && ts_start < obj_end) {
-            ts_start += 12; // skip "timestamp":"
-            const char *ts_end = strchr(ts_start, '"');
-            if (ts_end && ts_end < obj_end) {
-                int len = (int)(ts_end - ts_start);
-                if (len < (int)sizeof(timestamp)) {
-                    memcpy(timestamp, ts_start, len);
-                    timestamp[len] = '\0';
-                }
-            }
-        }
-
-        // Find "size":value
-        const char *sz_start = strstr(obj, "\"size\":");
-        if (sz_start && sz_start < obj_end) {
-            sz_start += 7;
-            size = atoi(sz_start);
-        }
-
-        // Find "file_count":value
-        const char *fc_start = strstr(obj, "\"file_count\":");
-        if (fc_start && fc_start < obj_end) {
-            fc_start += 12;
-            file_count = atoi(fc_start);
-        }
-
-        if (timestamp[0]) {
-            strncpy(versions[count].timestamp, timestamp, sizeof(versions[count].timestamp) - 1);
-            versions[count].timestamp[sizeof(versions[count].timestamp) - 1] = '\0';
-            versions[count].size = (u32)size;
-            versions[count].file_count = file_count;
-            count++;
-        }
-
-        arr = obj_end + 1;
-    }
+    // The server lists each version's "timestamp" as Unix seconds (a JSON
+    // number), the key GET /saves/{id}/history/{timestamp} takes back
+    int count = history_parse_versions((const char *)resp_str, versions, max_versions);
 
     free(resp_str);
     return count;

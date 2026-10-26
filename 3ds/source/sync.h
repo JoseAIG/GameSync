@@ -42,6 +42,14 @@ typedef struct {
     char conflict_titles[MAX_CONFLICT_DISPLAY][17];
     // TitleSyncState for each entry of the titles[] passed to sync_all
     u8 title_state[MAX_TITLES];
+    // For each TSTATE_FAILED entry: its SyncResult, and whether it failed
+    // uploading (or reading the save to upload) rather than downloading.
+    // The UI needs both to say truthfully whether the save was changed.
+    u8 title_result[MAX_TITLES];
+    bool title_upload[MAX_TITLES];
+    // Optional, set by the caller before sync_all (NULL = not wanted):
+    // MAX_TITLES strings that get why each failed entry of titles[] failed
+    char (*title_error)[TITLE_ERROR_LEN];
 } SyncSummary;
 
 // Callback for progress updates during sync
@@ -102,14 +110,8 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
 // Returns the suggested action (upload/download/up_to_date/conflict).
 SyncAction sync_decide(const SaveDetails *details);
 
-// History version info
-#define MAX_HISTORY_VERSIONS 20
-
-typedef struct {
-    char timestamp[32];  // ISO 8601 timestamp
-    u32 size;
-    int file_count;
-} HistoryVersion;
+// History version info: HistoryVersion and MAX_HISTORY_VERSIONS
+#include "history_parse.h"
 
 // Get list of history versions for a title.
 // Returns number of versions found, or -1 on error.

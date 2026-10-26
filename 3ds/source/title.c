@@ -223,3 +223,13 @@ int titles_fetch_names(const AppConfig *config, TitleInfo *titles, int count) {
     free(resp_str);
     return updated;
 }
+
+// The name lookup above with nothing to look up: the cheapest request that
+// needs the API key. Returns the HTTP status (200 accepted, 401 rejected),
+// 0 if the server didn't answer.
+u32 titles_probe_key(const AppConfig *config) {
+    u32 resp_size = 0, status = 0;
+    u8 *resp = network_post_json(config, "/titles/names", "{\"codes\":[]}", &resp_size, &status);
+    if (resp) free(resp);
+    return status;   // stays 0 when no status line arrived
+}

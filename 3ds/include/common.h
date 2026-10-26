@@ -13,6 +13,7 @@
 #define MAX_PATH_LEN      256
 #define MAX_URL_LEN       256
 #define MAX_API_KEY_LEN   128
+#define TITLE_ERROR_LEN   48   // TitleInfo.last_error
 
 // Config file location on SD card
 #define CONFIG_PATH "sdmc:/3ds/3dssync/config.txt"
@@ -30,6 +31,9 @@ typedef struct {
     bool is_nds;           // NDS game (via nds-bootstrap on SD) vs 3DS title
     bool marked;           // User-selected for batch operations
     u8 sync_state;         // TitleSyncState: what this session last learned
+    char last_error[TITLE_ERROR_LEN]; // why the last transfer failed (TSTATE_FAILED), "" otherwise
+    u64 state_ms;          // gui_clock_ms() when sync_state was last set (0 = never): the row's ring
+    u64 mark_ms;           // gui_clock_ms() of the last mark toggle (0 = never): the check's pop-in
     char sav_path[MAX_PATH_LEN]; // NDS only: path to .sav file on SD card
 } TitleInfo;
 
@@ -63,6 +67,7 @@ typedef struct {
     int local_backups;      // Copies of the previous save kept before overwriting (0 = off)
     bool tls_verify;        // Verify HTTPS server certificates (default true)
     bool update_check;      // Allow checking for / installing app updates (default true)
+    bool reduce_motion;     // Fades and snaps instead of slides and springs (default false)
 } AppConfig;
 
 #endif // COMMON_H

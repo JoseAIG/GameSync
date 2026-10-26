@@ -28,9 +28,9 @@
 #include <sys/stat.h>
 
 #define CAT_WINDOW 200       // entries held around the visible rows
-#define CAT_ROWS 9           // list rows on the bottom screen
-#define CAT_ROW_H 21
-#define CAT_LIST_Y GUI_HEADER_H
+#define CAT_ROWS GUI_LIST_ROWS   // list rows on the bottom screen
+#define CAT_ROW_H GUI_ROW_H
+#define CAT_LIST_Y GUI_LIST_Y
 #define CAT_SCAN_DEPTH 4     // ROM folder levels searched for installed games
 #define CAT_FETCH_PAGE 500   // rows per request when filling the cache
 #define CAT_FETCH_MAX_PAGES 200
@@ -47,6 +47,10 @@
 #define RESCAN_TIMEOUT_S 300       // GET /roms/scan answers when the scan is done
 
 static const char *const cat_systems[] = { "3DS", "NDS", "DSI", NULL };
+static const UiListGeom cat_geom = { 0, CAT_LIST_Y, GUI_BOT_W, CAT_ROWS, CAT_ROW_H, false, true };
+
+// Action bar items, in this order
+enum { CAT_BAR_A = 0, CAT_BAR_Y, CAT_BAR_X, CAT_BAR_COUNT };
 static const char *const nds_exts[] = { ".nds", ".dsi", NULL };
 static const char *const cart_exts[] = { ".3ds", ".cci", NULL };
 
@@ -77,8 +81,17 @@ typedef struct {
 
     int selected, scroll;
     int direction;           // of the last move: where to load ahead
+    // The last fetch ensure_window() made (viewport top, offset, total)
+    // and the window it left: while nothing of that changed, the request
+    // isn't repeated every settled frame when its window still fails the
+    // test (a server returning fewer rows than its total claims)
+    int ew_first, ew_off, ew_total, ew_win_off, ew_win_count;
     bool loading;            // a page request is in flight (drawn as a spinner)
     UiListAnim anim;
+    UiBar bar;
+    u32 held;                // keys held while the tab's own loop draws (else 0)
+    GuiTabsAnim tabs;        // the systems strip
+    UiTap seg_tap;
 
     bool installed_loaded;
     char rom_dir[MAX_PATH_LEN];  // where files of this system go
@@ -153,12 +166,12 @@ static void draw_frame(Catalog *cat);
 // ---------------------------------------------------------------------------
 
 // GET with one retry when the server didn't answer at all
-static u8 *cat_get(const Catalog *cat, const char *path, u32 *size, u32 *status) {
+static u8 *cat_get_cfg(const AppConfig *config, const char *path, u32 *size, u32 *status) {
     *status = 0;
-    u8 *body = network_get(cat->config, path, size, status);
+    u8 *body = network_get(config, path, size, status);
     if (!body && *status == 0) {
         svcSleepThread(1000000000LL);
-        body = network_get(cat->config, path, size, status);
+        body = network_get(config, path, size, status);
     }
     // No real HTTP status (seen as -1 when nothing answered): no answer
     if (*status < 100 || *status > 599) {
@@ -167,6 +180,10 @@ static u8 *cat_get(const Catalog *cat, const char *path, u32 *size, u32 *status)
         *status = 0;
     }
     return body;
+}
+
+static u8 *cat_get(const Catalog *cat, const char *path, u32 *size, u32 *status) {
+    return cat_get_cfg(cat->config, path, size, status);
 }
 
 static void describe_failure(u32 status, char *out, size_t size) {
@@ -285,8 +302,9 @@ static void unload_lists(Catalog *cat) {
     cat->nsystems = cat->sys = 0;
     cat->total = -1;
     cat->win_off = cat->win_count = 0;
+    cat->ew_first = cat->ew_off = cat->ew_total = -1;
     cat->selected = cat->scroll = 0;
-    cat->anim.init = false;
+    ui_list_reset(&cat->anim);
 }
 
 // Systems that have a complete cache file, for offline use
@@ -309,6 +327,7 @@ static bool load_catalog(Catalog *cat, LoadSummary *sum) {
     for (int i = 0; i < CAT_MAX_SYSTEMS; i++) sum->rows[i] = -1;
     unload_lists(cat);
 
+    ui_job_settle();   // a cancelled job may still be talking to the server
     ui_busy("Game Catalog", "Contacting the server...");
     u32 size = 0, status = 0;
     u8 *body = cat_get(cat, "/roms/fingerprints", &size, &status);
@@ -416,10 +435,32 @@ static bool apply_filter(Catalog *cat) {
     return true;
 }
 
-static void show_loading(Catalog *cat) {
-    cat->loading = true;
-    draw_frame(cat);
-    cat->loading = false;
+// A live page, fetched on the worker (see ui_run_job): everything it needs
+// is copied in, everything it finds is copied out by the main thread
+typedef struct {
+    AppConfig config;
+    char path[320];
+    CatEntry win[CAT_WINDOW];
+    int n;                   // entries parsed, -1 bad reply
+    CatPageInfo info;
+    bool ok;                 // a 200 that parsed
+    char error[96];
+} PageJob;
+
+static bool page_job(void *ctx) {
+    PageJob *j = ctx;
+    u32 size = 0, status = 0;
+    u8 *body = cat_get_cfg(&j->config, j->path, &size, &status);
+    j->error[0] = '\0';
+    if (body && status == 200) {
+        j->n = cat_parse_page((const char *)body, size, j->win, CAT_WINDOW, &j->info);
+        if (j->n < 0) snprintf(j->error, sizeof(j->error), "Bad catalog reply");
+        else j->ok = true;
+    } else {
+        describe_failure(body ? status : 0, j->error, sizeof(j->error));
+    }
+    free(body);
+    return j->ok;
 }
 
 // Load the page starting at `offset` into the window
@@ -447,35 +488,83 @@ static void fetch_window(Catalog *cat, int offset) {
              cat->systems[cat->sys], CAT_WINDOW, offset,
              cat->ra_only ? "&has_ra=true" : "", search);
 
-    show_loading(cat);
-    u32 size = 0, status = 0;
-    u8 *body = cat_get(cat, path, &size, &status);
-    cat->error[0] = '\0';
-    if (body && status == 200) {
-        CatPageInfo info;
-        int n = cat_parse_page((const char *)body, size, cat->win, CAT_WINDOW, &info);
-        if (n < 0) {
-            snprintf(cat->error, sizeof(cat->error), "Bad catalog reply");
-            cat->win_count = 0;
-        } else {
-            cat->win_off = offset;
-            cat->win_count = n;
-            cat->total = info.total;
-            cat->filter_ignored = cat->ra_only && info.has_ra != 1;
-        }
+    PageJob *j = ui_job_ctx(sizeof(PageJob));
+    if (!j) {
+        snprintf(cat->error, sizeof(cat->error), "Out of memory");
+        cat->win_count = 0;
+        return;
+    }
+    j->config = *cat->config;
+    snprintf(j->path, sizeof(j->path), "%s", path);
+    // The list stays live underneath, showing its "Loading..." rows and the
+    // header spinner; a card only appears if the server is slow
+    UiProgress p = { 0 };
+    p.title = "Game Catalog";
+    p.status = "Loading the list...";
+    p.frac = -1;
+    bool cancelled = false;
+    cat->loading = true;
+    ui_run_job_ex(page_job, j, &p, UI_JOB_CANCELLABLE | UI_JOB_QUIET, &cancelled);
+    cat->loading = false;
+    if (cancelled) {
+        // Nothing changed; A asks again
+        snprintf(cat->error, sizeof(cat->error), "Loading cancelled");
+        cat->win_count = 0;
+        return;
+    }
+    snprintf(cat->error, sizeof(cat->error), "%s", j->error);
+    if (j->ok) {
+        memcpy(cat->win, j->win, (size_t)j->n * sizeof(CatEntry));
+        cat->win_off = offset;
+        cat->win_count = j->n;
+        cat->total = j->info.total;
+        cat->filter_ignored = cat->ra_only && j->info.has_ra != 1;
     } else {
-        describe_failure(body ? status : 0, cat->error, sizeof(cat->error));
         cat->win_count = 0;
     }
-    free(body);
+    ui_job_release(j);
 }
 
+// Entry `index` of the filtered list, or NULL while it isn't loaded. In
+// cached mode every row is in memory: one outside the window (a selection a
+// drag left behind) is converted on the fly, valid until the next call.
 static const CatEntry *entry_at(const Catalog *cat, int index) {
-    if (index < cat->win_off || index >= cat->win_off + cat->win_count) return NULL;
-    return &cat->win[index - cat->win_off];
+    if (index >= cat->win_off && index < cat->win_off + cat->win_count) return &cat->win[index - cat->win_off];
+    if (cat->cached && cat->filtered && index >= 0 && index < cat->filtered_count &&
+        cat->list_loaded[cat->sys]) {
+        static CatEntry scratch;
+        cat_row_to_entry(&cat->lists[cat->sys].rows[cat->filtered[index]], &scratch);
+        return &scratch;
+    }
+    return NULL;
 }
 
-// Make sure the visible rows are loaded
+// After a drag or a flick settled at row `first`: load the rows on screen,
+// and the next stretch when the viewport is within a page of the loaded
+// window's end, so the next flick can carry on (a coast never lands outside
+// the window in live mode). The selection doesn't pull the viewport here.
+static void ensure_window(Catalog *cat, int first) {
+    if (cat->total <= 0 || cat->error[0]) return;
+    if (first < 0) first = 0;
+    int end = cat->win_off + cat->win_count;
+    bool near_end = end < cat->total && first + 2 * CAT_ROWS > end;
+    bool near_start = cat->win_off > 0 && first - CAT_ROWS < cat->win_off;
+    if (cat_window_covers(cat->win_off, cat->win_count, first, CAT_ROWS, cat->total) && !near_end && !near_start)
+        return;
+    int off = cat_window_start(first, CAT_ROWS, CAT_WINDOW, cat->total, cat->direction);
+    if (first == cat->ew_first && off == cat->ew_off && cat->total == cat->ew_total &&
+        cat->win_off == cat->ew_win_off && cat->win_count == cat->ew_win_count)
+        return;
+    fetch_window(cat, off);
+    cat->ew_first = first;
+    cat->ew_off = off;
+    cat->ew_total = cat->total;
+    cat->ew_win_off = cat->win_off;
+    cat->ew_win_count = cat->win_count;
+}
+
+// Make sure the visible rows are loaded, scrolling to keep the selection
+// in view (after a key move)
 static void ensure_loaded(Catalog *cat) {
     if (cat->total < 0) {
         fetch_window(cat, 0);
@@ -497,9 +586,10 @@ static void ensure_loaded(Catalog *cat) {
 static void reset_list(Catalog *cat) {
     cat->total = -1;
     cat->win_off = cat->win_count = 0;
+    cat->ew_first = cat->ew_off = cat->ew_total = -1;
     cat->selected = cat->scroll = 0;
     cat->error[0] = '\0';
-    cat->anim.init = false;
+    ui_list_reset(&cat->anim);
     if (cat->cached && !apply_filter(cat)) return;
     ensure_loaded(cat);
 }
@@ -600,22 +690,23 @@ static const char *plan_label(const CatPlan *plan) {
 }
 
 static void kv(float x, float y, float label_w, float w, const char *label, const char *value, u32 color) {
-    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, label);
+    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, label);
     gui_text_fit(x + label_w, y, GUI_S_SMALL, gui_rgb(color), GUI_LEFT, w - label_w, value);
 }
 
 // RA badge: gold pill with the count, outlined when matched by name only
-static float ra_badge(float x_right, float y, float h, const CatEntry *e, bool on_accent) {
+// `hl`: how much of it the list's highlight bar covers (0 = none)
+static float ra_badge(float x_right, float y, float h, const CatEntry *e, float hl) {
     char tag[16];
     ra_tag(e, tag, sizeof(tag));
     if (!tag[0]) return 0;
     float w = gui_pill_w(h, GUI_S_TINY, tag);
     if (e->ra_title_only)
-        gui_pill_outline(x_right - w, y, h, GUI_S_TINY, gui_rgb(on_accent ? HEX_INK : HEX_RA),
-                         gui_rgb(on_accent ? HEX_ACCENT : HEX_BG), tag);
+        gui_pill_outline(x_right - w, y, h, GUI_S_TINY, gui_mix(HEX_RA, HEX_INK, hl),
+                         gui_mix(HEX_BG, HEX_ACCENT, hl), tag);
     else
-        gui_pill(x_right - w, y, h, GUI_S_TINY, gui_rgb(on_accent ? HEX_INK : HEX_RA),
-                 gui_rgb(on_accent ? HEX_RA : HEX_INK), tag);
+        gui_pill(x_right - w, y, h, GUI_S_TINY, gui_mix(HEX_RA, HEX_INK, hl),
+                 gui_mix(HEX_INK, HEX_RA, hl), tag);
     return w;
 }
 
@@ -629,6 +720,7 @@ static void draw_top(void *ctx) {
     hints[nhints++] = (GuiHint){ "Y", "Search" };
     hints[nhints++] = (GuiHint){ "LR", "Page" };
     hints[nhints++] = (GuiHint){ "START", "Exit" };
+    ui_tab_content_begin();
 
     float px = 8, py = 32, pw = GUI_TOP_W - 16;
     float banner_y = 190;
@@ -658,13 +750,13 @@ static void draw_top(void *ctx) {
                         : "Loading...";
         gui_text(GUI_TOP_W / 2.0f, 92, GUI_S_TITLE, gui_rgb(HEX_DIM), GUI_CENTER, msg);
         if (!cat->ready && cat->error[0])
-            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_CENTER,
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
                      "A: try again   (check WiFi and the server URL in Settings)");
         else if (cat->ready && cat->total == 0 && cat->search[0])
-            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_CENTER,
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
                      "Y: new search   B: clear the search");
         else if (cat->ready && cat->total == 0 && cat->ra_only)
-            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_CENTER, "X: show all games");
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER, "X: show all games");
     } else {
         float x = px + 12, w = pw - 24;
         int lines = gui_text_wrap(x, py + 8, GUI_S_TITLE, gui_rgb(HEX_TEXT), w, 2, entry_name(e));
@@ -685,14 +777,14 @@ static void draw_top(void *ctx) {
         if (cat_entry_has_ra(e)) {
             char tag[16];
             ra_tag(e, tag, sizeof(tag));
-            pxx += ra_badge(pxx + gui_pill_w(15, GUI_S_TINY, tag), y, 15, e, false) + 5;
+            pxx += ra_badge(pxx + gui_pill_w(15, GUI_S_TINY, tag), y, 15, e, 0) + 5;
         }
         bool inst = is_installed(cat, e);
         if (inst) {
-            float iw = gui_pill_w(15, GUI_S_TINY, "INSTALLED") + 12;
+            float iw = gui_pill_w(15, GUI_S_TINY, "Installed") + 12;
             gui_rrect(pxx, y, iw, 15, 7.5f, gui_mix(HEX_PANEL, HEX_OK, 0.25f));
             gui_icon_check(pxx + 8, y + 7.5f, 7, gui_rgb(HEX_OK));
-            gui_text_mid(pxx + 15, y, 15, GUI_S_TINY, gui_rgb(HEX_OK), GUI_LEFT, 0, "INSTALLED");
+            gui_text_mid(pxx + 15, y, 15, GUI_S_TINY, gui_rgb(HEX_OK), GUI_LEFT, 0, "Installed");
         }
         y += 22;
 
@@ -735,37 +827,67 @@ static void draw_top(void *ctx) {
         gui_text_mid(20, banner_y, 22, GUI_S_SMALL, gui_rgb(banner ? banner_text : HEX_TEXT), GUI_LEFT,
                      GUI_TOP_W - 40, text);
     }
+    ui_tab_content_end();
     gui_footer(hints, nhints);
 }
 
-static void cat_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+static void cat_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     Catalog *cat = ctx;
     const CatEntry *e = entry_at(cat, index);
     float cy = y + h / 2;
     if (!e) {
-        gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_rgb(selected ? HEX_INK : HEX_MUTED), GUI_LEFT, 0,
+        gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_mix(HEX_MUTED, HEX_INK, hl), GUI_LEFT, 0,
                      "Loading...");
         return;
     }
     bool inst = is_installed(cat, e);
     if (inst) {
-        gui_circle(x + 14, cy, 6, gui_rgb(selected ? HEX_INK : HEX_OK));
-        gui_icon_check(x + 14, cy, 7, gui_rgb(selected ? HEX_ACCENT : HEX_INK));
+        gui_circle(x + 14, cy, 6, gui_mix(HEX_OK, HEX_INK, hl));
+        gui_icon_check(x + 14, cy, 7, gui_mix(HEX_INK, HEX_ACCENT, hl));
     } else {
-        gui_circle(x + 14, cy, 2, gui_rgb(selected ? HEX_INK : HEX_LINE));
+        gui_circle(x + 14, cy, 2, gui_mix(HEX_LINE, HEX_INK, hl));
     }
     float badge = 0;
-    if (cat_entry_has_ra(e)) badge = ra_badge(x + w - 8, cy - 6.5f, 13, e, selected) + 6;
-    u32 color = selected ? HEX_INK : (inst ? HEX_OK : HEX_TEXT);
-    gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_rgb(color), GUI_LEFT, w - 26 - 8 - badge, entry_name(e));
+    if (cat_entry_has_ra(e)) badge = ra_badge(x + w - 8, cy - 6.5f, 13, e, hl) + 6;
+    gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_mix(inst ? HEX_OK : HEX_TEXT, HEX_INK, hl), GUI_LEFT,
+                 w - 26 - 8 - badge, entry_name(e));
+}
+
+// The action bar: A Install (Try again after an error), Y Search, X RA only
+static int cat_bar(const Catalog *cat, UiBarItem *items) {
+    bool usable = cat->ready && cat->nsystems > 0;
+    bool retry = !usable || cat->error[0];
+    bool has_entry = usable && cat->total > 0;   // A loads the selection if it isn't yet
+    items[CAT_BAR_A] = (UiBarItem){ "A", retry ? "Try again" : "Install",
+                                    (retry || has_entry) ? GUI_BTN_PRIMARY : GUI_BTN_DISABLED, 0, KEY_A, 0, false };
+    items[CAT_BAR_Y] = (UiBarItem){ "Y", "Search", usable ? GUI_BTN_TONAL : GUI_BTN_DISABLED, 0, KEY_Y, 0, false };
+    items[CAT_BAR_X] = (UiBarItem){ "X", "RA only", usable ? GUI_BTN_TONAL : GUI_BTN_DISABLED, HEX_RA, KEY_X, 0,
+                                    cat->ra_only };
+    return CAT_BAR_COUNT;
+}
+
+// Left edge of the systems strip (after the SELECT glyph when it cycles)
+static float cat_tabs_x(const Catalog *cat) {
+    return 6 + (cat->nsystems > 1 ? gui_button_w("SELECT") + 4 : 0);
+}
+
+// Touch targets of the systems strip (the whole header height)
+static int cat_segments(const Catalog *cat, GuiRect *touch) {
+    const char *labels[CAT_MAX_SYSTEMS];
+    int n = cat->nsystems < CAT_MAX_SYSTEMS ? cat->nsystems : CAT_MAX_SYSTEMS;
+    for (int i = 0; i < n; i++) labels[i] = cat->systems[i];
+    gui_tabs_layout(cat_tabs_x(cat), 4, 18, labels, n, touch);
+    for (int i = 0; i < n; i++) touch[i] = gui_rect_make(touch[i].x, 0, touch[i].w, GUI_HEADER_H);
+    return n;
 }
 
 static void draw_bottom(void *ctx) {
     Catalog *cat = ctx;
     bool has_rows = cat->ready && cat->total > 0;
+    ui_tab_content_begin();
     if (has_rows) {
-        ui_list(&cat->anim, 0, CAT_LIST_Y, GUI_BOT_W, CAT_ROWS, CAT_ROW_H, cat->total,
-                cat->selected, cat->scroll, cat_row, cat);
+        ui_list_draw(&cat->anim, &cat_geom, cat->total, cat->selected, cat->scroll, cat_row, cat);
     } else {
         const char *msg = cat->error[0] && cat->win_count == 0 ? "A: try again"
                         : cat->total == 0 || cat->nsystems == 0 ? "Nothing to show" : "";
@@ -775,17 +897,19 @@ static void draw_bottom(void *ctx) {
             gui_text(GUI_BOT_W / 2.0f, 100, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, msg);
         }
     }
+    ui_tab_content_end();
 
-    gui_header_bar();
+    gui_header_bar_ex(!has_rows || ui_list_at_top(&cat->anim));
     const char *labels[CAT_MAX_SYSTEMS];
     for (int i = 0; i < cat->nsystems && i < CAT_MAX_SYSTEMS; i++) labels[i] = cat->systems[i];
-    float x = 6;
-    // SELECT cycles the systems: the glyph sits before the segmented control
-    if (cat->nsystems > 1) x += gui_button(x, GUI_HEADER_H / 2.0f, "SELECT") + 4;
-    if (cat->nsystems > 0) x = gui_tabs(x, 4, 18, labels, cat->nsystems, cat->sys) + 6;
-    if (cat->ra_only) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_RA), gui_rgb(HEX_INK), "RA ONLY") + 4;
-    if (cat->search[0]) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "SEARCH") + 4;
-    if (cat->offline) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_WARN), gui_rgb(HEX_INK), "OFFLINE") + 4;
+    // SELECT cycles the systems: the glyph sits before the segmented
+    // control; a tap on a segment picks it
+    float x = cat_tabs_x(cat);
+    if (cat->nsystems > 1) gui_button(6, GUI_HEADER_H / 2.0f, "SELECT");
+    if (cat->nsystems > 0) x = gui_tabs(&cat->tabs, x, 4, 18, labels, cat->nsystems, cat->sys, NULL) + 6;
+    if (cat->ra_only) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_RA), gui_rgb(HEX_INK), "RA only") + 4;
+    if (cat->search[0]) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Search") + 4;
+    if (cat->offline) x += gui_pill(x, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_WARN), gui_rgb(HEX_INK), "Offline") + 4;
     if (cat->loading) {
         gui_spinner(GUI_BOT_W - 14, GUI_HEADER_H / 2.0f, 6, gui_rgb(HEX_ACCENT));
     } else if (has_rows) {
@@ -796,12 +920,9 @@ static void draw_bottom(void *ctx) {
             gui_text_mid(GUI_BOT_W - 8, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, pos);
     }
 
-    GuiHint hints[2];
-    int n = 0;
-    if (has_rows) hints[n++] = (GuiHint){ "A", "Install" };
-    else if (cat->error[0]) hints[n++] = (GuiHint){ "A", "Try again" };
-    if (cat->search[0]) hints[n++] = (GuiHint){ "B", "Clear search" };
-    gui_footer(hints, n);
+    UiBarItem items[CAT_BAR_COUNT];
+    int n = cat_bar(cat, items);
+    ui_bar_draw(&cat->bar, items, n, cat->held);
 }
 
 static void draw_frame(Catalog *cat) {
@@ -883,11 +1004,10 @@ static void draw_progress(Download *dl, u64 done, u64 total) {
     ui_progress(&p);
 }
 
-// Read the keys; true if the user wants out (B held, or the app closing)
+// Read the input; true if the user wants out (B held or the Cancel pill
+// touched, or the app closing)
 static bool cancel_requested(void) {
-    if (!aptMainLoop()) return true;
-    hidScanInput();
-    return (hidKeysHeld() & KEY_B) != 0;
+    return ui_progress_cancel_poll();
 }
 
 static bool download_wait(u32 seconds, void *user) {
@@ -1028,6 +1148,7 @@ static void append_error_body(const NetDlInfo *info, char *out, size_t size) {
 
 // Run one install; returns true if the user asked to retry as a file
 static bool run_install(Catalog *cat, const CatEntry *e, const CatPlan *plan, InstallMode mode) {
+    ui_job_settle();   // a cancelled job may still be talking to the server
     bool cia = (mode == MODE_CIA);
     char target[CAT_FILE_LEN];
     const char *ext = ".nds";
@@ -1242,8 +1363,15 @@ static void install(Catalog *cat, const CatEntry *entry) {
 static void move_to(Catalog *cat, int index, bool wrap) {
     if (cat->total <= 0) return;
     if (wrap) {
-        index = (index % cat->total + cat->total) % cat->total;
+        int wrapped = (index % cat->total + cat->total) % cat->total;
+        if (wrapped != index)
+            ui_list_edge(&cat->anim, cat->total > 1 ? UI_EDGE_WRAP
+                                     : index < 0 ? UI_EDGE_CLAMP_TOP : UI_EDGE_CLAMP_BOTTOM);
+        index = wrapped;
     } else {
+        // A page press with nowhere left to go
+        if (index < 0 && cat->selected == 0) ui_list_edge(&cat->anim, UI_EDGE_CLAMP_TOP);
+        if (index >= cat->total && cat->selected == cat->total - 1) ui_list_edge(&cat->anim, UI_EDGE_CLAMP_BOTTOM);
         if (index < 0) index = 0;
         if (index >= cat->total) index = cat->total - 1;
     }
@@ -1252,22 +1380,10 @@ static void move_to(Catalog *cat, int index, bool wrap) {
     ensure_loaded(cat);
 }
 
+// The system keyboard (or the D-pad editor when it can't start)
 static bool edit_search(char *search, size_t size) {
-    SwkbdState kb;
-    char text[64];
-    if (size > sizeof(text)) size = sizeof(text);
-    snprintf(text, sizeof(text), "%s", search);
-    swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, (int)size - 1);
-    swkbdSetHintText(&kb, "Search game names (empty = all)");
-    swkbdSetInitialText(&kb, text);
-    swkbdSetValidation(&kb, SWKBD_ANYTHING, 0, 0);
-    swkbdSetButton(&kb, SWKBD_BUTTON_LEFT, "Cancel", false);
-    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, "Search", true);
-    SwkbdButton button = swkbdInputText(&kb, text, sizeof(text));
-    if (button != SWKBD_BUTTON_RIGHT) return false;
-    text[size - 1] = '\0';  // swkbd was limited to size-1 already
-    memcpy(search, text, strlen(text) + 1);
-    return true;
+    UiTextField f = { "Search the catalog", "Search game names (empty = all)", "Search", false, false, true };
+    return ui_edit_text_ex(&f, search, (int)size);
 }
 
 static Catalog *get_catalog(const AppConfig *config) {
@@ -1280,6 +1396,9 @@ static Catalog *get_catalog(const AppConfig *config) {
         }
         cat->win = win;
         cat->total = -1;
+        cat->bar = (UiBar)UI_BAR_INIT;
+        cat->seg_tap = (UiTap)UI_TAP_INIT;
+        cat->anim.pressed_row = -1;
         g_cat = cat;
     }
     g_cat->config = config;
@@ -1305,6 +1424,73 @@ static void open_catalog(Catalog *cat, LoadSummary *sum) {
     }
 }
 
+// What each key does; a tap on its button calls the same function
+
+// A: install the selected game, or try again after an error
+static void cat_do_a(Catalog *cat) {
+    if (!cat->ready || cat->nsystems == 0) {
+        open_catalog(cat, NULL);
+        return;
+    }
+    if (cat->error[0]) {
+        // Retry: a broken cache file was removed, so reopening fetches
+        // that system again; live mode refetches the page
+        cat->error[0] = '\0';
+        if (cat->cached) open_catalog(cat, NULL);
+        else if (cat->total < 0) reset_list(cat);
+        else fetch_window(cat, cat_window_start(cat->scroll, CAT_ROWS, CAT_WINDOW, cat->total, cat->direction));
+        return;
+    }
+    if (cat->total <= 0) return;
+    // A drag may have left the selection off screen: show it (and load it)
+    ui_list_reveal(&cat->anim, cat->total, cat->selected, &cat->scroll);
+    ensure_loaded(cat);
+    const CatEntry *e = entry_at(cat, cat->selected);
+    if (e) install(cat, e);
+}
+
+// X: only games with RetroAchievements / all games
+static void cat_toggle_ra(Catalog *cat) {
+    cat->ra_only = !cat->ra_only;
+    reset_list(cat);
+}
+
+// Y: search
+static void cat_search(Catalog *cat) {
+    if (edit_search(cat->search, sizeof(cat->search))) reset_list(cat);
+}
+
+// B: clear the search
+static void cat_clear_search(Catalog *cat) {
+    if (!cat->search[0]) return;
+    cat->search[0] = '\0';
+    reset_list(cat);
+}
+
+// SELECT (next system): show system `index`
+static void cat_set_system(Catalog *cat, int index) {
+    if (cat->nsystems <= 1 || index == cat->sys) return;
+    cat->sys = index;
+    scan_installed(cat);
+    reset_list(cat);
+}
+
+// Rows on screen after a drag or flick: cached rows are copied in as soon
+// as they show; live pages are only fetched once the list has settled
+// (fetch_window() blocks on the network)
+static void follow_viewport(Catalog *cat) {
+    if (!cat->ready || cat->total <= 0 || cat->error[0]) return;
+    if (cat->anim.scroll.v > 0.5f) cat->direction = 1;
+    else if (cat->anim.scroll.v < -0.5f) cat->direction = -1;
+    int first = ui_list_first_visible(&cat->anim);
+    if (cat->cached) {
+        if (!cat_window_covers(cat->win_off, cat->win_count, first, CAT_ROWS + 1, cat->total))
+            fetch_window(cat, cat_window_start(first, CAT_ROWS, CAT_WINDOW, cat->total, cat->direction));
+    } else if (ui_list_settled(&cat->anim)) {
+        ensure_window(cat, first);
+    }
+}
+
 UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
     if (saves_changed) *saves_changed = false;
     Catalog *cat = get_catalog(config);
@@ -1319,11 +1505,10 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
 
     UiNav nav = UI_NAV_EXIT;  // the app is closing unless a key says otherwise
     hidScanInput();
-    while (aptMainLoop()) {
-        draw_frame(cat);
-        hidScanInput();
-        u32 down = hidKeysDown();
-        u32 rep = hidKeysDownRepeat();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 down = in.down;
+        u32 rep = in.rep;
 
         UiNav n = ui_tab_nav(down);
         if (n != UI_NAV_STAY) {
@@ -1331,49 +1516,47 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
             break;
         }
 
+        UiBarItem items[CAT_BAR_COUNT];
+        int nitems = cat_bar(cat, items);
+        int hit = ui_bar_input(&cat->bar, &in, items, nitems);
+        GuiRect seg[CAT_MAX_SYSTEMS];
+        int nseg = cat->ready ? cat_segments(cat, seg) : 0, seg_pressed = -1;
+        int seg_hit = ui_tap_buttons(&cat->seg_tap, &in, seg, nseg, &seg_pressed);
+        cat->tabs.held = seg_pressed + 1;
+
         if (!cat->ready || cat->nsystems == 0) {
-            if (down & KEY_A) open_catalog(cat, NULL);
-            continue;
-        }
-
-        if (rep & KEY_DOWN) move_to(cat, cat->selected + 1, true);
-        if (rep & KEY_UP) move_to(cat, cat->selected - 1, true);
-        if (rep & KEY_RIGHT) move_to(cat, cat->selected + CAT_ROWS, false);
-        if (rep & KEY_LEFT) move_to(cat, cat->selected - CAT_ROWS, false);
-        if ((down & KEY_TOUCH) && cat->total > 0) {
-            int i = ui_list_touch(CAT_LIST_Y, CAT_ROWS, CAT_ROW_H, cat->total, cat->scroll);
-            if (i >= 0) move_to(cat, i, false);
-        }
-
-        if (down & KEY_X) {
-            cat->ra_only = !cat->ra_only;
-            reset_list(cat);
-        }
-        if (down & KEY_Y) {
-            if (edit_search(cat->search, sizeof(cat->search))) reset_list(cat);
-        }
-        if ((down & KEY_B) && cat->search[0]) {
-            cat->search[0] = '\0';
-            reset_list(cat);
-        }
-        if ((down & KEY_SELECT) && cat->nsystems > 1) {
-            cat->sys = (cat->sys + 1) % cat->nsystems;
-            scan_installed(cat);
-            reset_list(cat);
-        }
-        if (down & KEY_A) {
-            if (cat->error[0]) {
-                // Retry: a broken cache file was removed, so reopening
-                // fetches that system again; live mode refetches the page
-                cat->error[0] = '\0';
-                if (cat->cached) open_catalog(cat, NULL);
-                else if (cat->total < 0) reset_list(cat);
-                else fetch_window(cat, cat_window_start(cat->scroll, CAT_ROWS, CAT_WINDOW, cat->total, cat->direction));
-            } else {
-                const CatEntry *e = cat->total > 0 ? entry_at(cat, cat->selected) : NULL;
-                if (e) install(cat, e);
+            if (hit == CAT_BAR_A || (down & KEY_A)) cat_do_a(cat);
+        } else {
+            // Live mode: a coast lands inside the loaded window
+            if (!cat->cached && cat->win_count > 0)
+                ui_list_set_range(&cat->anim, cat->win_off, cat->win_off + cat->win_count - CAT_ROWS);
+            else
+                ui_list_clear_range(&cat->anim);
+            int total = cat->total > 0 ? cat->total : 0;
+            UiListEvent ev = ui_list_input(&cat->anim, &cat_geom, total, &cat->selected, &cat->scroll, &in,
+                                           rep & UI_LIST_KEYS);
+            if (ev.kind != UI_LIST_REATTACHED) {
+                if (rep & KEY_DOWN) move_to(cat, cat->selected + 1, true);
+                if (rep & KEY_UP) move_to(cat, cat->selected - 1, true);
+                if (rep & KEY_RIGHT) move_to(cat, cat->selected + CAT_ROWS, false);
+                if (rep & KEY_LEFT) move_to(cat, cat->selected - CAT_ROWS, false);
             }
+            follow_viewport(cat);
+
+            // A tap on the selected row installs (after the usual prompt)
+            bool tap_install = ev.kind == UI_LIST_TAP_SELECTED && !cat->error[0];
+            if (hit == CAT_BAR_X || (down & KEY_X)) cat_toggle_ra(cat);
+            if (hit == CAT_BAR_Y || (down & (KEY_Y | KEY_ZR))) cat_search(cat);
+            if (down & KEY_B) cat_clear_search(cat);
+            if ((down & KEY_SELECT) && cat->nsystems > 1) cat_set_system(cat, (cat->sys + 1) % cat->nsystems);
+            else if (seg_hit >= 0) cat_set_system(cat, seg_hit);
+            if (hit == CAT_BAR_A || tap_install || (down & KEY_A)) cat_do_a(cat);
         }
+
+        cat->held = in.held;
+        draw_frame(cat);
+        cat->held = 0;
+        cat->tabs.held = 0;
     }
 
     ui_restore_backdrop(prev);
@@ -1392,6 +1575,23 @@ static void wipe_cache(void) {
     }
 }
 
+// GET /roms/scan on the worker: the server answers when its rescan is done
+typedef struct {
+    AppConfig config;
+    u32 status;
+    int count;
+} ScanJob;
+
+static bool scan_job(void *ctx) {
+    ScanJob *j = ctx;
+    u32 len = 0;
+    u8 *body = network_get_timeout(&j->config, "/roms/scan", &len, &j->status, RESCAN_TIMEOUT_S);
+    if (!body || j->status < 100 || j->status > 599) j->status = 0;
+    j->count = (body && j->status == 200) ? cat_parse_scan_count((const char *)body, len) : -1;
+    free(body);
+    return true;
+}
+
 void catalog_refresh(const AppConfig *config, char *report, size_t size) {
     Catalog *cat = get_catalog(config);
     if (!cat) {
@@ -1399,14 +1599,31 @@ void catalog_refresh(const AppConfig *config, char *report, size_t size) {
         return;
     }
 
-    // 1. Ask the server to walk its ROM folder again (it answers when done)
-    ui_busy("Refresh catalog", "Asking the server to rescan its ROMs...");
-    u32 len = 0, status = 0;
-    u8 *body = network_get_timeout(config, "/roms/scan", &len, &status, RESCAN_TIMEOUT_S);
+    // 1. Ask the server to walk its ROM folder again (it answers when done,
+    // which can take minutes: the card offers Cancel once it has waited)
+    u32 status = 0;
+    int count = -1;
+    ScanJob *j = ui_job_ctx(sizeof(ScanJob));
+    if (j) {
+        j->config = *config;
+        UiProgress p = { 0 };
+        p.title = "Refresh catalog";
+        p.status = "Asking the server to rescan its ROMs...";
+        p.frac = -1;
+        bool cancelled = false;
+        ui_run_job(scan_job, j, &p, true, &cancelled);
+        if (cancelled) {
+            // The cached catalog stays as it is
+            snprintf(report, size, "Refresh cancelled.\n\n" UI_DIM
+                     "The server may still finish its rescan. The cached catalog was kept; "
+                     "run Refresh catalog again later to fetch it.");
+            return;
+        }
+        status = j->status;
+        count = j->count;
+        ui_job_release(j);
+    }
     char rescan[128];
-    if (!body || status < 100 || status > 599) status = 0;
-    int count = (body && status == 200) ? cat_parse_scan_count((const char *)body, len) : -1;
-    free(body);
     if (status == 200 && count >= 0)
         snprintf(rescan, sizeof(rescan), "Server rescan: %d ROMs.", count);
     else if (status == 200)

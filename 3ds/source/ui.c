@@ -3,6 +3,8 @@
 #include "config.h"
 #include "sync.h"
 #include "network.h"
+#include "nds.h"
+#include "title.h"
 
 // ---------------------------------------------------------------------------
 // Init
@@ -13,11 +15,22 @@ static void splash_bottom(void *ctx);
 
 static UiBackdrop backdrop = { splash_top, splash_bottom, NULL };
 
+static bool new3ds;
+
 void ui_init(void) {
     gui_init();
+    ui_gesture_set_clock(gui_clock_ms);
+    APT_CheckNew3DS(&new3ds);
 }
 
+bool ui_is_new3ds(void) {
+    return new3ds;
+}
+
+static void job_shutdown(void);
+
 void ui_exit(void) {
+    job_shutdown();
     gui_exit();
 }
 
@@ -36,30 +49,65 @@ u32 ui_tone_hex(UiTone tone) {
 }
 
 static void format_size(u32 bytes, char *out, int out_size) {
-    if (bytes >= 1024 * 1024)
-        snprintf(out, out_size, "%.1f MB", bytes / (1024.0 * 1024.0));
-    else if (bytes >= 1024)
-        snprintf(out, out_size, "%.1f KB", bytes / 1024.0);
-    else
-        snprintf(out, out_size, "%lu B", (unsigned long)bytes);
+    ui_format_size_str(bytes, out, out_size);
 }
 
-// ISO 8601 "YYYY-MM-DDTHH:MM:SS..." -> "YYYY-MM-DD HH:MM"
-static void format_date(const char *iso, char *out, int out_size) {
-    if (strlen(iso) >= 16 && iso[10] == 'T')
-        snprintf(out, out_size, "%.10s %.5s", iso, iso + 11);
-    else if (iso[0])
-        snprintf(out, out_size, "%.19s", iso);
-    else
-        snprintf(out, out_size, "-");
+static char local_console_id[17];
+static int utc_offset_minutes;
+
+void ui_set_local_console_id(const char *console_id) {
+    snprintf(local_console_id, sizeof(local_console_id), "%s", console_id ? console_id : "");
 }
 
-// Wait for the next frame's input; false if the app is closing
-static bool next_input(u32 *down) {
+void ui_set_utc_offset(int minutes) {
+    utc_offset_minutes = minutes;
+}
+
+void ui_format_when(const char *iso, char *out, int out_size) {
+    // osGetTime(): ms since 1900-01-01 on the console's (local, settable)
+    // clock. Only used for the date words; ui_format_when_at() distrusts it
+    // when it is implausible.
+    int64_t now_local = (int64_t)(osGetTime() / 1000ULL) - 2208988800LL;
+    ui_format_when_at(iso, utc_offset_minutes, now_local, out, out_size);
+}
+
+void ui_device_label(const char *console_id, char *out, int out_size) {
+    ui_device_label_for(console_id, local_console_id, out, out_size);
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
+static UiTouchTrack touch_track;
+static UiRepeat key_repeat;
+
+// ZL / ZR (New 3DS) need no setup here: libctru's hidInit() starts ir:rst
+// itself on a New 3DS (hidShouldUseIrrst) and hidScanInput() merges its
+// keys into hidKeysDown()/hidKeysHeld().
+bool ui_input_scan(UiInput *in) {
+    memset(in, 0, sizeof(*in));
     if (!aptMainLoop()) return false;
+#ifdef GUI_PERF
+    gui_perf_loop_mark();
+#endif
     hidScanInput();
-    *down = hidKeysDown();
+    in->down = hidKeysDown();
+    in->held = hidKeysHeld();
+    in->up = hidKeysUp();
+    in->t_ms = gui_clock_ms();
+    in->rep = ui_repeat_accel(&key_repeat, in->held, hidKeysDownRepeat(), in->t_ms);
+    // hidTouchRead() reads (0, 0) on the release frame: only sample while held
+    bool raw = (in->held & KEY_TOUCH) != 0;
+    touchPosition tp = { 0, 0 };
+    if (raw) hidTouchRead(&tp);
+    ui_touch_update(&touch_track, raw, tp.px, tp.py, in);
     return true;
+}
+
+void ui_input_latch_touch(void) {
+    // hidKeysHeld() is the last scan: callers drain with hidScanInput() first
+    ui_touch_latch(&touch_track, (hidKeysHeld() & KEY_TOUCH) != 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +147,25 @@ void ui_draw_backdrop_top(void) {
 
 void ui_draw_backdrop_bottom(void) {
     if (backdrop.bottom) backdrop.bottom(backdrop.ctx);
+}
+
+// ---------------------------------------------------------------------------
+// Modal entry
+// ---------------------------------------------------------------------------
+
+static float modal_origin_y = -1;   // pivot of the next modal only, -1 = its centre
+
+void ui_set_modal_origin(float y) {
+    modal_origin_y = y;
+}
+
+// Open `m` for a card centred at `card_cy` on the bottom screen: it grows
+// out of the origin set for it, else out of its own centre. The origin is
+// used once.
+static void modal_open(GuiModal *m, float card_cy) {
+    float py = modal_origin_y >= 0 ? modal_origin_y : card_cy;
+    modal_origin_y = -1;
+    gui_modal_open(m, GUI_BOT_W / 2.0f, py);
 }
 
 // ---------------------------------------------------------------------------
@@ -147,82 +214,190 @@ static void layout_body(const char *body, float width, DialogLines *out) {
     }
 }
 
-static float buttons_width(const UiButton *b, int count) {
-    float w = 0;
-    for (int i = 0; i < count; i++)
-        w += gui_button_w(b[i].button) + 4 + gui_text_w(GUI_S_SMALL, b[i].label) + (i ? 12 : 0);
-    return w;
+#define DLG_MAX_BUTTONS 4
+#define DLG_BTN_AREA 40   // the card's bottom: 30 px buttons, 10 px margin below
+#define DLG_BTN_AREA2 (DLG_BTN_AREA + GUI_BTN_H + GUI_BTN_GAP)   // two rows
+
+static float body_height(const DialogLines *lines) {
+    float lh = gui_line_h(GUI_S_BODY), h = 0;
+    for (int i = 0; i < lines->count; i++) h += lines->text[i][0] ? lh : lh / 2;
+    return h;
 }
 
+// `n` buttons at y `by` splitting the card's inner width equally, 8 px
+// apart. The touch rects reach `above` / `below` px past each pill and
+// halfway into the gaps, so the row has no dead strips.
+static void button_row(float by, int n, float above, float below, GuiRect *draw, GuiRect *touch) {
+    float avail = DLG_W - 24;
+    float bw = (avail - GUI_BTN_GAP * (n - 1)) / (n > 0 ? n : 1);
+    for (int i = 0; i < n; i++) {
+        float x = DLG_X + 12 + i * (bw + GUI_BTN_GAP);
+        draw[i] = gui_rect_make(x, by, bw, GUI_BTN_H);
+        touch[i] = gui_rect_make(x - GUI_BTN_GAP / 2.0f, by - above, bw + GUI_BTN_GAP, GUI_BTN_H + above + below);
+    }
+}
+
+// One row in the card's bottom 40 px, with 5 px of touch above and below
+static void card_buttons(float card_y, float card_h, int n, GuiRect *draw, GuiRect *touch) {
+    button_row(card_y + card_h - 10 - GUI_BTN_H, n, 5, 5, draw, touch);
+}
+
+// The button that confirms (has A) is the filled one; with none, the last
+static int primary_button(const UiButton *b, int n) {
+    for (int i = 0; i < n; i++)
+        if (b[i].keys & KEY_A) return i;
+    return n - 1;
+}
+
+typedef struct {
+    float y, h, area;
+    GuiRect draw[DLG_MAX_BUTTONS], touch[DLG_MAX_BUTTONS];
+    int n, primary, row1;
+    bool x_icon;
+} DialogGeom;
+
+static void dialog_geom(const DialogLines *lines, const UiButton *b, int n, const UiDialogOpts *o, DialogGeom *g) {
+    g->row1 = o && o->row1 > 0 && o->row1 < n ? o->row1 : 0;
+    g->x_icon = o && o->x_icon;
+    g->area = g->row1 ? DLG_BTN_AREA2 : DLG_BTN_AREA;
+    g->h = 24 + 10 + body_height(lines) + 10 + g->area;
+    if (g->h > GUI_H - 12) g->h = GUI_H - 12;
+    g->y = (GUI_H - g->h) / 2;
+    g->n = n;
+    g->primary = primary_button(b, n);
+    if (g->row1) {
+        // Two rows: the first `row1` buttons side by side, the rest below
+        float by2 = g->y + g->h - 10 - GUI_BTN_H, by1 = by2 - GUI_BTN_GAP - GUI_BTN_H;
+        button_row(by1, g->row1, 5, GUI_BTN_GAP / 2.0f, g->draw, g->touch);
+        button_row(by2, n - g->row1, GUI_BTN_GAP / 2.0f, 5, g->draw + g->row1, g->touch + g->row1);
+    } else {
+        card_buttons(g->y, g->h, n, g->draw, g->touch);
+    }
+}
+
+static GuiBtnStyle dialog_btn_style(const DialogGeom *g, int i) {
+    if (g->row1) return i < g->row1 ? GUI_BTN_PRIMARY : GUI_BTN_TONAL;
+    return i == g->primary ? GUI_BTN_PRIMARY : GUI_BTN_TONAL;
+}
+
+// `pressed`: index a finger is on, or -1; `held`: keys held down
 static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines,
-                        const UiButton *buttons, int count) {
+                        const UiButton *buttons, const DialogGeom *g, int pressed, u32 held, GuiModal *m) {
     float lh = gui_line_h(GUI_S_BODY);
-    float body_h = 0;
-    for (int i = 0; i < lines->count; i++) body_h += lines->text[i][0] ? lh : lh / 2;
-    float h = 24 + 10 + body_h + 10 + 24;
-    if (h > GUI_H - 12) h = GUI_H - 12;
-    float y = (GUI_H - h) / 2;
     u32 hex = ui_tone_hex(tone);
 
-    gui_dim();
-    gui_card(DLG_X, y, DLG_W, h, title, hex);
+    gui_modal_begin(m);
+    gui_card_ex(DLG_X, g->y, DLG_W, g->h, title, hex, g->x_icon);
 
-    float ty = y + 24 + 9;
+    float ty = g->y + 24 + 9;
     for (int i = 0; i < lines->count; i++) {
         if (!lines->text[i][0]) {
             ty += lh / 2;
             continue;
         }
-        // Too long for the screen: stop above the button row
-        if (ty + lh > y + h - 24 - 4) break;
+        // Too long for the screen: stop above the buttons
+        if (ty + lh > g->y + g->h - g->area - 2) break;
         u32 color = lines->style[i] == 1 ? HEX_DIM : (lines->style[i] == 2 ? hex : HEX_TEXT);
         gui_text(DLG_X + 12, ty, GUI_S_BODY, gui_rgb(color), GUI_LEFT, lines->text[i]);
         ty += lh;
     }
 
-    // Button row, right-aligned
-    float by = y + h - 24;
-    gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
-    float x = DLG_X + DLG_W - 12 - buttons_width(buttons, count);
-    for (int i = 0; i < count; i++) {
-        if (i) x += 12;
-        x += gui_button(x, by + 12.5f, buttons[i].button) + 4;
-        x += gui_text_mid(x, by, 24, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, 0, buttons[i].label);
+    for (int i = 0; i < g->n; i++) {
+        bool down = pressed == i || (held & buttons[i].keys) != 0;
+        gui_btn(g->draw[i], buttons[i].button, buttons[i].label, dialog_btn_style(g, i), hex, down);
     }
+    gui_modal_end(m);
 }
 
-u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count) {
+static bool progress_cancelling;
+static u32 dialog_pressed_keys;   // see ui_dialog_pressed()
+
+u32 ui_dialog_pressed(void) {
+    return dialog_pressed_keys;
+}
+
+u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count,
+                 const UiDialogOpts *opts) {
     static const UiButton any = { 0, "A", "Continue" };
-    bool any_key = (count == 0);
+    bool any_key = (count <= 0);
     if (any_key) {
         buttons = &any;
         count = 1;
     }
+    if (count > DLG_MAX_BUTTONS) count = DLG_MAX_BUTTONS;
     DialogLines lines;
     layout_body(body, DLG_W - 24, &lines);
+    DialogGeom g;
+    dialog_geom(&lines, buttons, count, opts, &g);
+    progress_cancelling = false;   // whatever was cancelling has been answered
 
-    // Ignore keys still held from whatever opened the dialog
+    // Ignore keys still held from whatever opened the dialog, and the
+    // finger that opened it
     hidScanInput();
-    while (aptMainLoop()) {
+    ui_input_latch_touch();
+    GuiModal modal;
+    modal_open(&modal, g.y + g.h / 2);
+    UiTap tap = UI_TAP_INIT;
+    u32 armed = 0, result = 0;   // keys pressed since the dialog opened
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        int pressed = -1;
+        armed = (armed | in.down) & in.held;
+        if (any_key) {
+            u32 keys = in.down & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_START | KEY_SELECT | KEY_L | KEY_R);
+            if (keys) { result = keys; break; }
+            // A tap anywhere closes a message, on release
+            if (in.t_up) { result = KEY_TOUCH; break; }
+            if (in.t_held) pressed = 0;
+        } else {
+            int hit = ui_tap_buttons(&tap, &in, g.touch, count, &pressed);
+            if (hit >= 0) { result = buttons[hit].keys; break; }
+            for (int i = 0; i < count && !result; i++)
+                if (in.down & buttons[i].keys) result = in.down & buttons[i].keys;
+            if (result) break;
+        }
+        // What the backdrop may preview: the button under a finger
+        // (sliding off cancels it). A button's key commits on its press
+        // frame (the frozen v055 bindings), so a key never gets a held
+        // frame to preview.
+        u32 held = any_key ? 0 : (in.held & armed);
+        dialog_pressed_keys = pressed >= 0 && !any_key ? buttons[pressed].keys : 0;
+
         gui_begin(true);
         gui_screen(GUI_TOP);
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_dialog(tone, title, &lines, buttons, count);
+        draw_dialog(tone, title, &lines, buttons, &g, pressed, held, &modal);
         gui_end();
-
-        u32 down;
-        if (!next_input(&down)) break;
-        if (any_key) {
-            u32 keys = down & (KEY_A | KEY_B | KEY_X | KEY_Y | KEY_START | KEY_SELECT | KEY_L | KEY_R | KEY_TOUCH);
-            if (keys) return keys;
-            continue;
-        }
-        for (int i = 0; i < count; i++)
-            if (down & buttons[i].keys) return down & buttons[i].keys;
     }
-    return 0;
+    // The card goes on this frame; the scrim fades out over what's next
+    gui_modal_close(&modal);
+    dialog_pressed_keys = 0;
+    ui_input_latch_touch();
+    return result;
+}
+
+u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *buttons, int count) {
+    return ui_dialog_ex(tone, title, body, buttons, count, NULL);
+}
+
+bool ui_error_card(const char *title, const char *reason, const char *safety, const char *next, bool retry) {
+    char body[512];
+    snprintf(body, sizeof(body), "%s\n" UI_DIM "%s%s%s", reason && reason[0] ? reason : "Unknown error",
+             safety ? safety : "", next && next[0] ? "\n" : "", next ? next : "");
+    UiDialogOpts opts = { 0, true };
+    if (retry) {
+        static const UiButton b[] = { { KEY_B, "B", "Close" }, { KEY_A, "A", "Try again" } };
+        return (ui_dialog_ex(UI_TONE_ERR, title, body, b, 2, &opts) & KEY_A) != 0;
+    }
+    static const UiButton b[] = { { KEY_B | KEY_A, "B", "Close" } };
+    ui_dialog_ex(UI_TONE_ERR, title, body, b, 1, &opts);
+    return false;
+}
+
+void ui_body_line(const char *s, char *out, int out_size) {
+    gui_fit(s, GUI_S_BODY, DLG_W - 24, out, (size_t)out_size);
 }
 
 void ui_message(UiTone tone, const char *title, const char *body) {
@@ -237,14 +412,58 @@ bool ui_confirm(UiTone tone, const char *title, const char *body, const char *ye
     return (ui_dialog(tone, title, body, b, 2) & KEY_A) != 0;
 }
 
-void ui_progress(const UiProgress *p) {
-    gui_begin(false);
-    gui_screen(GUI_TOP);
-    ui_draw_backdrop_top();
-    gui_screen(GUI_BOTTOM);
-    ui_draw_backdrop_bottom();
-    gui_dim();
+// The bar's shown fraction glides toward the reported one (progress frames
+// come at irregular times, a few per second) but never runs ahead of it and
+// snaps to full at the end. A new operation (title, name or an
+// indeterminate phase) starts from its own value, not the last one's.
+static float smooth_progress(const UiProgress *p) {
+    static GuiSpring shown;
+    static char last_title[48], last_name[96];
+    static u64 last_ms;
+    const char *title = p->title ? p->title : "";
+    const char *name = p->name ? p->name : "";
+    u64 now = gui_clock_ms();
+    float frac = p->frac;
 
+    bool changed = strncmp(title, last_title, sizeof(last_title) - 1) != 0 ||
+                   strncmp(name, last_name, sizeof(last_name) - 1) != 0;
+    if (changed || frac < 0) {
+        snprintf(last_title, sizeof(last_title), "%s", title);
+        snprintf(last_name, sizeof(last_name), "%s", name);
+        gui_spring_set(&shown, frac > 0 ? (frac < 1 ? frac : 1) : 0);
+        last_ms = now;
+        return frac;
+    }
+    if (frac > 1) return frac;   // no bar
+    if (frac >= 1) {
+        gui_spring_set(&shown, 1);
+        last_ms = now;
+        return 1;
+    }
+    float dt = now > last_ms ? (float)(now - last_ms) / 1000.0f : 0;
+    if (dt > 0.25f) dt = 0.25f;
+    last_ms = now;
+    gui_spring_always(&shown, frac, GUI_RESP_PROGRESS, dt);
+    if (shown.x > frac) gui_spring_set(&shown, frac);
+    if (shown.x < 0) gui_spring_set(&shown, 0);
+    return shown.x;
+}
+
+static GuiRect progress_cancel_rect;   // touch rect of the last card's Cancel pill
+static bool progress_cancel_shown;
+
+// What a card shows beyond its UiProgress
+typedef struct {
+    const char *wait_line;   // "Waiting for the server... 0:07", or NULL
+    bool pill;               // the Cancel pill
+    bool pill_pressed;
+    bool cancelling;         // "Cancelling...", muted bar
+} ProgressExtras;
+
+// The progress card itself (the scrim and any entry motion are the
+// caller's). Leaves the pill's touch rect in progress_cancel_rect.
+static void draw_progress_card(const UiProgress *p, float bar_frac, const ProgressExtras *x) {
+    bool cancelling = x->cancelling;
     u32 hex = ui_tone_hex(p->tone);
     float lh_small = gui_line_h(GUI_S_SMALL);
     float h = 24 + 12;
@@ -253,49 +472,339 @@ void ui_progress(const UiProgress *p) {
     if (p->frac <= 1) h += 14 + lh_small + 6;
     if (p->info1) h += lh_small;
     if (p->info2) h += lh_small;
-    if (p->cancel_hint) h += 22;
+    if (x->wait_line) h += lh_small;
+    if (x->pill) h += DLG_BTN_AREA;
     h += 6;
     float y = (GUI_H - h) / 2;
     gui_card(DLG_X, y, DLG_W, h, p->title ? p->title : "Working", hex);
 
-    float x = DLG_X + 12, w = DLG_W - 24, ty = y + 24 + 10;
+    float tx = DLG_X + 12, w = DLG_W - 24, ty = y + 24 + 10;
     if (p->name) {
-        gui_text_fit(x, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w, p->name);
+        gui_text_fit(tx, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w, p->name);
         ty += gui_line_h(GUI_S_BODY) + 2;
     }
     if (p->status) {
+        char cancel_status[32];
+        const char *status = p->status;
+        if (cancelling) {
+            snprintf(cancel_status, sizeof(cancel_status), "Cancelling%s", gui_ellipsis());
+            status = cancel_status;
+        }
         if (p->frac < 0) {
-            gui_spinner(x + 5, ty + lh_small / 2 + 1, 5, gui_rgb(hex));
-            gui_text_fit(x + 16, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, p->status);
+            gui_spinner(tx + 5, ty + lh_small / 2 + 1, 5, gui_rgb(cancelling ? HEX_MUTED : hex));
+            gui_text_fit(tx + 16, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, status);
         } else {
-            gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->status);
+            gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, status);
         }
         ty += lh_small + 4;
     }
     if (p->frac <= 1) {
-        gui_bar(x, ty, w, 10, p->frac, gui_rgb(hex));
+        gui_bar(tx, ty, w, 10, bar_frac, gui_rgb(cancelling ? HEX_MUTED : hex));
         ty += 14;
-        if (p->left) gui_text(x, ty, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, p->left);
-        if (p->right) gui_text(x + w, ty, GUI_S_SMALL, gui_rgb(hex), GUI_RIGHT, p->right);
+        if (p->left) gui_text(tx, ty, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, p->left);
+        if (p->right) gui_text(tx + w, ty, GUI_S_SMALL, gui_rgb(hex), GUI_RIGHT, p->right);
         ty += lh_small + 6;
     }
     if (p->info1) {
-        gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info1);
+        gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info1);
         ty += lh_small;
     }
     if (p->info2) {
-        gui_text_fit(x, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info2);
+        gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w, p->info2);
         ty += lh_small;
     }
-    if (p->cancel_hint) {
-        float by = y + h - 22;
-        gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
-        float bx = DLG_X + 12;
-        bx += gui_text_mid(bx, by, 22, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, 0, "Hold ") ;
-        bx += gui_button(bx, by + 11.5f, "B") + 4;
-        gui_text_mid(bx, by, 22, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, 0, "to cancel");
+    if (x->wait_line) {
+        gui_text_fit(tx, ty, GUI_S_SMALL, gui_rgb(HEX_WARN), GUI_LEFT, w, x->wait_line);
+        ty += lh_small;
     }
+    if (x->pill) {
+        GuiRect draw;
+        card_buttons(y, h, 1, &draw, &progress_cancel_rect);
+        gui_btn(draw, "B", "Cancel", GUI_BTN_TONAL, hex, x->pill_pressed);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Background jobs
+// ---------------------------------------------------------------------------
+//
+// Threads: the main thread owns the GPU (citro2d), HID and APT; it runs
+// ui_run_job()'s loop, which draws the backdrop and the card, reads the
+// input and sets the cancel flag. The worker runs only the job's fn: the
+// network (httpc), the save archives (FS) and the hashing it already did on
+// the main thread before. Its ui_progress() / ui_busy() calls don't draw:
+// they copy the report (strings included) under job.lock for the main
+// thread to pick up, and ui_progress_cancel_poll() just reads the flag.
+// One worker at a time, at a lower priority on the same core, so it runs
+// while the main thread waits for the vblank.
+
+#define UI_JOB_STACK (64 * 1024)
+
+static struct {
+    Thread thread;          // a worker not yet joined (NULL = none)
+    Thread self;            // set by the worker itself: ui_progress() from it doesn't draw
+    UiJobFn fn;
+    void *ctx;
+    int done, cancel;       // atomics
+    bool result;
+    LightLock lock;         // guards report, has_report, serial, news_ms
+    bool lock_ready;
+    UiProgressCopy report;
+    bool has_report;
+    u32 serial;
+    u64 news_ms;
+    void *ctx_mem;          // ui_job_ctx() storage
+} job;
+
+static bool job_on_worker(void) {
+    Thread cur = threadGetCurrent();   // NULL on the main thread
+    return cur != NULL && cur == __atomic_load_n(&job.self, __ATOMIC_ACQUIRE);
+}
+
+static bool job_done(void) {
+    return __atomic_load_n(&job.done, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void job_entry(void *arg) {
+    (void)arg;
+    __atomic_store_n(&job.self, threadGetCurrent(), __ATOMIC_RELEASE);
+    job.result = job.fn(job.ctx);
+    __atomic_store_n(&job.done, 1, __ATOMIC_RELEASE);
+}
+
+// The worker's ui_progress(): hand the report over, never draw
+static void job_report(const UiProgress *p) {
+    LightLock_Lock(&job.lock);
+    ui_progress_copy(&job.report, p);
+    job.has_report = true;
+    job.news_ms = gui_clock_ms();
+    job.serial++;
+    LightLock_Unlock(&job.lock);
+}
+
+static void job_join(void) {
+    if (!job.thread) return;
+    threadJoin(job.thread, U64_MAX);
+    threadFree(job.thread);
+    job.thread = NULL;
+    __atomic_store_n(&job.self, NULL, __ATOMIC_RELEASE);
+}
+
+bool ui_job_cancelled(void) {
+    return __atomic_load_n(&job.cancel, __ATOMIC_ACQUIRE) != 0;
+}
+
+void ui_job_settle(void) {
+    if (!job.thread) return;
+    if (!job_done()) {
+        // A job the user cancelled is still waiting on the server; nothing
+        // else may use the network (or the save it reads) until it's done
+        C3D_FrameRate(30.0f);
+        char status[64];
+        snprintf(status, sizeof(status), "Finishing the request you cancelled%s", gui_ellipsis());
+        UiProgress p = { 0 };
+        p.title = "One moment";
+        p.status = status;
+        p.frac = -1;
+        ProgressExtras x = { NULL, false, false, false };
+        hidScanInput();
+        ui_input_latch_touch();
+        GuiModal modal;
+        modal_open(&modal, GUI_H / 2.0f);
+        UiInput in;
+        while (!job_done() && ui_input_scan(&in)) {
+            gui_begin(true);
+            gui_screen(GUI_TOP);
+            ui_draw_backdrop_top();
+            gui_screen(GUI_BOTTOM);
+            ui_draw_backdrop_bottom();
+            gui_modal_begin(&modal);
+            draw_progress_card(&p, -1, &x);
+            gui_modal_end(&modal);
+            gui_end();
+        }
+        gui_modal_close(&modal);
+        C3D_FrameRate(60.0f);
+        ui_input_latch_touch();
+    }
+    job_join();   // also when the app is closing: it must not outlive the services
+}
+
+// App exit: no worker may outlive the services (main.c settles before
+// closing them; this is the last resort)
+static void job_shutdown(void) {
+    ui_job_settle();
+    free(job.ctx_mem);
+    job.ctx_mem = NULL;
+}
+
+void *ui_job_ctx(size_t size) {
+    ui_job_settle();
+    free(job.ctx_mem);
+    job.ctx_mem = calloc(1, size ? size : 1);
+    return job.ctx_mem;
+}
+
+void ui_job_release(void *ctx) {
+    if (!ctx || ctx != job.ctx_mem || job.thread) return;   // a cancelled worker may still use it
+    free(job.ctx_mem);
+    job.ctx_mem = NULL;
+}
+
+bool ui_run_job_ex(UiJobFn fn, void *ctx, const UiProgress *initial, u32 flags, bool *cancelled_out) {
+    if (cancelled_out) *cancelled_out = false;
+    ui_job_settle();
+    // Only job-owned storage may outlive this call (a cancelled worker
+    // carries on with it): anything else can't be cancelled
+    bool cancellable = (flags & UI_JOB_CANCELLABLE) && ctx && ctx == job.ctx_mem;
+    bool quiet = (flags & UI_JOB_QUIET) != 0;
+
+    if (!job.lock_ready) {
+        LightLock_Init(&job.lock);
+        job.lock_ready = true;
+    }
+    job.fn = fn;
+    job.ctx = ctx;
+    job.result = false;
+    __atomic_store_n(&job.self, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&job.done, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&job.cancel, 0, __ATOMIC_RELEASE);
+    ui_progress_copy(&job.report, initial);
+    job.has_report = initial != NULL;
+    job.serial = 0;
+    job.news_ms = gui_clock_ms();
+
+    // A larger number is a lower priority: the worker runs while the main
+    // thread waits for the vblank, never in the middle of a frame
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (prio < 0x3F) prio++;
+    job.thread = threadCreate(job_entry, NULL, UI_JOB_STACK, prio, -2, false);
+    if (!job.thread) {
+        // No thread (out of memory): run it here, as before, the card at rest
+        if (initial && !quiet) ui_progress(initial);
+        return fn(ctx);
+    }
+
+    C3D_FrameRate(30.0f);
+    hidScanInput();
+    ui_input_latch_touch();
+    GuiModal modal;
+    bool card = false, pill = false, pill_drawn = false, cancelled = false, closing = false;
+    UiTap tap = UI_TAP_INIT;
+    UiProgressCopy shown;
+    ui_progress_copy(&shown, initial);
+    u32 seen = 0;
+    UiInput in;
+    while (!job_done()) {
+        if (!ui_input_scan(&in)) {
+            closing = true;
+            break;
+        }
+        LightLock_Lock(&job.lock);
+        bool has = job.has_report;
+        u64 news = job.news_ms;
+        if (job.serial != seen) {
+            ui_progress_copy(&shown, &job.report.p);
+            seen = job.serial;
+        }
+        LightLock_Unlock(&job.lock);
+
+        UiJobWait w = ui_job_wait_state(in.t_ms, news, cancellable, shown.p.cancel_hint);
+        pill |= w.cancel;   // once offered, it stays
+        if (has && !card && (!quiet || w.waiting || pill)) {
+            modal_open(&modal, GUI_H / 2.0f);
+            card = true;
+        }
+        int pressed = -1;
+        if (card && pill_drawn) {
+            // Commits on touch-up (the loop sees every frame), or B
+            if (ui_tap_buttons(&tap, &in, &progress_cancel_rect, 1, &pressed) == 0 || (in.down & KEY_B)) {
+                cancelled = true;
+                break;
+            }
+        }
+
+        char wait_line[64], clock[16];
+        if (w.waiting) {
+            ui_format_wait(w.seconds, clock, sizeof(clock));
+            snprintf(wait_line, sizeof(wait_line), "Waiting for the server%s %s", gui_ellipsis(), clock);
+        }
+        float bar = smooth_progress(&shown.p);
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        ui_draw_backdrop_top();
+        gui_screen(GUI_BOTTOM);
+        ui_draw_backdrop_bottom();
+        if (card) {
+            ProgressExtras x = { w.waiting ? wait_line : NULL, pill, pressed == 0, false };
+            gui_modal_begin(&modal);
+            draw_progress_card(&shown.p, bar, &x);
+            gui_modal_end(&modal);
+            pill_drawn = pill;
+        }
+        gui_end();
+    }
+    C3D_FrameRate(60.0f);
+    if (card) gui_modal_close(&modal);
+    ui_input_latch_touch();
+
+    if (cancelled || closing) __atomic_store_n(&job.cancel, 1, __ATOMIC_RELEASE);
+    if (cancelled) {
+        // The result is abandoned: the worker finishes on its own (into
+        // its job-owned ctx) and the next job or network use waits for it
+        if (cancelled_out) *cancelled_out = true;
+        return false;
+    }
+    // Done, or the app is closing: a write that has begun is never cut off
+    job_join();
+    if (closing && cancellable) {
+        if (cancelled_out) *cancelled_out = true;
+        return false;
+    }
+    return job.result;
+}
+
+bool ui_run_job(UiJobFn fn, void *ctx, const UiProgress *initial, bool cancellable, bool *cancelled_out) {
+    return ui_run_job_ex(fn, ctx, initial, cancellable ? UI_JOB_CANCELLABLE : 0, cancelled_out);
+}
+
+void ui_progress(const UiProgress *p) {
+    if (job_on_worker()) {
+        job_report(p);
+        return;
+    }
+    if (!p->cancel_hint) progress_cancelling = false;   // another operation
+    bool cancelling = p->cancel_hint && progress_cancelling;
+    float bar_frac = smooth_progress(p);
+    gui_begin(false);
+    gui_screen(GUI_TOP);
+    ui_draw_backdrop_top();
+    gui_screen(GUI_BOTTOM);
+    ui_draw_backdrop_bottom();
+    // A bare frame (no loop around it to animate in, frames come when the
+    // work has news): the card at rest over a full scrim
+    gui_scrim_full();
+    gui_scrim_draw();
+    ProgressExtras x = { NULL, p->cancel_hint, cancelling, cancelling };
+    draw_progress_card(p, bar_frac, &x);
+    progress_cancel_shown = p->cancel_hint;
     gui_end();
+}
+
+bool ui_progress_cancel_poll(void) {
+    // Inside a job: the main thread reads the input and sets the flag
+    if (job_on_worker()) return ui_job_cancelled();
+    if (progress_cancelling) return true;
+    UiInput in;
+    if (!ui_input_scan(&in)) {
+        progress_cancelling = true;   // the app is closing
+        return true;
+    }
+    if ((in.held & KEY_B) ||
+        (progress_cancel_shown && in.t_held && gui_rect_contains(progress_cancel_rect, in.tx, in.ty)))
+        progress_cancelling = true;
+    return progress_cancelling;
 }
 
 void ui_busy(const char *title, const char *message) {
@@ -313,69 +822,100 @@ void ui_busy(const char *title, const char *message) {
 #define CHOICE_ROWS 7
 #define CHOICE_ROW_H 22
 
-static void draw_choice(UiTone tone, const char *title, const char *const *items, int count,
-                        int selected, int scroll, float *list_y) {
-    int rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
-    float h = 24 + 6 + rows * CHOICE_ROW_H + 6 + 24;
-    float y = (GUI_H - h) / 2;
-    u32 hex = ui_tone_hex(tone);
-    gui_dim();
-    gui_card(DLG_X, y, DLG_W, h, title, hex);
-    float ly = y + 24 + 6;
-    *list_y = ly;
-    for (int i = 0; i < rows; i++) {
-        int index = scroll + i;
-        float ry = ly + i * CHOICE_ROW_H;
-        bool on = (index == selected);
-        if (on) gui_rrect(DLG_X + 6, ry + 1, DLG_W - 12, CHOICE_ROW_H - 2, 5, gui_rgb(HEX_ACCENT));
-        gui_text_mid(DLG_X + 16, ry, CHOICE_ROW_H, GUI_S_BODY, gui_rgb(on ? HEX_INK : HEX_TEXT), GUI_LEFT,
-                     DLG_W - 32, items[index]);
-    }
-    if (count > rows)
-        gui_scrollbar(DLG_X + DLG_W - 5, ly + 2, rows * CHOICE_ROW_H - 4, scroll, rows, count, (float)scroll);
-    static const UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", "Select" } };
-    float by = y + h - 24;
-    gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
-    float x = DLG_X + DLG_W - 12 - buttons_width(b, 2);
-    for (int i = 0; i < 2; i++) {
-        if (i) x += 12;
-        x += gui_button(x, by + 12.5f, b[i].button) + 4;
-        x += gui_text_mid(x, by, 24, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, 0, b[i].label);
-    }
+
+typedef struct {
+    const char *const *items;
+} ChoiceView;
+
+static void choice_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
+    const ChoiceView *c = ctx;
+    gui_text_mid(x + 13, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, w - 26, c->items[index]);
 }
 
-int ui_choose(UiTone tone, const char *title, const char *const *items, int count) {
+static const UiButton choice_buttons[2] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", "Select" } };
+
+typedef struct {
+    int rows;
+    float y, h;
+    UiListGeom list;
+    GuiRect draw[2], touch[2];
+} ChoiceGeom;
+
+static void choice_geom(int count, ChoiceGeom *g) {
+    g->rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
+    g->h = 24 + 4 + g->rows * CHOICE_ROW_H + 2 + DLG_BTN_AREA;
+    g->y = (GUI_H - g->h) / 2;
+    UiListGeom list = { DLG_X + 3, g->y + 24 + 4, DLG_W - 6, g->rows, CHOICE_ROW_H, true, false };
+    g->list = list;
+    card_buttons(g->y, g->h, 2, g->draw, g->touch);
+}
+
+static void draw_choice(UiTone tone, const char *title, const char *const *items, int count,
+                        int selected, int scroll, UiListAnim *anim, const ChoiceGeom *g,
+                        int pressed, u32 held, GuiModal *m) {
+    u32 hex = ui_tone_hex(tone);
+    gui_modal_begin(m);
+    gui_card(DLG_X, g->y, DLG_W, g->h, title, hex);
+    ChoiceView c = { items };
+    // Clipped to the card's list area, so rows can glide and be dragged
+    ui_list_draw(anim, &g->list, count, selected, scroll, choice_row, &c);
+    for (int i = 0; i < 2; i++)
+        gui_btn(g->draw[i], choice_buttons[i].button, choice_buttons[i].label,
+                i == 1 ? GUI_BTN_PRIMARY : GUI_BTN_TONAL, hex,
+                pressed == i || (held & choice_buttons[i].keys));
+    gui_modal_end(m);
+}
+
+int ui_choose_ex(UiTone tone, const char *title, const char *const *items, int count, int initial) {
     if (count <= 0) return -1;
-    int selected = 0, scroll = 0;
-    int rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
+    if (initial < 0 || initial >= count) initial = 0;
+    int selected = initial, scroll = 0, result = -1;
+    ChoiceGeom g;
+    choice_geom(count, &g);
+    // Open on the current value, in view
+    if (selected >= g.rows) scroll = selected - g.rows + 1;
+    UiListAnim anim = { 0 };
+    UiTap tap = UI_TAP_INIT;
+    u32 armed = 0;
     hidScanInput();
-    while (aptMainLoop()) {
-        float list_y = 0;
+    ui_input_latch_touch();
+    GuiModal modal;
+    modal_open(&modal, g.y + g.h / 2);
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        armed = (armed | in.down) & in.held;
+        UiListEvent ev = ui_list_input(&anim, &g.list, count, &selected, &scroll, &in, in.rep & UI_LIST_KEYS);
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
+            ui_list_keys(&anim, in.rep, count, g.rows, &selected);
+            if (selected < scroll) scroll = selected;
+            if (selected >= scroll + g.rows) scroll = selected - g.rows + 1;
+        }
+        // Any tap on a row picks it, on release
+        if (ev.kind == UI_LIST_TAP || ev.kind == UI_LIST_TAP_SELECTED) {
+            result = ev.index;
+            break;
+        }
+        int pressed = -1;
+        int hit = ui_tap_buttons(&tap, &in, g.touch, 2, &pressed);
+        if (hit == 0 || (in.down & KEY_B)) break;
+        if (hit == 1 || (in.down & KEY_A)) { result = selected; break; }
+
         gui_begin(true);
         gui_screen(GUI_TOP);
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_choice(tone, title, items, count, selected, scroll, &list_y);
+        draw_choice(tone, title, items, count, selected, scroll, &anim, &g, pressed, in.held & armed, &modal);
         gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        if (rep & KEY_UP) selected = (selected - 1 + count) % count;
-        if (rep & KEY_DOWN) selected = (selected + 1) % count;
-        if (rep & KEY_LEFT) selected = selected - rows < 0 ? 0 : selected - rows;
-        if (rep & KEY_RIGHT) selected = selected + rows >= count ? count - 1 : selected + rows;
-        if (selected < scroll) scroll = selected;
-        if (selected >= scroll + rows) scroll = selected - rows + 1;
-        if (down & KEY_TOUCH) {
-            // A tap picks the row right away
-            int i = ui_list_touch(list_y, rows, CHOICE_ROW_H, count, scroll);
-            if (i >= 0) return i;
-        }
-        if (down & KEY_B) return -1;
-        if (down & KEY_A) return selected;
     }
-    return -1;
+    gui_modal_close(&modal);
+    ui_input_latch_touch();
+    return result;
+}
+
+int ui_choose(UiTone tone, const char *title, const char *const *items, int count) {
+    return ui_choose_ex(tone, title, items, count, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -386,6 +926,22 @@ static const char *const tab_labels[UI_TAB_COUNT] = { "Saves", "Catalog", "Setti
 
 void ui_tab_header(int active) {
     gui_header_tabs(tab_labels, UI_TAB_COUNT, active);
+}
+
+// The tabs' content (not their header bars or action bars) enters from the
+// side of the shoulder button that was pressed
+static GuiTransition tab_transition;
+
+void ui_tab_transition(float from_px) {
+    gui_transition_start(&tab_transition, from_px);
+}
+
+void ui_tab_content_begin(void) {
+    gui_transition_begin(&tab_transition);
+}
+
+void ui_tab_content_end(void) {
+    gui_transition_end();
 }
 
 UiNav ui_tab_nav(u32 down) {
@@ -404,44 +960,115 @@ UiNav ui_tab_nav(u32 down) {
 // List
 // ---------------------------------------------------------------------------
 
-void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
-             int count, int selected, int scroll, UiRowFn row, void *ctx) {
-    if (!a->init || a->count != count) {
-        a->sel = selected;
-        a->scroll = scroll;
-        a->count = count;
-        a->init = true;
-    }
-    // Long jumps snap, short moves glide
-    if (fabsf(a->sel - selected) > rows) a->sel = selected;
-    if (fabsf(a->scroll - scroll) > rows) a->scroll = scroll;
-    gui_ease(&a->sel, (float)selected, 0.4f);
-    gui_ease(&a->scroll, (float)scroll, 0.4f);
-
-    bool bar = count > rows;
-    float rw = bar ? w - 7 : w;
-    if (count > 0 && selected >= 0) {
-        float sy = y + (a->sel - a->scroll) * row_h;
-        gui_rrect(x + 3, sy + 1, rw - 6, row_h - 2, 5, gui_rgb(HEX_ACCENT));
-    }
-    int first = (int)a->scroll;
-    for (int i = first; i <= first + rows && i < count; i++) {
-        if (i < 0) continue;
-        float ry = y + (i - a->scroll) * row_h;
-        if (ry < y - row_h || ry > y + rows * row_h) continue;
-        row(ctx, i, x, ry, rw, row_h, i == selected);
-    }
-    // Mask the row sliding out at the bottom
-    gui_rect(x, y + rows * row_h, w, row_h, gui_rgb(HEX_BG));
-    if (bar) gui_scrollbar(x + w - 6, y + 3, rows * row_h - 6, scroll, rows, count, a->scroll);
+// 1 at `since_ms`, falling to 0 over GUI_FADE_MS (0 when `since_ms` is 0)
+static float edge_fade(u64 since_ms) {
+    u64 now = gui_now_ms();
+    if (!since_ms || now < since_ms || now - since_ms >= GUI_FADE_MS) return 0;
+    return 1.0f - (float)(now - since_ms) / GUI_FADE_MS;
 }
 
-int ui_list_touch(float y, int rows, float row_h, int count, int scroll) {
-    touchPosition t;
-    hidTouchRead(&t);
-    if (t.py < y || t.py >= y + rows * row_h) return -1;
-    int i = scroll + (int)((t.py - y) / row_h);
-    return (i >= 0 && i < count) ? i : -1;
+bool ui_list_at_top(const UiListAnim *a) {
+    return !a->init || ui_list_view(a) <= 0.01f;
+}
+
+void ui_list_draw(UiListAnim *a, const UiListGeom *g, int count, int selected, int scroll,
+                  UiRowFn row, void *ctx) {
+    // Once a frame, also when drawn behind a dialog or a progress card
+    if (!a->init || a->frame != gui_ticks()) {
+        a->frame = gui_ticks();
+        ui_list_step(a, g->rows, g->row_h, count, selected, scroll, gui_dt());
+    }
+#ifdef GUI_PERF
+    // A coast running faster than its release velocity must never happen:
+    // the overlay shows the count in red if it does
+    if (a->coast_overspeed > gui_perf_coast_overspeed) gui_perf_coast_overspeed = a->coast_overspeed;
+#endif
+    float view = ui_list_view(a);
+    float list_h = g->rows * g->row_h;
+    if (g->clip) gui_clip(g->x, g->y, g->w, list_h);
+
+    // After a wrap the rows fade in from 30% (toward the background)
+    float wrap = edge_fade(a->wrap_ms);
+    float fade_prev = gui_fade_push(0.7f * wrap);
+
+    bool bar = count > g->rows;
+    float rw = bar ? g->w - 7 : g->w;
+    int pressed = ui_list_pressed_row(a);
+    bool pressed_on_bar = pressed >= 0 && fabsf((float)pressed - a->sel.x) < 0.5f && selected >= 0;
+    // The row under a finger: a soft fill (on the bar the bar darkens instead)
+    if (pressed >= 0 && !pressed_on_bar)
+        gui_rrect(g->x + 3, g->y + (pressed - view) * g->row_h + 1, rw - 6, g->row_h - 2, 5,
+                  gui_mix(HEX_BG, HEX_ACCENT, 0.25f));
+    if (count > 0 && selected >= 0) {
+        float sy = g->y + (a->sel.x - view) * g->row_h + a->nudge.x;
+        gui_rrect(g->x + 3, sy + 1, rw - 6, g->row_h - 2, 5,
+                  pressed_on_bar ? gui_mix(HEX_ACCENT, 0x000000, 0.20f) : gui_rgb(HEX_ACCENT));
+    }
+    int first = (int)floorf(view);
+    for (int i = first; i <= first + g->rows + 1 && i < count; i++) {
+        if (i < 0) continue;
+        float ry = g->y + (i - view) * g->row_h;
+        float hl = 1.0f - fabsf((float)i - a->sel.x);
+        if (hl < 0 || selected < 0) hl = 0;
+        row(ctx, i, g->x, ry, rw, g->row_h, hl, i == pressed);
+    }
+    gui_fade_pop(fade_prev);
+    if (g->clip) gui_clip_off();
+
+    // Content under the header / the action bar: a soft shadow instead of
+    // a hard line (the header draws its line only while the list is at
+    // the top, see ui_list_at_top)
+    if (g->edges)
+        gui_scroll_edges(g->x, g->w, g->y, g->y + list_h, view > 0.01f, view + g->rows < count - 0.01f);
+
+    // The thumb flashes bright at an edge and settles back to dim
+    if (bar)
+        gui_scrollbar_ex(g->x + g->w - 6, g->y + 3, list_h - 6, g->rows, count, view,
+                         gui_mix_hex(HEX_DIM, HEX_TEXT, edge_fade(a->flash_ms)));
+}
+
+// ---------------------------------------------------------------------------
+// Action bar
+// ---------------------------------------------------------------------------
+
+float ui_bar_layout(const UiBarItem *items, int n, GuiRect *draw, GuiRect *touch) {
+    if (n > UI_BAR_MAX) n = UI_BAR_MAX;
+    const float margin = 8, gap = GUI_BTN_GAP, by = GUI_BAR_Y + (GUI_BAR_H - GUI_BTN_H) / 2;
+    float inner = GUI_BOT_W - 2 * margin;
+    float w0 = items[0].width > 0 ? items[0].width : gui_btn_content_w(items[0].glyph, items[0].label) + 24;
+    if (items[0].width <= 0 && w0 < 120) w0 = 120;
+    float rest = n > 1 ? (inner - w0 - gap * (n - 1)) / (n - 1) : 0;
+    if (n > 1 && rest < GUI_BTN_MIN_W) rest = GUI_BTN_MIN_W;
+    float x = margin;
+    for (int i = 0; i < n; i++) {
+        float w = i == 0 ? w0 : (items[i].width > 0 ? items[i].width : rest);
+        draw[i] = gui_rect_make(x, by, w, GUI_BTN_H);
+        float tx0 = i == 0 ? 0 : x - gap / 2, tx1 = i == n - 1 ? GUI_BOT_W : x + w + gap / 2;
+        touch[i] = gui_rect_make(tx0, GUI_BAR_Y, tx1 - tx0, GUI_BAR_H);
+        x += w + gap;
+    }
+    return x - gap;
+}
+
+int ui_bar_input(UiBar *bar, const UiInput *in, const UiBarItem *items, int n) {
+    GuiRect draw[UI_BAR_MAX], touch[UI_BAR_MAX];
+    if (n > UI_BAR_MAX) n = UI_BAR_MAX;
+    ui_bar_layout(items, n, draw, touch);
+    for (int i = 0; i < n; i++)
+        if (items[i].style == GUI_BTN_DISABLED) touch[i].w = 0;
+    return ui_tap_buttons(&bar->tap, in, touch, n, &bar->pressed);
+}
+
+void ui_bar_draw(const UiBar *bar, const UiBarItem *items, int n, u32 held) {
+    GuiRect draw[UI_BAR_MAX], touch[UI_BAR_MAX];
+    if (n > UI_BAR_MAX) n = UI_BAR_MAX;
+    gui_rect(0, GUI_BAR_Y, GUI_BOT_W, GUI_BAR_H, gui_rgb(HEX_BG2));
+    if (n <= 0) return;
+    ui_bar_layout(items, n, draw, touch);
+    for (int i = 0; i < n; i++) {
+        bool pressed = (bar && bar->pressed == i) || (items[i].keys & held);
+        gui_btn_ex(draw[i], items[i].glyph, items[i].label, items[i].style, items[i].tone, pressed, items[i].on);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,7 +1098,7 @@ static bool is_cart(const TitleInfo *t) {
 static const char *system_tag(const TitleInfo *t, u32 *hex) {
     if (is_cart(t)) {
         *hex = HEX_CART;
-        return "CART";
+        return "Cart";
     }
     if (t->is_nds) {
         *hex = HEX_NDS;
@@ -482,35 +1109,172 @@ static const char *system_tag(const TitleInfo *t, u32 *hex) {
 }
 
 static void kv(float x, float y, float label_w, float w, const char *label, const char *value, u32 color) {
-    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, label);
+    gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, label);
     gui_text_fit(x + label_w, y, GUI_S_SMALL, gui_rgb(color), GUI_LEFT, w - label_w, value);
 }
 
-static void draw_status_toast(const char *status, UiTone tone) {
+// The last action's result. A new message (serial changed) rises 6 px and
+// fades in, its background flashing in the tone and settling over 400 ms;
+// after 4 s the text dims and the tone bar fades to 40%, so old news stops
+// looking current. Reduced motion: the fade only.
+static void draw_status_toast(const char *status, UiTone tone, u32 serial) {
     if (!status || !status[0]) return;
-    float y = 190, h = 22;
+    static u32 last_serial, frame;
+    static bool seen;
+    static u64 enter_ms;
+    static GuiSpring rise;
+    u64 now = gui_now_ms();
+    if (!seen || serial != last_serial) {
+        seen = true;
+        last_serial = serial;
+        enter_ms = now ? now : 1;
+        gui_spring_set(&rise, 6);
+        frame = gui_ticks() - 1;
+    }
+    if (frame != gui_ticks()) {   // once a frame, also when drawn behind a dialog
+        frame = gui_ticks();
+        gui_spring(&rise, 0, GUI_RESP_MODAL, gui_dt());
+    }
+    float fade = gui_reduce_motion() ? 1 - gui_effect_t(enter_ms, now, GUI_FADE_MS) : rise.x / 6.0f;
+    float flash = 1 - gui_effect_t(enter_ms, now, GUI_TOAST_FLASH_MS);
+    bool stale = now > enter_ms && now - enter_ms >= GUI_TOAST_STALE_MS;
+
+    float y = 190 + rise.x, h = 22;
     u32 hex = ui_tone_hex(tone);
-    gui_rrect(8, y, GUI_TOP_W - 16, h, 6, gui_rgb(HEX_BG2));
-    gui_rrect(8, y, 4, h, 2, gui_rgb(hex));
-    gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
+    float fade_prev = gui_fade_push(fade);
+    gui_rrect(8, y, GUI_TOP_W - 16, h, 6, gui_mix(HEX_BG2, hex, 0.25f * flash));
+    gui_rrect(8, y, 4, h, 2, stale ? gui_mix(HEX_BG2, hex, 0.4f) : gui_rgb(hex));
+    gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(stale ? HEX_DIM : HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
+    gui_fade_pop(fade_prev);
+}
+
+static void size_files(u32 size, int files, char *out, size_t out_size);
+
+// The last compare of a save, in words (the Saves top screen): what
+// changed, the server's copy, when it was last synced. No hashes.
+typedef struct {
+    u32 hex;
+    char head[64];     // "Only the server changed"
+    char sub[96];      // "Another device · AB12, Oct 12 21:14" / a reason
+    char server[64];   // "Server: 12.0 KB · 2 files"
+    char last[64];     // "Last synced: just now"
+} SavesVerdict;
+
+static void saves_verdict(const SaveDetails *d, u64 synced_ms, SavesVerdict *out) {
+    char ago[32] = "", when[40], device[40];
+    if (synced_ms) ui_format_ago(gui_clock_ms() - synced_ms, ago, sizeof(ago));
+    ui_format_when(d->server_last_sync, when, sizeof(when));
+    ui_device_label(d->server_console_id, device, sizeof(device));
+    out->sub[0] = out->server[0] = out->last[0] = '\0';
+
+    SyncAction a = sync_decide(d);
+    switch (a) {
+        case SYNC_ACTION_SERVER_ERROR:
+            out->hex = HEX_ERR;
+            snprintf(out->head, sizeof(out->head), "Couldn't reach the server");
+            if (d->server_status)
+                snprintf(out->sub, sizeof(out->sub), "It answered with HTTP %lu. Nothing was changed.",
+                         (unsigned long)d->server_status);
+            else
+                snprintf(out->sub, sizeof(out->sub), "%s", d->server_error_msg[0] ? d->server_error_msg
+                                                                                  : "No answer. Nothing was changed.");
+            return;
+        case SYNC_ACTION_UPLOAD:
+            out->hex = HEX_WARN;
+            snprintf(out->head, sizeof(out->head), "%s",
+                     d->server_exists ? "Only this console changed" : "Not on the server yet");
+            break;
+        case SYNC_ACTION_DOWNLOAD:
+            out->hex = HEX_INFO;
+            if (d->local_exists) {
+                snprintf(out->head, sizeof(out->head), "Only the server changed");
+                snprintf(out->sub, sizeof(out->sub), "%s, %s", device, when);
+            } else {
+                snprintf(out->head, sizeof(out->head), "No save on this console yet");
+            }
+            break;
+        case SYNC_ACTION_CONFLICT:
+            out->hex = HEX_ERR;
+            snprintf(out->head, sizeof(out->head), "%s",
+                     d->has_last_synced ? "Both changed" : "Differs, no sync record");
+            break;
+        default:
+            out->hex = HEX_OK;
+            if (!d->local_exists && !d->server_exists)
+                snprintf(out->head, sizeof(out->head), "No save anywhere yet");
+            else if (ago[0])
+                snprintf(out->head, sizeof(out->head), "Matches the server \xC2\xB7 %s", ago);
+            else
+                snprintf(out->head, sizeof(out->head), "Matches the server");
+            break;
+    }
+    if (d->server_exists) {
+        char sf[48];
+        size_files(d->server_size, d->server_file_count, sf, sizeof(sf));
+        snprintf(out->server, sizeof(out->server), "Server: %s", sf);
+    } else {
+        snprintf(out->server, sizeof(out->server), "Server: no save");
+    }
+    // When it was last synced: this session (monotonic), else the server's
+    // date when its copy is the one last synced here
+    if (ago[0])
+        snprintf(out->last, sizeof(out->last), "Last synced: %s", ago);
+    else if (d->has_last_synced && d->server_exists && strcmp(d->last_synced_hash, d->server_hash) == 0)
+        snprintf(out->last, sizeof(out->last), "Last synced: %s", when);
+    else if (!d->has_last_synced)
+        snprintf(out->last, sizeof(out->last), "Never synced from here");
+    else if (d->server_exists)
+        snprintf(out->last, sizeof(out->last), "Server copy from %s", when);
+}
+
+// "zel" in quotes, cut to 10 characters
+static void search_label(const char *search, char *out, size_t size) {
+    char q[64];
+    bool cut = ui_utf8_prefix(search, 10, q, sizeof(q));
+    snprintf(out, size, "\"%s%s\"", q, cut ? gui_ellipsis() : "");
 }
 
 void ui_draw_saves_top(const SavesView *v) {
     ui_tab_header(UI_TAB_SAVES);
-    static const GuiHint hints[] = {
-        { "SELECT", "All/3DS/NDS" }, { "LR", "Page" }, { "START", "Exit" },
-    };
+    bool searching = v->search && v->search[0];
+    GuiHint hints[5];
+    int nh = 0;
+    hints[nh++] = (GuiHint){ "SELECT", "All/3DS/NDS" };
+    hints[nh++] = (GuiHint){ "LR", "Page" };
+    if (new3ds) hints[nh++] = (GuiHint){ "ZR", "Search" };
+    // B clears the search only while nothing is marked (else it unmarks)
+    if (searching && v->marked <= 0) hints[nh++] = (GuiHint){ "B", "Clear search" };
+    hints[nh++] = (GuiHint){ "START", "Exit" };
+    ui_tab_content_begin();
 
     if (v->count == 0 || v->selected < 0 || v->selected >= v->count) {
         gui_panel(8, 34, GUI_TOP_W - 16, 148);
-        gui_text(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, "No saves here");
-        gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
-                 v->view_mode == VIEW_ALL ? "No titles with save data were found."
-                                          : "Nothing in this view. Press SELECT to switch.");
-        gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
-                 "L / R switch to the game catalog and the settings.");
-        draw_status_toast(v->status, v->status_tone);
-        gui_footer(hints, 3);
+        // The same condition as the bottom screen's search-empty state
+        if (searching) {
+            char q[80], line[112];
+            search_label(v->search, q, sizeof(q));
+            snprintf(line, sizeof(line), "No saves match %s", q);
+            gui_text_fit(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, GUI_TOP_W - 40, line);
+            gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     v->marked > 0 ? "Clear the search with the button on the touch screen."
+                                   : "B clears the search.");
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     new3ds ? "ZR or the search chip changes it." : "The search chip changes it.");
+            if (v->view_total == 0)
+                gui_text(GUI_TOP_W / 2.0f, 138, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                         v->view_mode == VIEW_ALL ? "No titles with save data were found."
+                                                  : "This view is empty too. SELECT switches it.");
+        } else {
+            gui_text(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, "No saves here");
+            gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     v->view_mode == VIEW_ALL ? "No titles with save data were found."
+                                              : "Nothing in this view. Press SELECT to switch.");
+            gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                     "L / R switch to the game catalog and the settings.");
+        }
+        draw_status_toast(v->status, v->status_tone, v->status_serial);
+        ui_tab_content_end();
+        gui_footer(hints, nh);
         return;
     }
 
@@ -528,7 +1292,7 @@ void ui_draw_saves_top(const SavesView *v) {
     const char *tag = system_tag(t, &hex);
     float pxx = x;
     pxx += gui_pill(pxx, y, 15, GUI_S_TINY, gui_mix(HEX_PANEL, hex, 0.3f), gui_rgb(hex), tag) + 5;
-    if (t->marked) pxx += gui_pill(pxx, y, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "MARKED") + 5;
+    if (t->marked) pxx += gui_pill(pxx, y, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Marked") + 5;
     const char *state = state_label(t, &hex);
     if (state) {
         float sw = gui_pill_w(15, GUI_S_TINY, state) + 10;
@@ -537,125 +1301,361 @@ void ui_draw_saves_top(const SavesView *v) {
         gui_text_mid(pxx + 14, y, 15, GUI_S_TINY, gui_rgb(hex), GUI_LEFT, 0, state);
         pxx += sw + 5;
     }
-    y += 22;
+    y += 19;
+    // The ids stay visible, but as a caption
+    gui_textf(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "%s \xC2\xB7 %s", t->title_id_hex,
+              t->product_code[0] ? t->product_code : "no product code");
+    y += gui_line_h(GUI_S_SMALL) + 5;
 
-    // Left column: the title. Right column: the last compare.
+    // Left column: where the save lives. Right column: what the last
+    // compare found, in words.
     float colw = (pw - 36) / 2, lh = gui_line_h(GUI_S_SMALL) + 1;
     float lx = x, rx = x + colw + 12;
-    gui_rect(rx - 7, y, 1, ph - (y - py) - 10, gui_rgb(HEX_LINE));
+    gui_rect(rx - 7, y, 1, ph - (y - py) - 8, gui_rgb(HEX_LINE));
 
-    kv(lx, y, 54, colw, "Title ID", t->title_id_hex, HEX_TEXT);
-    kv(lx, y + lh, 54, colw, "Product", t->product_code[0] ? t->product_code : "-", HEX_TEXT);
     const char *media = t->is_nds ? (is_cart(t) ? "DS game card" : "SD card (.sav)")
                                   : (is_cart(t) ? "Game card" : "SD card");
-    kv(lx, y + 2 * lh, 54, colw, "Storage", media, HEX_TEXT);
+    kv(lx, y, 54, colw, "Storage", media, HEX_TEXT);
     if (t->is_nds && !is_cart(t) && t->sav_path[0]) {
         const char *base = strrchr(t->sav_path, '/');
-        kv(lx, y + 3 * lh, 54, colw, "Save file", base ? base + 1 : t->sav_path, HEX_DIM);
+        kv(lx, y + lh, 54, colw, "Save file", base ? base + 1 : t->sav_path, HEX_DIM);
     } else if (is_cart(t)) {
-        gui_text_fit(lx, y + 3 * lh, GUI_S_SMALL, gui_rgb(HEX_CART), GUI_LEFT, colw,
-                     "Cartridge: not part of Sync All");
+        gui_text_wrap(lx, y + lh, GUI_S_SMALL, gui_rgb(HEX_CART), colw, 2,
+                      "Cartridge: not part of Sync All. Sync it with A.");
     }
 
-    const SaveDetails *d = v->details;
-    if (d) {
-        char size[24], line[96];
-        if (d->local_exists) {
-            format_size(d->local_size, size, sizeof(size));
-            snprintf(line, sizeof(line), "%s \xC2\xB7 %.8s", size, d->local_hash);
-        } else {
-            snprintf(line, sizeof(line), "No save");
+    if (t->sync_state == TSTATE_FAILED && !t->in_conflict && !v->details) {
+        // Why the last transfer of this save failed (and that A retries it)
+        gui_text(rx, y, GUI_S_BODY, gui_rgb(HEX_ERR), GUI_LEFT, "Sync failed");
+        float ry = y + gui_line_h(GUI_S_BODY) + 1;
+        int n = gui_text_wrap(rx, ry, GUI_S_SMALL, gui_rgb(HEX_ERR), colw, 3,
+                              t->last_error[0] ? t->last_error : "No reason recorded");
+        ry += n * lh + 2;
+        float cy = ry + lh / 2;
+        float bx = rx + gui_button(rx, cy, "A") + 5;
+        gui_text(bx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Check and sync again");
+    } else if (v->details) {
+        SavesVerdict sv;
+        saves_verdict(v->details, v->synced_ms, &sv);
+        float ry = y;
+        int n = gui_text_wrap(rx, ry, GUI_S_BODY, gui_rgb(sv.hex), colw, 2, sv.head);
+        ry += n * gui_line_h(GUI_S_BODY) + 1;
+        if (sv.sub[0]) {
+            n = gui_text_wrap(rx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), colw, 2, sv.sub);
+            ry += n * lh;
         }
-        kv(rx, y, 50, colw, "Console", line, HEX_TEXT);
-        if (d->server_error) {
-            if (d->server_status)
-                snprintf(line, sizeof(line), "Error (HTTP %lu)", (unsigned long)d->server_status);
-            else
-                snprintf(line, sizeof(line), "No response");
-        } else if (d->server_exists) {
-            format_size(d->server_size, size, sizeof(size));
-            snprintf(line, sizeof(line), "%s \xC2\xB7 %.8s", size, d->server_hash);
-        } else {
-            snprintf(line, sizeof(line), "Not uploaded");
+        if (sv.server[0]) {
+            gui_text_fit(rx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, colw, sv.server);
+            ry += lh;
         }
-        kv(rx, y + lh, 50, colw, "Server", line, d->server_error ? HEX_ERR : HEX_TEXT);
-        char date[32];
-        format_date(d->server_last_sync, date, sizeof(date));
-        kv(rx, y + 2 * lh, 50, colw, "Synced", d->server_exists ? date : "-", HEX_DIM);
-        kv(rx, y + 3 * lh, 50, colw, "Last ok", d->has_last_synced ? d->last_synced_hash : "never", HEX_DIM);
+        if (sv.last[0]) gui_text_fit(rx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, colw, sv.last);
     } else {
-        gui_text(rx, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, "Save");
-        float bx = rx;
-        bx += gui_text(bx, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Press ") ;
-        bx += gui_button(bx, y + lh + lh / 2 - 0.5f, "A") + 3;
-        gui_text(bx, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "to compare");
-        gui_text(rx, y + 2 * lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "with the server copy.");
+        // A runs Smart Sync, which compares first and always asks
+        float cy = y + gui_line_h(GUI_S_BODY) / 2;
+        float bx = rx + gui_button(rx, cy, "A") + 6;
+        gui_text(bx, y, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, "Check and sync");
+        gui_text_wrap(rx, y + gui_line_h(GUI_S_BODY) + 2, GUI_S_SMALL, gui_rgb(HEX_DIM), colw, 3,
+                      "Compares first and asks before changing anything.");
     }
 
-    draw_status_toast(v->status, v->status_tone);
-    gui_footer(hints, 3);
+    draw_status_toast(v->status, v->status_tone, v->status_serial);
+    ui_tab_content_end();
+    gui_footer(hints, nh);
 }
 
-static void saves_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+// The row's state badge: a 12 px disc in the state's colour with an ink
+// glyph, so conflict (!) and failure (x) differ without colour too
+static void state_badge(float cx, float cy, TitleSyncState s, u32 hex) {
+    u32 ink = gui_rgb(HEX_INK);
+    gui_circle(cx, cy, 6, gui_rgb(hex));
+    switch (s) {
+        case TSTATE_SYNCED:
+        case TSTATE_UPLOADED:
+        case TSTATE_DOWNLOADED:
+            gui_icon_check(cx, cy, 7, ink);
+            break;
+        case TSTATE_NEEDS_UPLOAD:
+            gui_icon_up(cx, cy + 0.5f, 7, ink);
+            break;
+        case TSTATE_NEEDS_DOWNLOAD:
+            gui_icon_down(cx, cy - 0.5f, 7, ink);
+            break;
+        case TSTATE_CONFLICT:
+            gui_rect(cx - 0.9f, cy - 3.6f, 1.8f, 4.4f, ink);
+            gui_rect(cx - 0.9f, cy + 1.8f, 1.8f, 1.8f, ink);
+            break;
+        case TSTATE_FAILED:
+            gui_icon_x(cx, cy, 8, ink);
+            break;
+        case TSTATE_SKIPPED:
+            // A small game card with a clipped corner
+            gui_rect(cx - 2.5f, cy - 3.5f, 5, 7, ink);
+            C2D_DrawTriangle(cx + 0.6f, cy - 3.6f, gui_rgb(hex), cx + 2.6f, cy - 3.6f, gui_rgb(hex), cx + 2.6f,
+                             cy - 1.6f, gui_rgb(hex), 0.5f);
+            break;
+        case TSTATE_UNKNOWN:
+            break;
+    }
+}
+
+static void saves_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     const SavesView *v = ctx;
     const TitleInfo *t = &v->titles[v->filtered[index]];
     float cy = y + h / 2;
+    u64 now = gui_now_ms();
 
-    // Mark box
+    // Mark box. A new check pops in (scale 0.6 -> 1, a critically damped
+    // spring in closed form, timed from the toggle)
     if (t->marked) {
-        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_rgb(selected ? HEX_INK : HEX_ACCENT));
-        gui_icon_check(x + 14.5f, cy, 8, gui_rgb(selected ? HEX_ACCENT : HEX_INK));
+        float sc = 1;
+        if (t->mark_ms && !gui_reduce_motion())
+            sc = gui_check_scale(now > t->mark_ms ? (float)(now - t->mark_ms) / 1000.0f : 0);
+        float bs = 11 * sc, bx = x + 14.5f;
+        gui_rrect(bx - bs / 2, cy - bs / 2, bs, bs, 3 * sc, gui_mix(HEX_ACCENT, HEX_INK, hl));
+        gui_icon_check(bx, cy, 8 * sc, gui_mix(HEX_INK, HEX_ACCENT, hl));
     } else {
-        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_rgb(selected ? 0x1E8F86 : HEX_LINE));
-        gui_rrect(x + 10.5f, cy - 4, 8, 8, 2, gui_rgb(selected ? HEX_ACCENT : HEX_BG));
+        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_mix(HEX_LINE, 0x1E8F86, hl));
+        gui_rrect(x + 10.5f, cy - 4, 8, 8, 2, gui_mix(HEX_BG, HEX_ACCENT, hl));
     }
 
     // System tag, fixed width
     u32 hex;
     const char *tag = system_tag(t, &hex);
-    gui_rrect(x + 26, cy - 6.5f, 30, 13, 6.5f, selected ? gui_rgb(HEX_INK) : gui_mix(HEX_BG, hex, 0.25f));
+    gui_rrect(x + 26, cy - 6.5f, 30, 13, 6.5f, gui_mix(gui_mix_hex(HEX_BG, hex, 0.25f), HEX_INK, hl));
     gui_text_mid(x + 41, cy - 6.5f, 13, GUI_S_TINY, gui_rgb(hex), GUI_CENTER, 0, tag);
 
     // Name
     bool conflict = t->in_conflict || t->sync_state == TSTATE_CONFLICT;
-    u32 color = selected ? HEX_INK : (conflict ? HEX_ERR : HEX_TEXT);
-    gui_text_mid(x + 62, y, h, GUI_S_BODY, gui_rgb(color), GUI_LEFT, w - 62 - 18, t->name);
+    gui_text_mid(x + 62, y, h, GUI_S_BODY, gui_mix(conflict ? HEX_ERR : HEX_TEXT, HEX_INK, hl), GUI_LEFT,
+                 w - 62 - 24, t->name);
 
-    // State dot
+    // State badge, with an ink ring that mixes in under the bar
     if (state_label(t, &hex)) {
-        if (selected) gui_circle(x + w - 11, cy, 5, gui_rgb(HEX_INK));
-        gui_circle(x + w - 11, cy, 3.5f, gui_rgb(hex));
+        float bx = x + w - 13;
+        // For 300 ms after the state was set, one ring expands from the
+        // badge and fades (reduced motion: it only fades)
+        float k = gui_effect_t(t->state_ms, now, GUI_RING_MS);
+        if (k < 1) {
+            float r = gui_reduce_motion() ? 9 : 6 + 6 * k;
+            gui_ring(bx, cy, r, 1.5f, gui_rgba(hex, (u8)(0xC0 * (1 - k))));
+        }
+        if (hl > 0) gui_circle(bx, cy, 7, gui_rgba(HEX_INK, (u8)(hl * 255)));
+        state_badge(bx, cy, t->in_conflict ? TSTATE_CONFLICT : (TitleSyncState)t->sync_state, hex);
     }
 }
 
+// Right side of the Saves header, right to left: the search chip (a
+// magnifier, or the active query as a pill with an x), the "B N marked x"
+// chip when something is marked, then the count ("41 saves", "3 of 41").
+// When space runs out the count goes first, then the query gets shorter.
+#define CHIP_H 18
+#define SEARCH_CHIP_W 28
+#define SEARCH_X_W 22
+
+typedef struct {
+    char count[32];
+    bool show_count;
+    float count_right;
+    char marked[24];
+    GuiRect chip;          // "N marked" (draw rect), w 0 = none
+    GuiRect search;        // magnifier chip or query pill (draw rect)
+    char query[96];        // the pill's text ("" = no search)
+} SavesHeader;
+
+static const char *const saves_tabs[] = { "All", "3DS", "NDS" };
+
+static float saves_tabs_x(void) {
+    return 6 + gui_button_w("SELECT") + 4;
+}
+
+static void saves_header_layout(const SavesView *v, SavesHeader *h) {
+    bool searching = v->search && v->search[0];
+    float cy0 = (GUI_HEADER_H - CHIP_H) / 2.0f;
+    float right = GUI_BOT_W - 6;
+    float left = gui_tabs_layout(saves_tabs_x(), 4, 18, saves_tabs, 3, NULL) + 6;
+
+    if (searching) snprintf(h->count, sizeof(h->count), "%d of %d", v->count, v->view_total);
+    else snprintf(h->count, sizeof(h->count), "%d save%s", v->count, v->count == 1 ? "" : "s");
+    float count_w = gui_text_w(GUI_S_SMALL, h->count);
+
+    h->marked[0] = '\0';
+    float chip_w = 0;
+    if (v->marked > 0) {
+        snprintf(h->marked, sizeof(h->marked), "%d marked", v->marked);
+        chip_w = 5 + gui_button_w("B") + 4 + gui_text_w(GUI_S_TINY, h->marked) + 5 + 8 + 6;
+    }
+
+    float search_w = SEARCH_CHIP_W;
+    h->query[0] = '\0';
+    if (searching) {
+        search_label(v->search, h->query, sizeof(h->query));
+        search_w = 8 + gui_text_w(GUI_S_TINY, h->query) + SEARCH_X_W;
+    }
+    float gap = 6;
+    float need = search_w + (chip_w > 0 ? chip_w + gap : 0) + count_w + gap;
+    h->show_count = need <= right - left;
+    if (!h->show_count) need -= count_w + gap;
+    if (searching && need > right - left) {
+        // Shorten the query to what is left (keeping at least a few characters)
+        float qw = gui_text_w(GUI_S_TINY, h->query) - (need - (right - left));
+        if (qw < 24) qw = 24;
+        char fitted[96];
+        gui_fit(h->query, GUI_S_TINY, qw, fitted, sizeof(fitted));
+        snprintf(h->query, sizeof(h->query), "%s", fitted);
+        search_w = 8 + gui_text_w(GUI_S_TINY, h->query) + SEARCH_X_W;
+    }
+
+    h->search = gui_rect_make(right - search_w, cy0, search_w, CHIP_H);
+    float x = h->search.x - gap;
+    h->chip = gui_rect_make(0, 0, 0, 0);
+    if (chip_w > 0) {
+        h->chip = gui_rect_make(x - chip_w, cy0, chip_w, CHIP_H);
+        x = h->chip.x - gap;
+    }
+    h->count_right = x;
+}
+
+GuiRect ui_saves_marked_chip(const SavesView *v) {
+    SavesHeader h;
+    saves_header_layout(v, &h);
+    if (h.chip.w <= 0) return h.chip;
+    // The whole header height, and a little to the sides
+    return gui_rect_make(h.chip.x - 3, 0, h.chip.w + 6, GUI_HEADER_H);
+}
+
+int ui_saves_search_targets(const SavesView *v, GuiRect *touch) {
+    SavesHeader h;
+    saves_header_layout(v, &h);
+    GuiRect s = h.search;
+    if (!h.query[0]) {
+        touch[0] = gui_rect_make(s.x - 3, 0, GUI_BOT_W - (s.x - 3), GUI_HEADER_H);
+        return 1;
+    }
+    float xs = s.x + s.w - SEARCH_X_W;
+    touch[0] = gui_rect_make(s.x - 3, 0, xs - (s.x - 3), GUI_HEADER_H);
+    touch[1] = gui_rect_make(xs, 0, GUI_BOT_W - xs, GUI_HEADER_H);
+    return 2;
+}
+
+// Under the "No saves match" message
+int ui_saves_empty_buttons(const SavesView *v, GuiRect *draw, GuiRect *touch) {
+    if (v->count > 0 || !v->search || !v->search[0]) return 0;
+    float w = 130, y = 116;
+    for (int i = 0; i < 2; i++) {
+        float x = i == 0 ? GUI_BOT_W / 2.0f - GUI_BTN_GAP / 2.0f - w : GUI_BOT_W / 2.0f + GUI_BTN_GAP / 2.0f;
+        draw[i] = gui_rect_make(x, y, w, GUI_BTN_H);
+        touch[i] = gui_rect_make(x - GUI_BTN_GAP / 2.0f, y - 5, w + GUI_BTN_GAP, GUI_BTN_H + 10);
+    }
+    return 2;
+}
+
+static bool title_in_conflict(const TitleInfo *t) {
+    return t->in_conflict || t->sync_state == TSTATE_CONFLICT;
+}
+
+int ui_saves_bar(const SavesView *v, UiBarItem *items) {
+    static char upload[32];   // the items point into it until the next call
+    bool any = v->count > 0 && v->selected >= 0 && v->selected < v->count;
+    const char *a = "Sync";
+    if (v->marked > 0) {
+        snprintf(upload, sizeof(upload), "Upload %d marked", v->marked);
+        a = upload;
+    } else if (any && title_in_conflict(&v->titles[v->filtered[v->selected]])) {
+        a = "Resolve";
+    }
+    items[SAVES_BAR_A] = (UiBarItem){ "A", a, any ? GUI_BTN_PRIMARY : GUI_BTN_DISABLED, 0, KEY_A, 0, false };
+    items[SAVES_BAR_X] = (UiBarItem){ "X", "Sync all", v->title_count > 0 ? GUI_BTN_TONAL : GUI_BTN_DISABLED,
+                                      0, KEY_X, 0, false };
+    items[SAVES_BAR_Y] = (UiBarItem){ "Y", "Details", any ? GUI_BTN_TONAL : GUI_BTN_DISABLED, 0, KEY_Y, 0, false };
+    return SAVES_BAR_COUNT;
+}
+
+int ui_saves_segments(GuiRect *touch) {
+    gui_tabs_layout(saves_tabs_x(), 4, 18, saves_tabs, 3, touch);
+    // The whole header height
+    for (int i = 0; i < 3; i++) touch[i] = gui_rect_make(touch[i].x, 0, touch[i].w, GUI_HEADER_H);
+    return 3;
+}
+
+// The search chip: a magnifier, or the active query with an x to clear it
+static void draw_search_chip(const SavesHeader *h, int held) {
+    GuiRect s = h->search;
+    float cy = s.y + CHIP_H / 2.0f;
+    if (!h->query[0]) {
+        GuiRect r = held == 1 ? gui_rect_grow(s, -1) : s;
+        gui_rrect(r.x, r.y, r.w, r.h, r.h / 2, gui_rgb(HEX_LINE));
+        gui_rrect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, (r.h - 2) / 2,
+                  held == 1 ? gui_mix(HEX_PANEL_HI, HEX_ACCENT, 0.35f) : gui_rgb(HEX_PANEL_HI));
+        gui_icon_search(s.x + s.w / 2, cy, 12, gui_rgb(HEX_TEXT));
+        return;
+    }
+    u32 fill = gui_rgb(HEX_ACCENT), dark = gui_mix(HEX_ACCENT, 0x000000, 0.20f);
+    GuiRect r = held ? gui_rect_grow(s, -1) : s;
+    gui_rrect(r.x, r.y, r.w, r.h, r.h / 2, fill);
+    // The pressed part darkens: the query (edit) or the x (clear)
+    float xs = s.x + s.w - SEARCH_X_W;
+    if (held == 1) {
+        gui_rrect(r.x, r.y, xs - r.x + r.h / 2, r.h, r.h / 2, dark);
+        gui_rect(xs, r.y, 1, r.h, fill);
+    } else if (held == 2) {
+        gui_rrect(xs - r.h / 2, r.y, r.x + r.w - xs + r.h / 2, r.h, r.h / 2, dark);
+        gui_rect(xs - r.h / 2, r.y, r.h / 2, r.h, fill);
+    }
+    gui_text_mid(s.x + 8, s.y, CHIP_H, GUI_S_TINY, gui_rgb(HEX_INK), GUI_LEFT, 0, h->query);
+    gui_rect(xs, s.y + 4, 1, CHIP_H - 8, gui_mix(HEX_ACCENT, HEX_INK, 0.35f));
+    gui_icon_x(xs + SEARCH_X_W / 2.0f - 1, cy, 9, gui_rgb(HEX_INK));
+}
+
 void ui_draw_saves_bottom(const SavesView *v) {
+    UiListGeom g = SAVES_GEOM;
+    GuiRect edraw[2], etouch[2];
+    int nempty = ui_saves_empty_buttons(v, edraw, etouch);
+    ui_tab_content_begin();
     if (v->count > 0) {
-        static UiListAnim anim;
-        ui_list(&anim, 0, SAVES_LIST_Y, GUI_BOT_W, SAVES_ROWS, SAVES_ROW_H,
-                v->count, v->selected, v->scroll, saves_row, (void *)v);
+        ui_list_draw(v->anim, &g, v->count, v->selected, v->scroll, saves_row, (void *)v);
+    } else if (nempty > 0) {
+        char q[80], line[112];
+        search_label(v->search, q, sizeof(q));
+        snprintf(line, sizeof(line), "No saves match %s", q);
+        gui_text_fit(GUI_BOT_W / 2.0f, 86, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_CENTER, GUI_BOT_W - 24, line);
+        // Both edit and clear work by touch, so an Old 3DS (no ZR) is
+        // never stuck on an empty result
+        gui_btn(edraw[0], "B", "Clear search", GUI_BTN_TONAL, 0, v->empty_held == 1 || ((v->held & KEY_B) && v->marked <= 0));
+        gui_btn(edraw[1], new3ds ? "ZR" : "^search", "Edit search", GUI_BTN_TONAL, 0,
+                v->empty_held == 2 || (v->held & KEY_ZR));
     } else {
         gui_text(GUI_BOT_W / 2.0f, 104, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, "No saves to show");
     }
+    ui_tab_content_end();
 
-    gui_header_bar();
-    static const char *const tabs[] = { "All", "3DS", "NDS" };
-    float tx = 6 + gui_button(6, GUI_HEADER_H / 2.0f, "SELECT") + 4;
-    gui_tabs(tx, 4, 18, tabs, 3, v->view_mode);
-    char count[32];
-    snprintf(count, sizeof(count), "%d save%s", v->count, v->count == 1 ? "" : "s");
-    float right = GUI_BOT_W - 8;
-    right -= gui_text_mid(right, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, count) + 6;
-    if (v->marked > 0) {
-        char marked[24];
-        snprintf(marked, sizeof(marked), "%d marked", v->marked);
-        float w = gui_pill_w(15, GUI_S_TINY, marked);
-        gui_pill(right - w, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), marked);
+    gui_header_bar_ex(v->count == 0 || ui_list_at_top(v->anim));
+    // SELECT cycles the view; a tap on a segment picks it
+    static GuiTabsAnim tabs_anim;
+    gui_button(6, GUI_HEADER_H / 2.0f, "SELECT");
+    tabs_anim.held = v->seg_held;
+    gui_tabs(&tabs_anim, saves_tabs_x(), 4, 18, saves_tabs, 3, v->view_mode, NULL);
+    SavesHeader h;
+    saves_header_layout(v, &h);
+    if (h.show_count)
+        gui_text_mid(h.count_right, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, h.count);
+    if (h.chip.w > 0) {
+        // "B 3 marked x": a tap on it (or B) unmarks everything
+        GuiRect chip = h.chip;
+        bool down = v->chip_pressed || (v->held & KEY_B);
+        GuiRect r = down ? gui_rect_grow(chip, -1) : chip;
+        gui_rrect(r.x, r.y, r.w, r.h, r.h / 2,
+                  down ? gui_mix(HEX_ACCENT, 0x000000, 0.20f) : gui_rgb(HEX_ACCENT));
+        float x = chip.x + 5, cy = chip.y + CHIP_H / 2.0f;
+        x += gui_button(x, cy, "B") + 4;
+        x += gui_text_mid(x, chip.y, CHIP_H, GUI_S_TINY, gui_rgb(HEX_INK), GUI_LEFT, 0, h.marked) + 5;
+        gui_icon_x(x + 4, cy, 8, gui_rgb(HEX_INK));
     }
+    draw_search_chip(&h, v->search_held);
 
-    static const GuiHint hints[] = {
-        { "A", "Sync" }, { "X", "Sync all" }, { "Y", "Details" }, { "B", "Unmark all" },
-    };
-    gui_footer(hints, v->marked > 0 ? 4 : 3);
+    UiBarItem items[SAVES_BAR_COUNT];
+    int n = ui_saves_bar(v, items);
+    ui_bar_draw(v->bar, items, n, v->held);
 }
 
 // ---------------------------------------------------------------------------
@@ -667,6 +1667,8 @@ typedef struct {
     const SaveDetails *details;
     SyncAction verdict;
     const char *section;
+    bool show_hashes;      // Save details only: hash prefixes and the last-synced hash
+    bool conflict_choice;  // the conflict dialog: outcomes under the cards, choice preview
 } CompareView;
 
 static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const char **head, const char **sub) {
@@ -689,7 +1691,7 @@ static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const cha
             *hex = HEX_ERR;
             *head = "Conflict";
             *sub = d->has_last_synced ? "Both this console and the server changed"
-                                      : "No sync history: pick which copy wins";
+                                      : "No sync record: pick which copy to keep";
             break;
         case SYNC_ACTION_SERVER_ERROR:
             *hex = HEX_ERR;
@@ -706,35 +1708,79 @@ static void verdict_text(const SaveDetails *d, SyncAction a, u32 *hex, const cha
     }
 }
 
-// `error` (with an optional `error_detail` line) replaces the contents when
-// the copy couldn't be read at all
-static void save_column(float x, float y, float w, const char *heading, bool exists,
-                        int files, u32 size, const char *hash, const char *extra_label,
-                        const char *extra, u32 tone, const char *error, const char *error_detail) {
-    gui_rrect(x, y, w, 76, 6, gui_rgb(HEX_BG2));
-    gui_rrect(x, y, w, 3, 1.5f, gui_rgb(error ? HEX_ERR : tone));
-    gui_text(x + 8, y + 6, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, heading);
-    float lh = gui_line_h(GUI_S_SMALL);
-    if (error) {
-        gui_text_fit(x + 8, y + 8 + lh, GUI_S_BODY, gui_rgb(HEX_ERR), GUI_LEFT, w - 16, error);
-        if (error_detail && error_detail[0])
-            gui_text_wrap(x + 8, y + 9 + 2 * lh + 2, GUI_S_SMALL, gui_rgb(HEX_DIM), w - 16, 2, error_detail);
-        return;
+// One copy of a save, drawn the same way for both sides so neither looks
+// like the one to pick: heading, then three lines (state or date, size and
+// files, device). `missing` shows "No save"; `error` replaces the lines
+// when the copy couldn't be read at all.
+typedef struct {
+    const char *heading;
+    const char *line1;
+    const char *line2;
+    const char *line3;
+    bool missing;
+    const char *error, *error_detail;
+} SaveCard;
+
+#define CARD_W 186
+#define CARD_H 92
+#define CARD_Y 70
+#define CARD_X_LEFT 8
+#define CARD_X_RIGHT (GUI_TOP_W - 8 - CARD_W)
+
+// `emphasis`: 1 = the copy a pressed choice keeps (accent outline and a
+// "Keeps" pill), -1 = the one it replaces (faded), 0 = neither
+static void ui_save_card(float x, float y, const SaveCard *c, int emphasis) {
+    float w = CARD_W, h = CARD_H;
+    float fade_prev = gui_fade_push(emphasis < 0 ? 0.4f : 0);
+    if (emphasis > 0) gui_rrect(x - 2, y - 2, w + 4, h + 4, 8, gui_rgb(HEX_ACCENT));
+    gui_rrect(x, y, w, h, 6, gui_rgb(HEX_BG2));
+    // The same neutral stripe on both: neither copy is the warning
+    gui_rrect(x, y, w, 3, 1.5f, gui_rgb(HEX_LINE));
+    gui_text(x + 10, y + 8, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, c->heading);
+    if (emphasis > 0) {
+        float pw = gui_pill_w(15, GUI_S_TINY, "Keeps");
+        gui_pill(x + w - 8 - pw, y + 7, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), "Keeps");
     }
-    if (!exists) {
-        gui_text(x + 8, y + 8 + lh, GUI_S_BODY, gui_rgb(HEX_MUTED), GUI_LEFT, "No save");
-        return;
+    float lx = x + 10, lw = w - 20, ly = y + 28, step = 18;
+    if (c->error) {
+        gui_text_fit(lx, ly, GUI_S_BODY, gui_rgb(HEX_ERR), GUI_LEFT, lw, c->error);
+        if (c->error_detail && c->error_detail[0])
+            gui_text_wrap(lx, ly + step, GUI_S_SMALL, gui_rgb(HEX_DIM), lw, 3, c->error_detail);
+    } else if (c->missing) {
+        gui_text(lx, ly, GUI_S_BODY, gui_rgb(HEX_MUTED), GUI_LEFT, "No save");
+        if (c->line3) gui_text_fit(lx, ly + 2 * step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line3);
+    } else {
+        if (c->line1) gui_text_fit(lx, ly, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line1);
+        if (c->line2) gui_text_fit(lx, ly + step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line2);
+        if (c->line3) gui_text_fit(lx, ly + 2 * step, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, lw, c->line3);
     }
-    char size_str[24], line[48];
-    format_size(size, size_str, sizeof(size_str));
-    snprintf(line, sizeof(line), "%s  \xC2\xB7  %d file%s", size_str, files, files == 1 ? "" : "s");
-    gui_text_fit(x + 8, y + 6 + lh, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - 16, line);
-    snprintf(line, sizeof(line), "%.16s", hash);
-    gui_text_fit(x + 8, y + 9 + 2 * lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, line);
-    if (extra && extra[0]) {
-        char e[64];
-        snprintf(e, sizeof(e), "%s %s", extra_label, extra);
-        gui_text_fit(x + 8, y + 9 + 3 * lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, w - 16, e);
+    gui_fade_pop(fade_prev);
+}
+
+// "12.0 KB · 2 files"
+static void size_files(u32 size, int files, char *out, size_t out_size) {
+    char sz[24];
+    format_size(size, sz, sizeof(sz));
+    snprintf(out, out_size, "%s \xC2\xB7 %d file%s", sz, files, files == 1 ? "" : "s");
+}
+
+// Has this console's save changed since it was last synced?
+static const char *local_change_text(const SaveDetails *d) {
+    if (!d->has_last_synced) return "No sync record";
+    return strcmp(d->local_hash, d->last_synced_hash) != 0 ? "Changed since last sync" : "Same as last sync";
+}
+
+// A local read that failed outright (the hash field then holds the reason)
+static bool local_unreadable(const SaveDetails *d) {
+    return d->local_exists && d->local_file_count == 0 && strncmp(d->local_hash, "ERROR", 5) == 0;
+}
+
+static void console_card(const SaveDetails *d, const char *heading, char *buf2, size_t size2, SaveCard *c) {
+    size_files(d->local_size, d->local_file_count, buf2, size2);
+    *c = (SaveCard){ heading, local_change_text(d), buf2, "This console", !d->local_exists, NULL, NULL };
+    if (local_unreadable(d)) {
+        c->error = "Can't read the save";
+        c->error_detail = d->local_hash;
     }
 }
 
@@ -744,37 +1790,62 @@ static void compare_top(void *ctx) {
     gui_header(c->section);
 
     gui_text_fit(12, 32, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 24, c->title->name);
-    gui_textf(12, 32 + gui_line_h(GUI_S_TITLE), GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT,
+    gui_textf(12, 32 + gui_line_h(GUI_S_TITLE), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
               "%s%s", c->title->title_id_hex,
               c->title->media_type == MEDIATYPE_GAME_CARD ? "  \xC2\xB7  game card" : "");
 
-    float y = 70, w = (GUI_TOP_W - 16 - 10) / 2.0f;
-    char date[32];
-    format_date(d->server_last_sync, date, sizeof(date));
-    char server_err[40] = "";
+    // The two copies, equal
+    char lsize[48], ssize[48], when[40], device[40], server_err[40] = "";
+    SaveCard left, right;
+    console_card(d, "This console", lsize, sizeof(lsize), &left);
+    size_files(d->server_size, d->server_file_count, ssize, sizeof(ssize));
+    ui_format_when(d->server_last_sync, when, sizeof(when));
+    ui_device_label(d->server_console_id, device, sizeof(device));
+    right = (SaveCard){ "Server", when, ssize, device, !d->server_exists, NULL, NULL };
     if (d->server_error) {
         if (d->server_status)
             snprintf(server_err, sizeof(server_err), "Server error (HTTP %lu)", (unsigned long)d->server_status);
         else
             snprintf(server_err, sizeof(server_err), "No response");
+        right.error = server_err;
+        right.error_detail = d->server_error_msg;
     }
-    save_column(8, y, w, "This console", d->local_exists, d->local_file_count, d->local_size,
-                d->local_hash, NULL, NULL, HEX_WARN, NULL, NULL);
-    save_column(8 + w + 10, y, w, "Server", d->server_exists, d->server_file_count, d->server_size,
-                d->server_hash, "Synced", d->server_exists ? date : NULL, HEX_INFO,
-                d->server_error ? server_err : NULL, d->server_error_msg);
+    // Choice preview: pressing A (keep this console) or X (keep the server)
+    // shows which copy stays before anything happens
+    int le = 0, re = 0;
+    if (c->conflict_choice) {
+        u32 keys = ui_dialog_pressed();
+        if (keys & KEY_A) { le = 1; re = -1; }
+        else if (keys & KEY_X) { le = -1; re = 1; }
+    }
+    ui_save_card(CARD_X_LEFT, CARD_Y, &left, le);
+    ui_save_card(CARD_X_RIGHT, CARD_Y, &right, re);
 
-    // Last synced hash
-    y += 82;
-    gui_text(10, y, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT, "Last synced");
-    gui_text_fit(84, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 94,
-                 d->has_last_synced ? d->last_synced_hash : "never synced from this console");
+    float y = CARD_Y + CARD_H + 6, lh = gui_line_h(GUI_S_SMALL);
+    if (c->conflict_choice) {
+        // What each choice does, under its card
+        float cy = y + lh / 2;
+        float x = CARD_X_LEFT + 4;
+        x += gui_button(x, cy, "A") + 4;
+        gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Keep this one (upload)");
+        x = CARD_X_RIGHT + 4;
+        x += gui_button(x, cy, "X") + 4;
+        gui_text(x, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Keep this one (download)");
+    } else if (c->show_hashes) {
+        // Save details: the raw fingerprints, for whoever wants them
+        char line[160];
+        snprintf(line, sizeof(line), "Console %.16s  \xC2\xB7  Server %.16s",
+                 d->local_exists ? d->local_hash : "-", d->server_exists ? d->server_hash : "-");
+        gui_text_fit(10, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
+        snprintf(line, sizeof(line), "Last synced %s", d->has_last_synced ? d->last_synced_hash : "never");
+        gui_text_fit(10, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
+    }
 
     // Verdict banner
     u32 hex;
     const char *head, *sub;
     verdict_text(d, c->verdict, &hex, &head, &sub);
-    float by = 176, bh = 34;
+    float by = 190, bh = 32;
     gui_rrect(8, by, GUI_TOP_W - 16, bh, 7, gui_mix(HEX_BG2, hex, 0.18f));
     gui_rrect(8, by, 4, bh, 2, gui_rgb(hex));
     float icx = 28, icy = by + bh / 2;
@@ -786,8 +1857,8 @@ static void compare_top(void *ctx) {
         case SYNC_ACTION_SERVER_ERROR: gui_text_mid(icx, by, bh, 0.6f, gui_rgb(HEX_INK), GUI_CENTER, 0, "!"); break;
         default:                   gui_icon_check(icx, icy, 11, gui_rgb(HEX_INK)); break;
     }
-    gui_text(46, by + 3, GUI_S_BODY, gui_rgb(hex), GUI_LEFT, head);
-    gui_text_fit(46, by + 3 + gui_line_h(GUI_S_BODY) - 1, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
+    gui_text(46, by + 2, GUI_S_BODY, gui_rgb(hex), GUI_LEFT, head);
+    gui_text_fit(46, by + 2 + gui_line_h(GUI_S_BODY) - 1, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
                  GUI_TOP_W - 60, sub);
 
     // Thin footer so the top screen looks finished
@@ -799,34 +1870,58 @@ static void compare_bottom(void *ctx) {
     gui_header_bar();
 }
 
-static u32 run_compare(const TitleInfo *title, const SaveDetails *details, SyncAction verdict,
-                       const char *section, UiTone tone, const char *card_title, const char *body,
-                       const UiButton *buttons, int count) {
-    CompareView view = { title, details, verdict, section };
-    UiBackdrop prev = ui_set_backdrop(compare_top, compare_bottom, &view);
-    u32 key = ui_dialog(tone, card_title, body, buttons, count);
+static u32 run_compare_ex(const CompareView *view, UiTone tone, const char *card_title, const char *body,
+                          const UiButton *buttons, int count, const UiDialogOpts *opts) {
+    UiBackdrop prev = ui_set_backdrop(compare_top, compare_bottom, (void *)view);
+    u32 key = ui_dialog_ex(tone, card_title, body, buttons, count, opts);
     ui_restore_backdrop(prev);
     return key;
 }
 
-void ui_show_save_details(const TitleInfo *title, const SaveDetails *details) {
-    static const UiButton b[] = { { KEY_B | KEY_A, "B", "Close" } };
-    run_compare(title, details, sync_decide(details), "Save details", UI_TONE_ACCENT,
-                "Save details", UI_DIM "Local copy on the left, server copy on the right.", b, 1);
+static u32 run_compare(const TitleInfo *title, const SaveDetails *details, SyncAction verdict,
+                       const char *section, UiTone tone, const char *card_title, const char *body,
+                       const UiButton *buttons, int count) {
+    CompareView view = { title, details, verdict, section, false, false };
+    return run_compare_ex(&view, tone, card_title, body, buttons, count, NULL);
 }
 
-bool ui_confirm_sync(const TitleInfo *title, const SaveDetails *details, bool is_upload) {
+void ui_show_save_details(const TitleInfo *title, const SaveDetails *details) {
+    static const UiButton b[] = { { KEY_B | KEY_A, "B", "Close" } };
+    CompareView view = { title, details, sync_decide(details), "Save details", true, false };
+    run_compare_ex(&view, UI_TONE_ACCENT, "Save details",
+                   UI_DIM "This console's copy on the left, the server's on the right.", b, 1, NULL);
+}
+
+// A save much smaller than the server's (or with fewer files) is often a
+// fresh game or an old backup about to replace real progress
+static bool upload_looks_like_rollback(const SaveDetails *d) {
+    return d->server_exists && d->local_exists &&
+           (d->local_size < d->server_size / 2 || d->local_file_count < d->server_file_count);
+}
+
+#define ROLLBACK_LINE UI_HI "This save is much smaller than the server's: a new game or an old backup?"
+
+bool ui_confirm_sync(const TitleInfo *title, const SaveDetails *details, bool is_upload, int local_backups) {
     UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", is_upload ? "Upload" : "Download" } };
+    char body[320];
+    if (is_upload)
+        snprintf(body, sizeof(body), "This console's save replaces the server's copy. "
+                 "The server keeps its old copy in History.%s",
+                 upload_looks_like_rollback(details) ? "\n" ROLLBACK_LINE : "");
+    else
+        snprintf(body, sizeof(body), "The server's save replaces the one on this console.%s",
+                 !details->local_exists ? ""
+                 : local_backups > 0 ? " Your current save is backed up to the SD first."
+                 : "\n" UI_HI "Your current save is not backed up (Local backups is off).");
     u32 key = run_compare(title, details, is_upload ? SYNC_ACTION_UPLOAD : SYNC_ACTION_DOWNLOAD,
                           is_upload ? "Upload" : "Download", is_upload ? UI_TONE_WARN : UI_TONE_INFO,
-                          is_upload ? "Upload to the server?" : "Download from the server?",
-                          is_upload ? "This console's save replaces the server copy."
-                                    : "The server's save replaces the one on this console.",
-                          b, 2);
+                          is_upload ? "Upload to the server?" : "Download from the server?", body, b, 2);
     return (key & KEY_A) != 0;
 }
 
-SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *details, SyncAction suggested) {
+SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *details, SyncAction suggested,
+                                 int local_backups) {
+    const SaveDetails *d = details;
     if (suggested == SYNC_ACTION_SERVER_ERROR) {
         // Couldn't read the server's copy: offer nothing that would change a save
         static const UiButton b[] = { { KEY_A | KEY_B, "A", "OK" } };
@@ -836,34 +1931,51 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
                     b, 1);
         return SYNC_ACTION_SERVER_ERROR;
     }
+    if (suggested == SYNC_ACTION_UP_TO_DATE) return SYNC_ACTION_UP_TO_DATE;   // nothing to ask
     if (suggested == SYNC_ACTION_CONFLICT) {
+        // Two equal choices mirroring the cards (A left, X right), Cancel
+        // below. The keys are v055's: A uploads, X downloads, B cancels.
         static const UiButton b[] = {
-            { KEY_B, "B", "Cancel" }, { KEY_X, "X", "Download" }, { KEY_A, "A", "Upload" },
+            { KEY_A, "A^up", "Keep this console" }, { KEY_X, "X^down", "Keep server" }, { KEY_B, "B", "Cancel" },
         };
-        u32 key = run_compare(title, details, suggested, "Smart Sync", UI_TONE_ERR,
-                              "Both copies changed",
-                              "Pick the copy to keep:\n"
-                              UI_DIM "A uploads this console's save (the server\n"
-                              UI_DIM "keeps its old copy in the history).\n"
-                              UI_DIM "X downloads the server's save to this console.",
-                              b, 3);
+        char body[320];
+        snprintf(body, sizeof(body), "%s\n" UI_DIM "%s",
+                 d->has_last_synced ? "Both changed since the last sync. Pick the copy to keep."
+                                    : "The copies differ and there's no sync record. Pick the copy to keep.",
+                 local_backups > 0 ? "The server keeps its copy in History; this console's is backed up to the SD first."
+                                   : "The server keeps its copy in History; this console's is not backed up.");
+        CompareView view = { title, details, suggested, "Smart Sync", false, true };
+        UiDialogOpts opts = { 2, false };
+        u32 key = run_compare_ex(&view, UI_TONE_ERR, "Both copies changed", body, b, 3, &opts);
         if (key & KEY_A) return SYNC_ACTION_UPLOAD;
         if (key & KEY_X) return SYNC_ACTION_DOWNLOAD;
         return SYNC_ACTION_UP_TO_DATE;
     }
-    if (suggested == SYNC_ACTION_UP_TO_DATE) {
-        static const UiButton b[] = { { KEY_A | KEY_B, "A", "OK" } };
-        run_compare(title, details, suggested, "Smart Sync", UI_TONE_OK, "Already in sync",
-                    "Nothing to do: this console and the server have the same save.", b, 1);
-        return SYNC_ACTION_UP_TO_DATE;
-    }
+    // Say what will happen and which side changed: the hashes know that,
+    // not which copy is newer
     bool up = (suggested == SYNC_ACTION_UPLOAD);
+    char body[384];
+    UiTone tone = up ? UI_TONE_WARN : UI_TONE_INFO;
+    if (up) {
+        snprintf(body, sizeof(body), "%s%s",
+                 !d->server_exists ? "This save isn't on the server yet. Send it?"
+                 : d->has_last_synced ? "Only this console changed since the last sync. Send it to the server? "
+                                        "The server keeps its old copy in History."
+                 : "Send this console's save to the server? The server keeps its old copy in History.",
+                 upload_looks_like_rollback(d) ? "\n" ROLLBACK_LINE : "");
+    } else if (!d->local_exists) {
+        snprintf(body, sizeof(body), "This console has no save for this game yet. Copy the server's save here?");
+    } else {
+        char device[40], when[40];
+        ui_device_label(d->server_console_id, device, sizeof(device));
+        ui_format_when(d->server_last_sync, when, sizeof(when));
+        snprintf(body, sizeof(body), "%s (%s, %s). Replace this console's save?%s",
+                 d->has_last_synced ? "Only the server changed" : "The server's copy is different", device, when,
+                 local_backups > 0 ? " Your current save is backed up to the SD first." : "");
+    }
     UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", up ? "Upload" : "Download" } };
-    u32 key = run_compare(title, details, suggested, "Smart Sync", up ? UI_TONE_WARN : UI_TONE_INFO,
-                          up ? "Upload this save?" : "Download this save?",
-                          up ? "This console has the newer save. Send it to the server?"
-                             : "The server has the newer save. Copy it to this console?",
-                          b, 2);
+    u32 key = run_compare(title, details, suggested, "Smart Sync", tone,
+                          up ? "Upload this save?" : "Download this save?", body, b, 2);
     return (key & KEY_A) ? suggested : SYNC_ACTION_UP_TO_DATE;
 }
 
@@ -871,28 +1983,39 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
 // History
 // ---------------------------------------------------------------------------
 
-#define HIST_ROWS 9
-#define HIST_ROW_H 21
+#define HIST_ROWS GUI_LIST_ROWS
+#define HIST_ROW_H GUI_ROW_H
+
+static const UiListGeom hist_geom = { 0, GUI_LIST_Y, GUI_BOT_W, HIST_ROWS, HIST_ROW_H, false, true };
+static const UiBarItem hist_bar_items[] = {
+    { "A", "Restore", GUI_BTN_PRIMARY, 0, KEY_A, 0, false },
+    { "B", "Back", GUI_BTN_TONAL, 0, KEY_B, 0, false },
+};
 
 typedef struct {
     const TitleInfo *title;
     const HistoryVersion *versions;
     int count, selected, scroll;
+    UiListAnim anim;   // per visit: the bar never glides in from another game
+    UiBar bar;
+    u32 held;          // keys held (0 behind a dialog)
 } HistoryView;
 
-static void history_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+static void history_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     const HistoryView *v = ctx;
     const HistoryVersion *hv = &v->versions[index];
     char date[32], size[24];
-    format_date(hv->timestamp, date, sizeof(date));
+    ui_format_when(hv->timestamp, date, sizeof(date));
     format_size(hv->size, size, sizeof(size));
-    u32 text = selected ? HEX_INK : HEX_TEXT, dim = selected ? HEX_INK : HEX_DIM;
-    gui_text_mid(x + 10, y, h, GUI_S_BODY, gui_rgb(text), GUI_LEFT, 0, date);
-    if (index == 0) gui_text_mid(x + 134, y, h, GUI_S_TINY, gui_rgb(selected ? HEX_INK : HEX_ACCENT2), GUI_LEFT, 0, "NEWEST");
-    gui_text_mid(x + w - 70, y, h, GUI_S_SMALL, gui_rgb(dim), GUI_RIGHT, 0, size);
+    u32 text = gui_mix(HEX_TEXT, HEX_INK, hl), dim = gui_mix(HEX_DIM, HEX_INK, hl);
+    float dw = gui_text_mid(x + 10, y, h, GUI_S_BODY, text, GUI_LEFT, 0, date);
+    float tag_x = x + 10 + dw + 8 > x + 134 ? x + 10 + dw + 8 : x + 134;
+    if (index == 0) gui_text_mid(tag_x, y, h, GUI_S_TINY, gui_mix(HEX_ACCENT2, HEX_INK, hl), GUI_LEFT, 0, "Newest");
+    gui_text_mid(x + w - 70, y, h, GUI_S_SMALL, dim, GUI_RIGHT, 0, size);
     char files[16];
     snprintf(files, sizeof(files), "%d file%s", hv->file_count, hv->file_count == 1 ? "" : "s");
-    gui_text_mid(x + w - 10, y, h, GUI_S_SMALL, gui_rgb(dim), GUI_RIGHT, 0, files);
+    gui_text_mid(x + w - 10, y, h, GUI_S_SMALL, dim, GUI_RIGHT, 0, files);
 }
 
 static void history_top(void *ctx) {
@@ -902,7 +2025,7 @@ static void history_top(void *ctx) {
     gui_text_wrap(20, 40, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_TOP_W - 40, 2, v->title->name);
     const HistoryVersion *hv = &v->versions[v->selected];
     char date[32], size[24], files[16], pos[24];
-    format_date(hv->timestamp, date, sizeof(date));
+    ui_format_when(hv->timestamp, date, sizeof(date));
     format_size(hv->size, size, sizeof(size));
     snprintf(files, sizeof(files), "%d", hv->file_count);
     snprintf(pos, sizeof(pos), "%d of %d", v->selected + 1, v->count);
@@ -911,24 +2034,19 @@ static void history_top(void *ctx) {
     kv(20, y + lh, 70, 300, "Saved", date, HEX_TEXT);
     kv(20, y + 2 * lh, 70, 300, "Size", size, HEX_TEXT);
     kv(20, y + 3 * lh, 70, 300, "Files", files, HEX_TEXT);
-    gui_text_fit(20, 190, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 40,
-                 "Restoring writes this version to the console.");
     static const GuiHint hints[] = { { "LR", "Page" } };
     gui_footer(hints, 1);
 }
 
 static void history_bottom(void *ctx) {
     HistoryView *v = ctx;
-    static UiListAnim anim;
-    ui_list(&anim, 0, GUI_HEADER_H, GUI_BOT_W, HIST_ROWS, HIST_ROW_H, v->count, v->selected,
-            v->scroll, history_row, v);
-    gui_header_bar();
+    ui_list_draw(&v->anim, &hist_geom, v->count, v->selected, v->scroll, history_row, v);
+    gui_header_bar_ex(ui_list_at_top(&v->anim));
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Saved versions");
     char n[16];
     snprintf(n, sizeof(n), "%d", v->count);
     gui_text_mid(GUI_BOT_W - 10, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, n);
-    static const GuiHint hints[] = { { "A", "Restore" }, { "B", "Back" }, { "UD", "Move" } };
-    gui_footer(hints, 3);
+    ui_bar_draw(&v->bar, hist_bar_items, 2, v->held);
 }
 
 char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int version_count) {
@@ -936,32 +2054,32 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
         ui_message(UI_TONE_INFO, "History", "No previous versions of this save on the server.");
         return NULL;
     }
-    HistoryView v = { title, versions, version_count, 0, 0 };
+    HistoryView v;
+    memset(&v, 0, sizeof(v));
+    v.title = title;
+    v.versions = versions;
+    v.count = version_count;
+    v.bar = (UiBar)UI_BAR_INIT;
     UiBackdrop prev = ui_set_backdrop(history_top, history_bottom, &v);
     char *result = NULL;
     hidScanInput();
-    while (aptMainLoop()) {
-        gui_begin(true);
-        gui_screen(GUI_TOP);
-        history_top(&v);
-        gui_screen(GUI_BOTTOM);
-        history_bottom(&v);
-        gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        if (rep & KEY_UP) v.selected = (v.selected - 1 + v.count) % v.count;
-        if (rep & KEY_DOWN) v.selected = (v.selected + 1) % v.count;
-        if (rep & KEY_LEFT) v.selected = v.selected - HIST_ROWS < 0 ? 0 : v.selected - HIST_ROWS;
-        if (rep & KEY_RIGHT) v.selected = v.selected + HIST_ROWS >= v.count ? v.count - 1 : v.selected + HIST_ROWS;
-        if (down & KEY_TOUCH) {
-            int i = ui_list_touch(GUI_HEADER_H, HIST_ROWS, HIST_ROW_H, v.count, v.scroll);
-            if (i >= 0) v.selected = i;
+    ui_input_latch_touch();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 down = in.down;
+        UiListEvent ev = ui_list_input(&v.anim, &hist_geom, v.count, &v.selected, &v.scroll, &in,
+                                       in.rep & UI_LIST_KEYS);
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
+            ui_list_keys(&v.anim, in.rep, v.count, HIST_ROWS, &v.selected);
+            if (v.selected < v.scroll) v.scroll = v.selected;
+            if (v.selected >= v.scroll + HIST_ROWS) v.scroll = v.selected - HIST_ROWS + 1;
         }
-        if (v.selected < v.scroll) v.scroll = v.selected;
-        if (v.selected >= v.scroll + HIST_ROWS) v.scroll = v.selected - HIST_ROWS + 1;
-        if (down & KEY_B) break;
-        if (down & KEY_A) {
+        int hit = ui_bar_input(&v.bar, &in, hist_bar_items, 2);
+        if (hit == 1 || (down & KEY_B)) break;
+        // A, the Restore button, or a tap on the selected row: the caller
+        // asks before anything is written
+        if (hit == 0 || ev.kind == UI_LIST_TAP_SELECTED || (down & KEY_A)) {
+            ui_list_reveal(&v.anim, v.count, v.selected, &v.scroll);
             result = (char *)malloc(32);
             if (result) {
                 strncpy(result, versions[v.selected].timestamp, 31);
@@ -969,43 +2087,181 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
             }
             break;
         }
+
+        v.held = in.held;
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        history_top(&v);
+        gui_screen(GUI_BOTTOM);
+        history_bottom(&v);
+        gui_end();
+        v.held = 0;
     }
+    ui_input_latch_touch();
     ui_restore_backdrop(prev);
     return result;
+}
+
+// Restore confirmation: the save this replaces beside the chosen version
+typedef struct {
+    const TitleInfo *title;
+    const SaveDetails *details;
+    const HistoryVersion *version;
+    int index, count;
+} RestoreView;
+
+static void restore_top(void *ctx) {
+    const RestoreView *r = ctx;
+    const SaveDetails *d = r->details;
+    gui_header("Restore");
+
+    gui_text_fit(12, 32, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 24, r->title->name);
+    gui_textf(12, 32 + gui_line_h(GUI_S_TITLE), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
+              "%s%s", r->title->title_id_hex,
+              r->title->media_type == MEDIATYPE_GAME_CARD ? "  \xC2\xB7  game card" : "");
+
+    // Left: what is on the console now, and whether it changed since the
+    // last sync (i.e. whether restoring loses progress the server never saw).
+    // Right: the version that replaces it.
+    char lsize[48], vsize[48], pos[32], when[40];
+    SaveCard left, right;
+    console_card(d, "Now on this console", lsize, sizeof(lsize), &left);
+    snprintf(pos, sizeof(pos), "Version %d of %d", r->index + 1, r->count);
+    ui_format_when(r->version->timestamp, when, sizeof(when));
+    size_files(r->version->size, r->version->file_count, vsize, sizeof(vsize));
+    right = (SaveCard){ pos, when, vsize, "Server History", false, NULL, NULL };
+    ui_save_card(CARD_X_LEFT, CARD_Y, &left, 0);
+    ui_save_card(CARD_X_RIGHT, CARD_Y, &right, 0);
+
+    gui_text_fit(10, CARD_Y + CARD_H + 6, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20,
+                 "The server keeps every version: restoring one doesn't remove any.");
+
+    // Thin footer so the top screen looks finished
+    gui_rect(0, GUI_FOOTER_Y + 8, GUI_TOP_W, GUI_FOOTER_H - 8, gui_rgb(HEX_BG2));
+}
+
+bool ui_confirm_restore(const TitleInfo *title, const SaveDetails *details,
+                        const HistoryVersion *version, int index, int count, int local_backups) {
+    RestoreView view = { title, details, version, index, count };
+    char body[256];
+    bool has_save = details->local_exists && details->local_file_count > 0;
+    if (!has_save)
+        snprintf(body, sizeof(body), "Writes this version to this console.\n"
+                 UI_DIM "There's no save on this console now.");
+    else if (local_backups == 1)
+        snprintf(body, sizeof(body), "Replaces the save on this console.\n"
+                 "Your current save is copied to the SD first (keeps 1 copy).");
+    else if (local_backups > 1)
+        snprintf(body, sizeof(body), "Replaces the save on this console.\n"
+                 "Your current save is copied to the SD first (keeps the last %d).", local_backups);
+    else
+        snprintf(body, sizeof(body), "Replaces the save on this console.\n"
+                 UI_HI "Your current save is not backed up (Local backups is off).");
+    UiBackdrop prev = ui_set_backdrop(restore_top, compare_bottom, &view);
+    bool ok = ui_confirm(UI_TONE_WARN, "Restore this version?", body, "Restore");
+    ui_restore_backdrop(prev);
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
 // Settings
 // ---------------------------------------------------------------------------
 
-#define CFG_ITEMS 7
-#define CFG_ROW_H 23
-#define CFG_ACTIONS 4   // first entry that is an action, not a value
+#define CFG_ROW_H GUI_ROW_H
+#define CFG_ROWS GUI_LIST_ROWS
+
+static const UiListGeom cfg_geom = { 0, GUI_LIST_Y, GUI_BOT_W, CFG_ROWS, CFG_ROW_H, false, true };
 
 enum {
-    CFG_SERVER_URL = 0, CFG_SERVER_URL_ALT, CFG_API_KEY, CFG_NDS_DIR,
-    CFG_RESCAN, CFG_REFRESH_CATALOG, CFG_UPDATE,
+    CFG_SERVER_URL = 0, CFG_SERVER_URL_ALT, CFG_API_KEY, CFG_TLS,   // Server
+    CFG_NDS_DIR, CFG_BACKUPS,                                       // Saves & ROMs
+    CFG_UPDATE_CHECK, CFG_REDUCE_MOTION,                            // App
+    CFG_RESCAN, CFG_REFRESH_CATALOG, CFG_UPDATE,                    // Maintenance
+    CFG_ITEMS
 };
 
-static const char *const cfg_labels[CFG_ITEMS] = {
-    "Server URL", "Alternate URL", "API key", "NDS ROM folder",
-    "Rescan titles", "Refresh catalog", "Check for updates",
+typedef enum { CFG_TEXT = 0, CFG_SWITCH, CFG_CHOOSE, CFG_ACTION } CfgKind;
+
+typedef struct {
+    const char *group, *label, *help;
+    CfgKind kind;
+} CfgRow;
+
+static const CfgRow cfg_rows[CFG_ITEMS] = {
+    { "Server", "Server URL", "Address of your GameSync server, e.g. http://192.168.1.100:8000", CFG_TEXT },
+    { "Server", "Alternate URL",
+      "Optional second address of the same server, tried when the first doesn't answer. Empty = off.", CFG_TEXT },
+    { "Server", "API key", "The server's SYNC_API_KEY. Sent with every request.", CFG_TEXT },
+    { "Server", "Verify TLS",
+      "For https:// addresses: check the server's certificate. Off accepts any certificate. No effect on http://.",
+      CFG_SWITCH },
+    { "Saves & ROMs", "NDS ROM folder",
+      "Where your DS ROMs and .sav files live (TWiLight Menu++ / nds-bootstrap). Browse the SD card to pick it.",
+      CFG_CHOOSE },
+    { "Saves & ROMs", "Local backups",
+      "Copies of a save kept on the SD card before a download or a restore overwrites it. Off keeps none.",
+      CFG_CHOOSE },
+    { "App", "Allow update checks",
+      "Off: the app never asks your server for a newer GameSync, so this build is never replaced.", CFG_SWITCH },
+    { "App", "Reduce motion", "Fades and jumps instead of sliding and springing. Applies right away.", CFG_SWITCH },
+    { "Maintenance", "Rescan titles", "Look for installed titles and DS saves again.", CFG_ACTION },
+    { "Maintenance", "Refresh catalog",
+      "Ask the server to rescan its ROM folder, then download the whole game catalog again.", CFG_ACTION },
+    { "Maintenance", "Check for updates now", "Download and install the latest GameSync CIA from your server.",
+      CFG_ACTION },
 };
 
-static const char *const cfg_help[CFG_ITEMS] = {
-    "Address of your GameSync server, e.g. http://192.168.1.100:8000",
-    "Optional second address of the same server, tried when the first doesn't answer. Empty = off.",
-    "The server's SYNC_API_KEY. Sent with every request.",
-    "Where your DS ROMs and .sav files live (TWiLight Menu++ / nds-bootstrap).",
-    "Look for installed titles and DS saves again.",
-    "Ask the server to rescan its ROM folder, then download the whole game catalog again.",
-    "Download and install the latest GameSync CIA from your server.",
-};
+// A divider above the first row of each group but the first
+static bool cfg_group_start(int index) {
+    return index > 0 && strcmp(cfg_rows[index].group, cfg_rows[index - 1].group) != 0;
+}
+
+static bool cfg_switch_on(const AppConfig *cfg, int index) {
+    switch (index) {
+        case CFG_TLS:           return cfg->tls_verify;
+        case CFG_UPDATE_CHECK:  return cfg->update_check;
+        case CFG_REDUCE_MOTION: return cfg->reduce_motion;
+        default:                return false;
+    }
+}
+
+// What the last server / key check said, per row, for this session only
+// (never written to config.txt): "Answered · v1.0", "Key rejected (401)"
+static char cfg_probe[CFG_ITEMS][40];
+static bool cfg_probe_ok[CFG_ITEMS];
+
+// A result shown in the help panel (e.g. the folder just picked) until the
+// highlight leaves its row or it gets old
+static char cfg_note[MAX_PATH_LEN + 64];
+static UiTone cfg_note_tone;
+static u64 cfg_note_ms;
+static int cfg_note_row = -1;
+
+// Switch knobs, 0 (off, left) .. 1 (on, right)
+static GuiSpring cfg_knob[CFG_ITEMS];
+static bool cfg_knob_init;
+static u32 cfg_knob_frame;
 
 typedef struct {
     const AppConfig *cfg;
-    int selected;
+    int selected, scroll;
+    UiBar bar;
+    u32 held;   // keys held (0 behind a dialog)
 } ConfigView;
+
+// What A does on a row, for the action bar
+static const char *cfg_verb(const AppConfig *cfg, int index) {
+    switch (cfg_rows[index].kind) {
+        case CFG_TEXT:   return "Edit";
+        case CFG_SWITCH: return cfg_switch_on(cfg, index) ? "Turn off" : "Turn on";
+        case CFG_CHOOSE: return "Choose";
+        default:         return "Run";
+    }
+}
+
+static void cfg_bar_item(const AppConfig *cfg, int index, UiBarItem *item) {
+    *item = (UiBarItem){ "A", cfg_verb(cfg, index), GUI_BTN_PRIMARY, 0, KEY_A, 140, false };
+}
 
 static void mask_key(const char *key, char *out, size_t size) {
     size_t len = strlen(key);
@@ -1014,10 +2270,19 @@ static void mask_key(const char *key, char *out, size_t size) {
     else snprintf(out, size, "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2");
 }
 
+static void set_cfg_note(int row, UiTone tone, const char *text) {
+    snprintf(cfg_note, sizeof(cfg_note), "%s", text);
+    cfg_note_tone = tone;
+    cfg_note_ms = gui_clock_ms();
+    if (!cfg_note_ms) cfg_note_ms = 1;
+    cfg_note_row = row;
+}
+
 static void config_top(void *ctx) {
     const ConfigView *v = ctx;
     ui_tab_header(UI_TAB_SETTINGS);
-    gui_panel(8, 32, GUI_TOP_W - 16, 118);
+    ui_tab_content_begin();
+    gui_panel(8, 32, GUI_TOP_W - 16, 128);
     float lh = gui_line_h(GUI_S_BODY) + 1, y = 40;
     char key[48];
     mask_key(v->cfg->api_key, key, sizeof(key));
@@ -1035,44 +2300,135 @@ static void config_top(void *ctx) {
     kv(20, y + 4 * lh, 96, GUI_TOP_W - 40, "Console ID", v->cfg->console_id, HEX_DIM);
     kv(20, y + 5 * lh, 96, GUI_TOP_W - 40, "Config file", CONFIG_PATH, HEX_DIM);
 
-    // Help for the highlighted entry
-    gui_rrect(8, 158, GUI_TOP_W - 16, 52, 7, gui_rgb(HEX_BG2));
-    gui_rrect(8, 158, 4, 52, 2, gui_rgb(HEX_ACCENT));
-    gui_text(20, 163, GUI_S_SMALL, gui_rgb(HEX_ACCENT2), GUI_LEFT, cfg_labels[v->selected]);
-    gui_text_wrap(20, 163 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_TOP_W - 40, 2,
-                  cfg_help[v->selected]);
+    // Help for the highlighted entry, or what the last change on it did
+    const float hy = 164, hh = 50;
+    u64 now = gui_now_ms();
+    bool note = cfg_note_row == v->selected && cfg_note[0] && now >= cfg_note_ms &&
+                now - cfg_note_ms < GUI_TOAST_STALE_MS;
+    gui_rrect(8, hy, GUI_TOP_W - 16, hh, 7, gui_rgb(HEX_BG2));
+    if (note) {
+        u32 hex = ui_tone_hex(cfg_note_tone);
+        float fade_prev = gui_fade_push(1 - gui_effect_t(cfg_note_ms, now, GUI_FADE_MS * 2));
+        gui_rrect(8, hy, 4, hh, 2, gui_rgb(hex));
+        gui_text(20, hy + 5, GUI_S_SMALL, gui_rgb(hex), GUI_LEFT, cfg_rows[v->selected].label);
+        gui_text_wrap(20, hy + 5 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_TOP_W - 40, 2,
+                      cfg_note);
+        gui_fade_pop(fade_prev);
+    } else {
+        char title[64];
+        snprintf(title, sizeof(title), "%s  \xC2\xB7  %s", cfg_rows[v->selected].group, cfg_rows[v->selected].label);
+        gui_rrect(8, hy, 4, hh, 2, gui_rgb(HEX_ACCENT));
+        gui_text(20, hy + 5, GUI_S_SMALL, gui_rgb(HEX_ACCENT2), GUI_LEFT, title);
+        gui_text_wrap(20, hy + 5 + gui_line_h(GUI_S_SMALL), GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_TOP_W - 40, 2,
+                      cfg_rows[v->selected].help);
+    }
+    ui_tab_content_end();
     static const GuiHint hints[] = { { "UD", "Move" }, { "START", "Exit" } };
     gui_footer(hints, 2);
 }
 
-static void config_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+#define SWITCH_W 28
+#define SWITCH_H 16
+
+// On: accent fill, knob right. Off: line-coloured fill, knob left. The
+// knob (and the fill with it) glides; on the bar it gets an ink outline so
+// the accent pill stays visible on the accent bar.
+static void draw_switch(float right, float cy, float t, float hl) {
+    float x = right - SWITCH_W, y = cy - SWITCH_H / 2.0f;
+    if (hl > 0.5f) gui_rrect(x - 1, y - 1, SWITCH_W + 2, SWITCH_H + 2, SWITCH_H / 2.0f + 1, gui_rgb(HEX_INK));
+    gui_rrect(x, y, SWITCH_W, SWITCH_H, SWITCH_H / 2.0f, gui_mix(HEX_LINE, HEX_ACCENT, t));
+    float r = SWITCH_H / 2.0f - 2;
+    gui_circle(x + 2 + r + t * (SWITCH_W - 4 - 2 * r), cy, r, gui_rgb(0xFFFFFF));
+}
+
+static void config_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     const ConfigView *v = ctx;
-    u32 text = selected ? HEX_INK : HEX_TEXT;
-    if (index == CFG_ACTIONS) gui_rect(x + 10, y, w - 20, 1, gui_rgb(HEX_LINE));
-    gui_text_mid(x + 12, y, h, GUI_S_BODY, gui_rgb(text), GUI_LEFT, 0, cfg_labels[index]);
-    char value[64] = "";
-    if (index == CFG_SERVER_URL) snprintf(value, sizeof(value), "%.63s", v->cfg->server_url);
-    else if (index == CFG_SERVER_URL_ALT)
-        snprintf(value, sizeof(value), "%.63s", v->cfg->server_url_alt[0] ? v->cfg->server_url_alt : "(not set)");
-    else if (index == CFG_API_KEY) mask_key(v->cfg->api_key, value, sizeof(value));
-    else if (index == CFG_NDS_DIR)
-        snprintf(value, sizeof(value), "%.63s", v->cfg->nds_dir[0] ? v->cfg->nds_dir : "(not set)");
-    else if (index == CFG_UPDATE && !v->cfg->update_check) snprintf(value, sizeof(value), "Off");
+    const AppConfig *cfg = v->cfg;
+    if (cfg_group_start(index)) gui_rect(x + 10, y, w - 20, 1, gui_rgb(HEX_LINE));
+    float lw = gui_text_mid(x + 12, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, 0,
+                            cfg_rows[index].label);
+    float right = x + w - 12, room = right - (x + 12 + lw + 12);
+    u32 dim = gui_mix(HEX_DIM, HEX_INK, hl);
+
+    if (cfg_rows[index].kind == CFG_SWITCH) {
+        draw_switch(right, y + h / 2, cfg_knob[index].x, hl);
+        return;
+    }
+    if (cfg_probe[index][0]) {
+        // The last check of this value, this session
+        u32 hex = cfg_probe_ok[index] ? HEX_OK : HEX_WARN;
+        gui_text_mid(right, y, h, GUI_S_SMALL, gui_mix(hex, HEX_INK, hl), GUI_RIGHT, room, cfg_probe[index]);
+        return;
+    }
+    char value[MAX_PATH_LEN + 8] = "";
+    u32 color = dim;
+    switch (index) {
+        case CFG_SERVER_URL:
+            snprintf(value, sizeof(value), "%s", cfg->server_url[0] ? cfg->server_url : "(not set)");
+            break;
+        case CFG_SERVER_URL_ALT:
+            snprintf(value, sizeof(value), "%s", cfg->server_url_alt[0] ? cfg->server_url_alt : "(not set)");
+            break;
+        case CFG_API_KEY:
+            mask_key(cfg->api_key, value, sizeof(value));
+            break;
+        case CFG_NDS_DIR:
+            // A path keeps its end: "...roms/nds"
+            if (cfg->nds_dir[0]) gui_fit_left(cfg->nds_dir, GUI_S_SMALL, room, value, sizeof(value));
+            else snprintf(value, sizeof(value), "(not set)");
+            break;
+        case CFG_BACKUPS:
+            ui_format_copies(cfg->local_backups, value, sizeof(value));
+            break;
+        case CFG_UPDATE:
+            if (!cfg->update_check) {
+                snprintf(value, sizeof(value), "Off");
+                color = gui_mix(HEX_MUTED, HEX_INK, hl);
+            }
+            break;
+        default:
+            break;
+    }
     if (value[0])
-        gui_text_mid(x + w - 12, y, h, GUI_S_SMALL, gui_rgb(selected ? HEX_INK : HEX_DIM), GUI_RIGHT, 150, value);
+        gui_text_mid(right, y, h, GUI_S_SMALL, color, GUI_RIGHT, room, value);
     else
-        gui_text_mid(x + w - 14, y, h, GUI_S_BODY, gui_rgb(selected ? HEX_INK : HEX_MUTED), GUI_RIGHT, 0, ">");
+        gui_text_mid(x + w - 14, y, h, GUI_S_BODY, gui_mix(HEX_MUTED, HEX_INK, hl), GUI_RIGHT, 0, ">");
+}
+
+// Kept across visits to the tab, like the selection
+static UiListAnim config_anim;
+
+// The switch knobs glide toward their values, once a frame (also behind a
+// dialog, so the TLS confirm doesn't freeze them)
+static void step_knobs(const AppConfig *cfg) {
+    if (cfg_knob_init && cfg_knob_frame == gui_ticks()) return;
+    for (int i = 0; i < CFG_ITEMS; i++) {
+        if (cfg_rows[i].kind != CFG_SWITCH) continue;
+        float target = cfg_switch_on(cfg, i) ? 1.0f : 0.0f;
+        if (!cfg_knob_init) gui_spring_set(&cfg_knob[i], target);
+        else gui_spring(&cfg_knob[i], target, GUI_RESP_PILL, gui_dt());
+    }
+    cfg_knob_init = true;
+    cfg_knob_frame = gui_ticks();
 }
 
 static void config_bottom(void *ctx) {
     ConfigView *v = ctx;
-    static UiListAnim anim;
-    ui_list(&anim, 0, GUI_HEADER_H + 4, GUI_BOT_W, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, v->selected, 0,
-            config_row, v);
-    gui_header_bar();
+    step_knobs(v->cfg);
+    ui_tab_content_begin();
+    ui_list_draw(&config_anim, &cfg_geom, CFG_ITEMS, v->selected, v->scroll, config_row, v);
+    ui_tab_content_end();
+    gui_header_bar_ex(ui_list_at_top(&config_anim));
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Settings");
-    static const GuiHint hints[] = { { "A", "Select" }, { "LR", "First / last" } };
-    gui_footer(hints, 2);
+    UiBarItem item;
+    cfg_bar_item(v->cfg, v->selected, &item);
+    float right = ui_bar_layout(&item, 1, &(GuiRect){ 0, 0, 0, 0 }, &(GuiRect){ 0, 0, 0, 0 });
+    ui_bar_draw(&v->bar, &item, 1, v->held);
+    // The rest of the bar: what LEFT / RIGHT do here
+    float x = right + 14, cy = GUI_BAR_Y + GUI_BAR_H / 2.0f;
+    x += gui_button(x, cy, "LR") + 4;
+    gui_text_mid(x, GUI_BAR_Y, GUI_BAR_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, 0, "First / last");
 }
 
 static void save_settings(const AppConfig *config) {
@@ -1080,81 +2436,212 @@ static void save_settings(const AppConfig *config) {
         ui_message(UI_TONE_ERR, "Settings", "Couldn't write the settings to the SD card:\n" UI_DIM CONFIG_PATH);
 }
 
-// After a server address changed: pick the primary again, or probe both
-// when an alternate is set (as at startup)
-static void select_server(AppConfig *config) {
+static void probe_answer(int row, bool ok, const char *version) {
+    cfg_probe_ok[row] = ok;
+    if (!ok) snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "No answer (saved anyway)");
+    else if (version && version[0]) snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Answered \xC2\xB7 v%.20s", version);
+    else snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Answered");
+}
+
+// After a server address was saved: does it answer (GET /status), and which
+// address do requests use from now on (the primary when it answers, else
+// the alternate if that does, as at startup). Informs, never blocks.
+static void check_server(AppConfig *config, int row) {
+    ui_job_settle();   // a cancelled job may still be talking to the server
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
+    AppConfig probe = *config;
+    char version[24];
+    if (row == CFG_SERVER_URL_ALT) {
+        cfg_probe[CFG_SERVER_URL_ALT][0] = '\0';
+        config->use_alt_url = false;
+        if (!config->server_url_alt[0]) return;   // turned off: the primary only
+        ui_busy("Settings", msg);
+        probe.use_alt_url = true;
+        bool alt_ok = network_probe_status(&probe, version, sizeof(version));
+        probe_answer(CFG_SERVER_URL_ALT, alt_ok, version);
+        probe.use_alt_url = false;
+        config->use_alt_url = alt_ok && !network_probe_status(&probe, NULL, 0);
+        return;
+    }
+    ui_busy("Settings", msg);
+    probe.use_alt_url = false;
+    bool ok = network_probe_status(&probe, version, sizeof(version));
+    probe_answer(CFG_SERVER_URL, ok, version);
     config->use_alt_url = false;
-    if (!config->server_url_alt[0]) return;
-    ui_busy("Settings", "Looking for the server...");
-    network_select_server(config);
+    if (!ok && config->server_url_alt[0]) {
+        probe.use_alt_url = true;
+        config->use_alt_url = network_probe_status(&probe, NULL, 0);
+    }
+}
+
+// After the API key was saved: the cheapest request that needs it
+static void check_key(const AppConfig *config) {
+    ui_job_settle();
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Checking the key%s", gui_ellipsis());
+    ui_busy("Settings", msg);
+    u32 status = titles_probe_key(config);
+    cfg_probe_ok[CFG_API_KEY] = status == 200;
+    if (status == 200) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key accepted");
+    else if (status == 401) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key rejected (401)");
+    else if (status == 0) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "No answer (saved anyway)");
+    else cfg_probe[CFG_API_KEY][0] = '\0';   // some other answer: says nothing about the key
+}
+
+// Settings > NDS ROM folder: the folder picker. Saved straight away (it
+// isn't destructive); the help panel then says what the folder holds.
+static void choose_nds_dir(AppConfig *config) {
+    UiFolderRules rules = { "NDS ROM folder", nds_folder_rules.exts, NDS_ITEM_LABEL,
+                            nds_folder_rules.save_ext, nds_folder_rules.save_subdir, true };
+    char path[MAX_PATH_LEN];
+    FolderCount count;
+    if (!ui_pick_folder_ex(&rules, config->nds_dir, path, sizeof(path), &count)) return;
+    snprintf(config->nds_dir, sizeof(config->nds_dir), "%s", path);
+    save_settings(config);
+    char note[MAX_PATH_LEN + 64];
+    if (!path[0])
+        snprintf(note, sizeof(note), "None: DS games aren't scanned.");
+    else if (count.opened)
+        snprintf(note, sizeof(note), "%s \xC2\xB7 %d ROM%s, %d save%s", path, count.items,
+                 count.items == 1 ? "" : "s", count.saves, count.saves == 1 ? "" : "s");
+    else
+        snprintf(note, sizeof(note), "%s", path);
+    set_cfg_note(CFG_NDS_DIR, path[0] && count.opened && count.items > 0 ? UI_TONE_OK : UI_TONE_WARN, note);
+}
+
+// Settings > Local backups: opens on the current value
+static void choose_backups(AppConfig *config) {
+    int values[UI_BACKUP_CHOICES_MAX], initial = 0;
+    char labels[UI_BACKUP_CHOICES_MAX][UI_BACKUP_LABEL_LEN];
+    const char *items[UI_BACKUP_CHOICES_MAX];
+    int n = ui_backup_choices(config->local_backups, values, labels, &initial);
+    for (int i = 0; i < n; i++) items[i] = labels[i];
+    int pick = ui_choose_ex(UI_TONE_ACCENT, "Local backups", items, n, initial);
+    if (pick < 0 || values[pick] == config->local_backups) return;
+    config->local_backups = values[pick];
+    save_settings(config);
+}
+
+// A switch: flips and saves at once. Turning certificate checks off is the
+// one that asks (it exposes the API key on the network).
+static void toggle_switch(AppConfig *config, int index) {
+    switch (index) {
+        case CFG_TLS:
+            if (config->tls_verify &&
+                !ui_confirm(UI_TONE_WARN, "Turn off certificate checks?",
+                            "Anyone on the network could read your API key and saves.\n"
+                            UI_DIM "Only for a server on your own LAN.", "Turn off"))
+                return;
+            config->tls_verify = !config->tls_verify;
+            break;
+        case CFG_UPDATE_CHECK:
+            config->update_check = !config->update_check;
+            break;
+        case CFG_REDUCE_MOTION:
+            config->reduce_motion = !config->reduce_motion;
+            gui_set_reduce_motion(config->reduce_motion);
+            break;
+        default:
+            return;
+    }
+    save_settings(config);
+}
+
+// A on a row (or a tap on the selected row). True if the app must close.
+static bool settings_activate(AppConfig *config, int selected, SettingsActionFn run_action) {
+    SettingsResult action = SETTINGS_EXIT;
+    switch (selected) {
+        case CFG_SERVER_URL: {
+            UiTextField f = { "Server URL", "http://192.168.1.100:8000", "OK", false, true, false };
+            if (ui_edit_text_ex(&f, config->server_url, MAX_URL_LEN)) {
+                save_settings(config);
+                check_server(config, CFG_SERVER_URL);
+            }
+            break;
+        }
+        case CFG_SERVER_URL_ALT: {
+            // Empty turns the alternate address off
+            UiTextField f = { "Alternate URL", "Second address of the server (empty = off)", "OK", false, true, true };
+            if (ui_edit_text_ex(&f, config->server_url_alt, MAX_URL_LEN)) {
+                save_settings(config);
+                check_server(config, CFG_SERVER_URL_ALT);
+            }
+            break;
+        }
+        case CFG_API_KEY: {
+            UiTextField f = { "API key", "The server's SYNC_API_KEY", "OK", true, false, false };
+            if (ui_edit_text_ex(&f, config->api_key, MAX_API_KEY_LEN)) {
+                save_settings(config);
+                check_key(config);
+            }
+            break;
+        }
+        case CFG_TLS:
+        case CFG_UPDATE_CHECK:
+        case CFG_REDUCE_MOTION:
+            toggle_switch(config, selected);
+            break;
+        case CFG_NDS_DIR:
+            choose_nds_dir(config);
+            break;
+        case CFG_BACKUPS:
+            choose_backups(config);
+            break;
+        case CFG_RESCAN: action = SETTINGS_RESCAN; break;
+        case CFG_REFRESH_CATALOG: action = SETTINGS_REFRESH_CATALOG; break;
+        default: action = SETTINGS_UPDATE; break;
+    }
+    return action != SETTINGS_EXIT && run_action && run_action(action);
 }
 
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
-    static int selected = 0;   // kept while the user visits other tabs
-    ConfigView v = { config, selected };
+    static int selected = 0, scroll = 0;   // kept while the user visits other tabs
+    ConfigView v = { config, selected, scroll, UI_BAR_INIT, 0 };
     UiBackdrop prev = ui_set_backdrop(config_top, config_bottom, &v);
     SettingsResult result = SETTINGS_EXIT;  // the app is closing
 
     hidScanInput();
-    while (aptMainLoop()) {
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 down = in.down;
+        UiNav nav = ui_tab_nav(down);
+        if (nav == UI_NAV_PREV) { result = SETTINGS_NAV_PREV; break; }
+        if (nav == UI_NAV_NEXT) { result = SETTINGS_NAV_NEXT; break; }
+        if (nav == UI_NAV_EXIT) { result = SETTINGS_EXIT; break; }
+
+        // UP / DOWN wrap; LEFT / RIGHT are first / last (absolute moves, so
+        // they never need reattaching)
+        UiListEvent ev = ui_list_input(&config_anim, &cfg_geom, CFG_ITEMS, &v.selected, &v.scroll, &in,
+                                       in.rep & (KEY_UP | KEY_DOWN));
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
+            ui_list_keys(&config_anim, in.rep, CFG_ITEMS, CFG_ITEMS, &v.selected);
+            if (v.selected < v.scroll) v.scroll = v.selected;
+            if (v.selected >= v.scroll + CFG_ROWS) v.scroll = v.selected - CFG_ROWS + 1;
+        }
+
+        UiBarItem item;
+        cfg_bar_item(config, v.selected, &item);
+        int hit = ui_bar_input(&v.bar, &in, &item, 1);
+        if (hit == 0 || ev.kind == UI_LIST_TAP_SELECTED || (down & KEY_A)) {
+            ui_list_reveal(&config_anim, CFG_ITEMS, v.selected, &v.scroll);
+            if (settings_activate(config, v.selected, run_action)) {
+                result = SETTINGS_EXIT;
+                break;
+            }
+        }
+
+        v.held = in.held;
         gui_begin(true);
         gui_screen(GUI_TOP);
         config_top(&v);
         gui_screen(GUI_BOTTOM);
         config_bottom(&v);
         gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        if (rep & KEY_UP) v.selected = (v.selected - 1 + CFG_ITEMS) % CFG_ITEMS;
-        if (rep & KEY_DOWN) v.selected = (v.selected + 1) % CFG_ITEMS;
-        // Page up / down: the whole list fits on one page
-        if (rep & KEY_LEFT) v.selected = 0;
-        if (rep & KEY_RIGHT) v.selected = CFG_ITEMS - 1;
-        if (down & KEY_TOUCH) {
-            int i = ui_list_touch(GUI_HEADER_H + 4, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, 0);
-            if (i >= 0) v.selected = i;
-        }
-
-        UiNav nav = ui_tab_nav(down);
-        if (nav == UI_NAV_PREV) { result = SETTINGS_NAV_PREV; break; }
-        if (nav == UI_NAV_NEXT) { result = SETTINGS_NAV_NEXT; break; }
-        if (nav == UI_NAV_EXIT) { result = SETTINGS_EXIT; break; }
-        if (!(down & KEY_A)) continue;
-
-        SettingsResult action = SETTINGS_EXIT;
-        switch (v.selected) {
-            case CFG_SERVER_URL:
-                if (ui_edit_text("Server URL", "http://192.168.1.100:8000", config->server_url, MAX_URL_LEN)) {
-                    save_settings(config);
-                    select_server(config);
-                }
-                break;
-            case CFG_SERVER_URL_ALT:
-                if (ui_edit_text("Alternate URL", "Second address of the server (optional)",
-                                 config->server_url_alt, MAX_URL_LEN)) {
-                    save_settings(config);
-                    select_server(config);
-                }
-                break;
-            case CFG_API_KEY:
-                if (ui_edit_text("API key", "your-api-key", config->api_key, MAX_API_KEY_LEN))
-                    save_settings(config);
-                break;
-            case CFG_NDS_DIR:
-                if (ui_edit_text("NDS ROM folder", "sdmc:/roms/nds", config->nds_dir, MAX_PATH_LEN))
-                    save_settings(config);
-                break;
-            case CFG_RESCAN: action = SETTINGS_RESCAN; break;
-            case CFG_REFRESH_CATALOG: action = SETTINGS_REFRESH_CATALOG; break;
-            default: action = SETTINGS_UPDATE; break;
-        }
-        if (action != SETTINGS_EXIT && run_action && run_action(action)) {
-            result = SETTINGS_EXIT;
-            break;
-        }
+        v.held = 0;
     }
     selected = v.selected;
+    scroll = v.scroll;
     ui_restore_backdrop(prev);
     return result;
 }
@@ -1163,8 +2650,11 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
 // Text entry
 // ---------------------------------------------------------------------------
 
-// Characters of the D-pad editor
-static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789.:/-_ABCDEFGHIJKLMNOPQRSTUVWXYZ@?=&#%+!";
+// The longest field: a ROM path or a URL, whichever is longer
+#define UI_TEXT_MAX ((MAX_PATH_LEN > MAX_URL_LEN ? MAX_PATH_LEN : MAX_URL_LEN) + 1)
+
+// Characters of the D-pad editor (a space last, for searches)
+static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789.:/-_ABCDEFGHIJKLMNOPQRSTUVWXYZ@?=&#%+! ";
 static const int charset_len = sizeof(charset) - 1;
 
 static int charset_index(char c) {
@@ -1177,7 +2667,25 @@ typedef struct {
     const char *title, *hint;
     const char *text;
     int cursor, len;
+    bool password;
 } EditView;
+
+#define BULLET "\xE2\x80\xA2"
+
+// `n` bytes of `s`, or that many bullets for a password
+static void edit_span(const EditView *e, const char *s, int n, char *out, size_t size) {
+    if (!e->password) {
+        snprintf(out, size, "%.*s", n, s);
+        return;
+    }
+    size_t pos = 0;
+    out[0] = '\0';
+    for (int i = 0; i < n && pos + 4 <= size; i++) {
+        memcpy(out + pos, BULLET, 3);
+        pos += 3;
+        out[pos] = '\0';
+    }
+}
 
 static void edit_top(void *ctx) {
     const EditView *e = ctx;
@@ -1185,14 +2693,15 @@ static void edit_top(void *ctx) {
     gui_panel(8, 40, GUI_TOP_W - 16, 90);
     gui_text(20, 48, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, e->hint);
 
-    // Text box with a window around the cursor
+    // Text box with a window around the cursor. A password shows bullets,
+    // except the character under the cursor (the one being chosen).
     float bx = 20, by = 72, bw = GUI_TOP_W - 40, bh = 30;
     gui_rrect(bx, by, bw, bh, 6, gui_rgb(HEX_BG));
     gui_rrect(bx, by + bh - 2, bw, 2, 1, gui_rgb(HEX_ACCENT));
     int start = 0;
-    char before[256];
+    char before[UI_TEXT_MAX * 3];
     for (;;) {
-        snprintf(before, sizeof(before), "%.*s", e->cursor - start, e->text + start);
+        edit_span(e, e->text + start, e->cursor - start, before, sizeof(before));
         if (gui_text_w(GUI_S_BODY, before) < bw - 30 || start >= e->cursor) break;
         start++;
     }
@@ -1202,13 +2711,15 @@ static void edit_top(void *ctx) {
     char cur[2] = { e->cursor < e->len ? e->text[e->cursor] : ' ', 0 };
     float cw = gui_text_w(GUI_S_BODY, cur);
     if (cw < 6) cw = 6;
-    bool blink = (gui_ticks() / 20) % 2 == 0;
+    bool blink = (gui_now_ms() / 333) % 2 == 0;
     gui_rrect(x, by + 6, cw + 2, bh - 12, 2, gui_rgb(blink ? HEX_ACCENT : HEX_PANEL_HI));
     gui_text(x + 1, ty, GUI_S_BODY, gui_rgb(HEX_INK), GUI_LEFT, cur);
-    if (e->cursor < e->len)
-        gui_text_fit(x + cw + 3, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT,
-                     bx + bw - (x + cw + 3) - 6, e->text + e->cursor + 1);
-    gui_text(20, 140, GUI_S_SMALL, gui_rgb(HEX_MUTED), GUI_LEFT,
+    if (e->cursor < e->len) {
+        char after[UI_TEXT_MAX * 3];
+        edit_span(e, e->text + e->cursor + 1, e->len - e->cursor - 1, after, sizeof(after));
+        gui_text_fit(x + cw + 3, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, bx + bw - (x + cw + 3) - 6, after);
+    }
+    gui_text(20, 140, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
              "The system keyboard is unavailable: edit with the D-pad.");
     gui_footer(NULL, 0);
 }
@@ -1229,25 +2740,19 @@ static void edit_bottom(void *ctx) {
     }
 }
 
-static bool dpad_editor(const char *title, const char *hint, char *buffer, int max_len) {
-    char temp[256];
-    snprintf(temp, sizeof(temp), "%s", buffer);
+static bool dpad_editor(const UiTextField *f, char *buffer, int max_len) {
+    char temp[UI_TEXT_MAX];
     if (max_len > (int)sizeof(temp)) max_len = sizeof(temp);
-    EditView e = { title, hint, temp, (int)strlen(temp), (int)strlen(temp) };
+    ui_utf8_copy(buffer, temp, max_len);
+    EditView e = { f->title, f->hint ? f->hint : "", temp, (int)strlen(temp), (int)strlen(temp), f->password };
     UiBackdrop prev = ui_set_backdrop(edit_top, edit_bottom, &e);
     bool confirmed = false;
 
     hidScanInput();
-    while (aptMainLoop()) {
-        gui_begin(true);
-        gui_screen(GUI_TOP);
-        edit_top(&e);
-        gui_screen(GUI_BOTTOM);
-        edit_bottom(&e);
-        gui_end();
-
-        hidScanInput();
-        u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
+    ui_input_latch_touch();
+    UiInput in;
+    while (ui_input_scan(&in)) {
+        u32 down = in.down, rep = in.rep;
         if (rep & KEY_LEFT && e.cursor > 0) e.cursor--;
         if (rep & KEY_RIGHT && e.cursor < e.len) e.cursor++;
         if (rep & (KEY_UP | KEY_DOWN)) {
@@ -1270,35 +2775,73 @@ static bool dpad_editor(const char *title, const char *hint, char *buffer, int m
             e.len--;
         }
         if (down & KEY_A) {
-            confirmed = true;
-            break;
+            // The same check as the keyboard's: say why, and keep editing
+            const char *err = ui_text_field_error(temp, f->url, f->allow_empty);
+            if (!err) {
+                confirmed = true;
+                break;
+            }
+            ui_message(UI_TONE_WARN, f->title, err);
+            hidScanInput();
+            continue;
         }
         if (down & KEY_B) break;
+
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        edit_top(&e);
+        gui_screen(GUI_BOTTOM);
+        edit_bottom(&e);
+        gui_end();
     }
+    ui_input_latch_touch();
     ui_restore_backdrop(prev);
     if (confirmed) snprintf(buffer, max_len, "%s", temp);
     return confirmed;
 }
 
-bool ui_edit_text(const char *title, const char *hint, char *buffer, int max_len) {
-    char text[MAX_URL_LEN + 1];
-    if (max_len > (int)sizeof(text)) max_len = sizeof(text);
+// The keyboard applet calls this on OK: a URL field keeps the keyboard open
+// with the reason until the text starts with http:// or https://
+static SwkbdCallbackResult url_filter(void *user, const char **message, const char *text, size_t len) {
+    (void)len;
+    const UiTextField *f = user;
+    const char *err = ui_text_field_error(text, true, f->allow_empty);
+    if (!err) return SWKBD_CALLBACK_OK;
+    *message = err;
+    return SWKBD_CALLBACK_CONTINUE;
+}
+
+bool ui_edit_text_ex(const UiTextField *f, char *buffer, int max_len) {
+    char text[UI_TEXT_MAX * 4];   // UTF-8: up to 4 bytes a character
+    if (max_len > UI_TEXT_MAX) max_len = UI_TEXT_MAX;
+    if (max_len < 2) return false;
     SwkbdState kb;
     swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, max_len - 1);
-    swkbdSetHintText(&kb, hint);
+    swkbdSetHintText(&kb, f->hint ? f->hint : "");
     swkbdSetInitialText(&kb, buffer);
-    swkbdSetValidation(&kb, SWKBD_ANYTHING, 0, 0);
+    swkbdSetValidation(&kb, f->allow_empty ? SWKBD_ANYTHING : SWKBD_NOTEMPTY_NOTBLANK,
+                       f->url ? SWKBD_FILTER_CALLBACK : 0, 0);
+    if (f->url) swkbdSetFilterCallback(&kb, url_filter, (void *)f);
+    if (f->password) swkbdSetPasswordMode(&kb, SWKBD_PASSWORD_HIDE_DELAY);
     swkbdSetButton(&kb, SWKBD_BUTTON_LEFT, "Cancel", false);
-    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, "OK", true);
+    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, f->ok_label ? f->ok_label : "OK", true);
     text[0] = '\0';
     SwkbdButton button = swkbdInputText(&kb, text, sizeof(text));
+    // Whatever the applet did, its last touch must not reach the screen
+    hidScanInput();
+    ui_input_latch_touch();
     if (button == SWKBD_BUTTON_RIGHT) {
-        snprintf(buffer, max_len, "%s", text);
+        ui_utf8_copy(text, buffer, max_len);
         return true;
     }
     if (button == SWKBD_BUTTON_LEFT) return false;
     // No keyboard result: HOME / power pressed, or the applet couldn't run
     SwkbdResult r = swkbdGetResult(&kb);
     if (r == SWKBD_HOMEPRESSED || r == SWKBD_RESETPRESSED || r == SWKBD_POWERPRESSED) return false;
-    return dpad_editor(title, hint, buffer, max_len);
+    return dpad_editor(f, buffer, max_len);
+}
+
+bool ui_edit_text(const char *title, const char *hint, char *buffer, int max_len) {
+    UiTextField f = { title, hint, "OK", false, false, true };
+    return ui_edit_text_ex(&f, buffer, max_len);
 }

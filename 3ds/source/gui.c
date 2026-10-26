@@ -1,3 +1,8 @@
+// Drawing kit of the 3DS client (see gui.h).
+//
+// Spring response/damping parameterisation, momentum projection and
+// rubber-band formulas from Apple's *Designing Fluid Interfaces* (WWDC 2018).
+// The springs themselves live in gui_motion.c.
 #include "gui.h"
 #include "network.h"
 #include <3ds/util/utf.h>
@@ -11,13 +16,21 @@ static int screen_id = GUI_TOP;
 static u32 ticks;
 static const char *ellipsis = "...";
 
-u32 gui_mix(u32 a, u32 b, float t) {
-    if (t < 0) t = 0;
+// Monotonic clock: system ticks since gui_init()
+static u64 tick0, frame_tick, frame_ms;
+static float frame_dt = 1.0f / 60.0f;
+
+u32 gui_mix_hex(u32 a, u32 b, float t) {
+    if (!(t > 0)) t = 0;   // also NaN
     if (t > 1) t = 1;
-    int r = (int)(((a >> 16) & 0xFF) * (1 - t) + ((b >> 16) & 0xFF) * t);
-    int g = (int)(((a >> 8) & 0xFF) * (1 - t) + ((b >> 8) & 0xFF) * t);
-    int bl = (int)((a & 0xFF) * (1 - t) + (b & 0xFF) * t);
-    return gui_rgb(((u32)r << 16) | ((u32)g << 8) | (u32)bl);
+    int r = (int)(((a >> 16) & 0xFF) * (1 - t) + ((b >> 16) & 0xFF) * t + 0.5f);
+    int g = (int)(((a >> 8) & 0xFF) * (1 - t) + ((b >> 8) & 0xFF) * t + 0.5f);
+    int bl = (int)((a & 0xFF) * (1 - t) + (b & 0xFF) * t + 0.5f);
+    return ((u32)r << 16) | ((u32)g << 8) | (u32)bl;
+}
+
+u32 gui_mix(u32 a, u32 b, float t) {
+    return gui_rgb(gui_mix_hex(a, b, t));
 }
 
 // ---------------------------------------------------------------------------
@@ -31,8 +44,9 @@ void gui_init(void) {
     C2D_Prepare();
     target_top = C2D_CreateScreenTarget(GFX_TOP, GFX_LEFT);
     target_bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
-    text_buf = C2D_TextBufNew(4096);
+    text_buf = C2D_TextBufNew(6144);
     fontEnsureMapped();
+    tick0 = frame_tick = svcGetSystemTick();
 
     // Use a real ellipsis when the system font has one
     CFNT_s *font = fontGetSystemFont();
@@ -47,11 +61,80 @@ void gui_exit(void) {
     gfxExit();
 }
 
-void gui_begin(bool vsync) {
-    C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : 0);
-    C2D_TextBufClear(text_buf);
-    ticks++;
+u64 gui_clock_ms(void) {
+    return (svcGetSystemTick() - tick0) / (SYSCLOCK_ARM11 / 1000);
 }
+
+// The fade on now (toward HEX_BG), see gui_fade_push()
+static float fade_now;
+static float transition_fade_prev;
+static GuiXf transition_xf_prev = { 1.0f, 0.0f, 0.0f };
+
+// The view transform on now (what C2D_ViewTranslate/Scale were given), so
+// gui_clip() can put the scissor where the content actually is
+static GuiXf view_xf = { 1.0f, 0.0f, 0.0f };
+
+static void view_set(GuiXf xf) {
+    C2D_ViewReset();
+    if (!gui_xf_is_identity(xf)) {
+        // M = T * S: p' = s * p + t
+        C2D_ViewTranslate(xf.tx, xf.ty);
+        C2D_ViewScale(xf.s, xf.s);
+    }
+    view_xf = xf;
+}
+
+// The modal scrim: one presentation value for the whole app (see gui.h)
+static GuiSpring scrim;
+static int scrim_depth;
+static bool scrim_drawn;    // a modal drew it this frame
+
+#ifdef GUI_PERF
+// Loop CPU time of the frame: from ui_input_scan() to gui_end(), minus
+// the vsync wait inside gui_begin()
+static u64 perf_loop_tick, perf_wait_ticks;
+void gui_perf_loop_mark(void) {
+    perf_loop_tick = svcGetSystemTick();
+    perf_wait_ticks = 0;
+}
+#endif
+
+void gui_begin(bool vsync) {
+#ifdef GUI_PERF
+    u64 wait0 = svcGetSystemTick();
+#endif
+    C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : 0);
+#ifdef GUI_PERF
+    perf_wait_ticks += svcGetSystemTick() - wait0;
+#endif
+    C2D_TextBufClear(text_buf);
+    fade_now = 0;
+    transition_fade_prev = 0;
+    C2D_Fade(0);
+    view_set(GUI_XF_IDENTITY);
+    ticks++;
+    // Sampled after the vsync wait, so dt is the real frame-to-frame time
+    u64 now = svcGetSystemTick();
+    frame_dt = gui_dt_clamp((float)(now - frame_tick) / (float)SYSCLOCK_ARM11);
+    frame_tick = now;
+    frame_ms = (now - tick0) / (SYSCLOCK_ARM11 / 1000);
+
+    // The scrim follows the modals: up while one is open, down after the
+    // last returned. It is an opacity, so reduced motion keeps it (rising
+    // as a GUI_FADE_MS ramp there instead of a spring).
+    scrim_drawn = false;
+    float target = scrim_depth > 0 ? 1.0f : 0.0f;
+    if (gui_reduce_motion() && target > scrim.x) {
+        scrim.x += frame_dt * 1000.0f / GUI_FADE_MS;
+        if (scrim.x > 1) scrim.x = 1;
+        scrim.v = 0;
+    } else {
+        gui_spring_always(&scrim, target, GUI_RESP_SCRIM, frame_dt);
+    }
+}
+
+float gui_dt(void) { return frame_dt; }
+u64 gui_now_ms(void) { return frame_ms; }
 
 void gui_screen(int screen) {
     C3D_RenderTarget *t = (screen == GUI_TOP) ? target_top : target_bottom;
@@ -59,21 +142,180 @@ void gui_screen(int screen) {
     screen_w = (screen == GUI_TOP) ? GUI_TOP_W : GUI_BOT_W;
     C2D_TargetClear(t, gui_rgb(HEX_BG));
     C2D_SceneBegin(t);
+    // A clip or a transform left on by mistake must not reach the next screen
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    view_set(GUI_XF_IDENTITY);
     // Soft vertical gradient behind everything
     gui_vgrad(0, 0, screen_w, GUI_H, gui_rgb(0x131D29), gui_rgb(HEX_BG));
 }
 
+#ifdef GUI_PERF
+u32 gui_perf_coast_overspeed;
+
+// Top-right corner of the top screen: the previous frame's citro3d time
+// (command building + GPU drawing) and this frame's loop CPU time (input
+// scan, springs, row callbacks: from ui_input_scan() to here, without the
+// vsync wait), red past the 12 ms budget
+static void perf_overlay(void) {
+    float ms = C3D_GetProcessingTime() + C3D_GetDrawingTime();
+    float cpu = -1;
+    if (perf_loop_tick) {
+        u64 spent = svcGetSystemTick() - perf_loop_tick;
+        spent = spent > perf_wait_ticks ? spent - perf_wait_ticks : 0;
+        cpu = (float)spent * 1000.0f / (float)SYSCLOCK_ARM11;
+        perf_loop_tick = 0;
+    }
+    char buf[64], loop[24] = "";
+    if (cpu >= 0) snprintf(loop, sizeof(loop), "  cpu %.1f", cpu);
+    if (gui_perf_coast_overspeed)
+        snprintf(buf, sizeof(buf), "%.1f ms%s  coast>v %lu", ms, loop, (unsigned long)gui_perf_coast_overspeed);
+    else
+        snprintf(buf, sizeof(buf), "%.1f ms%s", ms, loop);
+    C2D_SceneBegin(target_top);
+    view_set(GUI_XF_IDENTITY);
+    C2D_Fade(0);
+    float w = gui_text_w(GUI_S_SMALL, buf) + 8;
+    gui_rect(GUI_TOP_W - w - 2, 2, w, 14, gui_rgba(0x000000, 0xC0));
+    bool over = ms > 12.0f || cpu > 12.0f || gui_perf_coast_overspeed;
+    gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(over ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
+}
+#endif
+
 void gui_end(void) {
+    // After a modal returned, its scrim fades out over the screen that is
+    // live again (the card itself was cut on the commit frame)
+    if (!scrim_drawn && scrim.x > 0.004f) {
+        C2D_SceneBegin(target_bottom);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        view_set(GUI_XF_IDENTITY);
+        fade_now = 0;
+        C2D_Fade(0);
+        gui_rect(0, 0, GUI_BOT_W, GUI_H, gui_rgba(0x05090D, (u8)(GUI_SCRIM_ALPHA * scrim.x)));
+    }
+#ifdef GUI_PERF
+    perf_overlay();
+#endif
     C3D_FrameEnd(0);
+}
+
+// ---------------------------------------------------------------------------
+// Modals
+// ---------------------------------------------------------------------------
+
+void gui_scrim_open(void) { scrim_depth++; }
+
+void gui_scrim_close(void) {
+    if (scrim_depth > 0) scrim_depth--;
+}
+
+void gui_scrim_full(void) { gui_spring_set(&scrim, 1); }
+
+float gui_scrim_value(void) { return scrim.x; }
+
+void gui_dim_alpha(u8 alpha) {
+    gui_rect(0, 0, screen_w, GUI_H, gui_rgba(0x05090D, alpha));
+}
+
+void gui_scrim_draw(void) {
+    gui_dim_alpha((u8)(GUI_SCRIM_ALPHA * scrim.x));
+    if (screen_id == GUI_BOTTOM) scrim_drawn = true;
+}
+
+void gui_modal_open(GuiModal *m, float pivot_x, float pivot_y) {
+    memset(m, 0, sizeof(*m));
+    gui_spring_set(&m->t, 0);
+    m->open_ms = gui_clock_ms();
+    if (!m->open_ms) m->open_ms = 1;
+    m->px = pivot_x;
+    m->py = pivot_y;
+    m->frame = ticks - 1;
+    m->open = true;
+    gui_scrim_open();
+}
+
+void gui_modal_close(GuiModal *m) {
+    if (!m->open) return;
+    m->open = false;
+    gui_scrim_close();
+}
+
+void gui_modal_begin(GuiModal *m) {
+    gui_scrim_draw();
+    if (m->frame != ticks) {   // once a frame
+        m->frame = ticks;
+        gui_spring(&m->t, 1, GUI_RESP_MODAL, frame_dt);
+    }
+    m->xf_prev = view_xf;
+    m->fade_prev = fade_now;
+    if (gui_reduce_motion()) {
+        // No rise or scale: the card fades in over GUI_FADE_MS
+        float k = gui_effect_t(m->open_ms, gui_clock_ms(), GUI_FADE_MS);
+        m->fade_prev = gui_fade_push(1.0f - k);
+    } else if (m->t.x < 1) {
+        view_set(gui_xf_compose(view_xf, gui_modal_xf(m->t.x, m->px, m->py)));
+    }
+}
+
+void gui_modal_end(GuiModal *m) {
+    view_set(m->xf_prev);
+    gui_fade_pop(m->fade_prev);
 }
 
 float gui_w(void) { return screen_w; }
 u32 gui_ticks(void) { return ticks; }
 
-void gui_ease(float *value, float target, float speed) {
-    float d = target - *value;
-    if (fabsf(d) < 0.01f) *value = target;
-    else *value += d * speed;
+void gui_transition_start(GuiTransition *t, float from_px) {
+    t->from = from_px;
+    t->start_ms = gui_clock_ms();
+    t->frame = ticks;
+    gui_spring_set(&t->off, gui_reduce_motion() ? 0 : from_px);
+}
+
+static void fade_apply(float f) {
+    C2D_Fade(f > 0 ? gui_rgba(HEX_BG, (u8)(f * 255)) : 0);
+}
+
+float gui_fade_push(float amount) {
+    float prev = fade_now;
+    if (amount > 0) {
+        fade_now = gui_fade_compose(prev, amount);
+        fade_apply(fade_now);
+    }
+    return prev;
+}
+
+void gui_fade_pop(float previous) {
+    if (previous == fade_now) return;
+    fade_now = previous;
+    fade_apply(previous);
+}
+
+void gui_transition_begin(GuiTransition *t) {
+    float fade;
+    if (gui_reduce_motion()) {
+        // Opacity only, timed: GUI_FADE_MS from fully faded to clear
+        gui_spring_set(&t->off, 0);
+        u64 age = gui_now_ms() > t->start_ms ? gui_now_ms() - t->start_ms : 0;
+        fade = age >= GUI_FADE_MS ? 0 : 0.6f * (1.0f - (float)age / GUI_FADE_MS);
+    } else {
+        if (t->frame != ticks) {
+            t->frame = ticks;
+            gui_spring(&t->off, 0, GUI_RESP_PUSH, frame_dt);
+        }
+        float k = t->from != 0 ? fabsf(t->off.x) / fabsf(t->from) : 0;
+        fade = 0.6f * (k > 1 ? 1 : k);
+    }
+    transition_xf_prev = view_xf;
+    if (t->off.x != 0) view_set(gui_xf_compose(view_xf, gui_xf_pivot(1, 0, 0, t->off.x, 0)));
+    // citro2d has no global alpha: tint toward the background instead
+    transition_fade_prev = gui_fade_push(fade);
+}
+
+void gui_transition_end(void) {
+    view_set(transition_xf_prev);
+    transition_xf_prev = GUI_XF_IDENTITY;
+    gui_fade_pop(transition_fade_prev);
+    transition_fade_prev = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +369,61 @@ void gui_icon_check(float cx, float cy, float s, u32 color) {
     if (t < 1.5f) t = 1.5f;
     C2D_DrawLine(cx - s * 0.42f, cy, color, cx - s * 0.12f, cy + s * 0.3f, color, t, 0.5f);
     C2D_DrawLine(cx - s * 0.12f, cy + s * 0.3f, color, cx + s * 0.45f, cy - s * 0.32f, color, t, 0.5f);
+}
+
+static float icon_stroke(float s) {
+    float t = s * 0.18f;
+    return t < 1.5f ? 1.5f : t;
+}
+
+void gui_icon_x(float cx, float cy, float s, u32 color) {
+    float h = s * 0.35f, t = icon_stroke(s);
+    C2D_DrawLine(cx - h, cy - h, color, cx + h, cy + h, color, t, 0.5f);
+    C2D_DrawLine(cx - h, cy + h, color, cx + h, cy - h, color, t, 0.5f);
+}
+
+void gui_icon_chevron_left(float cx, float cy, float s, u32 color) {
+    float t = icon_stroke(s);
+    C2D_DrawLine(cx + s * 0.22f, cy - s * 0.42f, color, cx - s * 0.22f, cy, color, t, 0.5f);
+    C2D_DrawLine(cx - s * 0.22f, cy, color, cx + s * 0.22f, cy + s * 0.42f, color, t, 0.5f);
+}
+
+void gui_icon_search(float cx, float cy, float s, u32 color) {
+    // Ring of short segments (citro2d has no ring) and a handle at 45 degrees
+    float t = icon_stroke(s) * 0.8f, r = s * 0.3f;
+    float rx = cx - s * 0.1f, ry = cy - s * 0.1f;
+    const int n = 12;
+    for (int i = 0; i < n; i++) {
+        float a0 = (float)i / n * 2 * (float)M_PI, a1 = (float)(i + 1) / n * 2 * (float)M_PI;
+        C2D_DrawLine(rx + cosf(a0) * r, ry + sinf(a0) * r, color, rx + cosf(a1) * r, ry + sinf(a1) * r, color,
+                     t, 0.5f);
+    }
+    float d = r * 0.7071f;
+    C2D_DrawLine(rx + d, ry + d, color, cx + s * 0.42f, cy + s * 0.42f, color, t * 1.3f, 0.5f);
+}
+
+// The screens are rotated 90 degrees in the framebuffer: x on screen runs
+// down the framebuffer from its far end, y on screen runs across it from
+// its far end. Coordinates are clamped to the screen.
+void gui_clip(float x, float y, float w, float h) {
+    C2D_Flush();
+    // Where the rect is on screen under the current view transform
+    GuiRect r = gui_xf_rect(view_xf, gui_rect_make(x, y, w, h));
+    x = r.x, y = r.y, w = r.w, h = r.h;
+    float W = screen_w;
+    float left = GUI_H - (y + h), top = W - (x + w), right = GUI_H - y, bottom = W - x;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (right > GUI_H) right = GUI_H;
+    if (bottom > W) bottom = W;
+    if (right < left) right = left;
+    if (bottom < top) bottom = top;
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)left, (u32)top, (u32)right, (u32)bottom);
+}
+
+void gui_clip_off(void) {
+    C2D_Flush();
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +510,40 @@ static bool fit(const char *s, float scale, float max_w, char *out, size_t size)
     memcpy(out, s, len);
     strcpy(out + len, ellipsis);
     return true;
+}
+
+const char *gui_ellipsis(void) { return ellipsis; }
+
+void gui_fit(const char *s, float scale, float max_w, char *out, size_t size) {
+    if (!out || size == 0) return;
+    if (!s) s = "";
+    fit(s, scale, max_w, out, size);
+}
+
+void gui_fit_left(const char *s, float scale, float max_w, char *out, size_t size) {
+    if (!out || size == 0) return;
+    if (!s) s = "";
+    float total = gui_text_w(scale, s);
+    if (total <= max_w) {
+        snprintf(out, size, "%s", s);
+        return;
+    }
+    // Drop characters from the front until the rest fits after the
+    // ellipsis (one pass: the width left is the total minus what's dropped)
+    float limit = max_w - gui_text_w(scale, ellipsis), w = total;
+    const char *p = s;
+    while (*p && w > limit) {
+        u32 cp;
+        int n = next_cp(p, &cp);
+        w -= glyph_w(cp, scale);
+        p += n;
+    }
+    // Start at a '/' when there is one ahead (".../roms/nds")
+    if (*p != '/') {
+        const char *slash = strchr(p, '/');
+        if (slash && slash[1]) p = slash;
+    }
+    snprintf(out, size, "%s%s", ellipsis, p);
 }
 
 float gui_text_fit(float x, float y, float scale, u32 color, GuiAlign align, float max_w, const char *s) {
@@ -317,27 +648,35 @@ static u32 button_hex(const char *b) {
     return 0xAAB8C5;
 }
 
+static bool is_shoulder(const char *b) {
+    return !strcmp(b, "L") || !strcmp(b, "R") || !strcmp(b, "ZR");
+}
+
 float gui_button_w(const char *b) {
+    if (!strcmp(b, "ZR")) return 21;
     if (strlen(b) == 1) return (*b == 'L' || *b == 'R') ? 17 : 13;
     if (!strcmp(b, "DPAD") || !strcmp(b, "UD") || !strcmp(b, "LR")) return 13;
     return gui_text_w(0.32f, b) + 8;
 }
 
-float gui_button(float x, float cy, const char *b) {
-    u32 ink = gui_rgb(HEX_INK);
-    if (strlen(b) == 1 && (*b == 'L' || *b == 'R')) {
+// `muted`: the glyph of a disabled button (flat, no key colour)
+static float button_glyph(float x, float cy, const char *b, bool muted) {
+    u32 ink = gui_rgb(muted ? HEX_MUTED : HEX_INK);
+    u32 fill = gui_rgb(muted ? HEX_LINE : button_hex(b));
+    if (is_shoulder(b)) {
         // Shoulder button: rounded tab
-        gui_rrect(x, cy - 6.5f, 17, 13, 4, gui_rgb(button_hex(b)));
-        gui_text_mid(x + 8.5f, cy - 6.5f, 13, 0.38f, ink, GUI_CENTER, 0, b);
-        return 17;
+        float w = gui_button_w(b);
+        gui_rrect(x, cy - 6.5f, w, 13, 4, fill);
+        gui_text_mid(x + w / 2, cy - 6.5f, 13, 0.38f, ink, GUI_CENTER, 0, b);
+        return w;
     }
     if (strlen(b) == 1) {
-        gui_circle(x + 6.5f, cy, 6.5f, gui_rgb(button_hex(b)));
+        gui_circle(x + 6.5f, cy, 6.5f, fill);
         gui_text_mid(x + 6.6f, cy - 6.5f, 13, 0.38f, ink, GUI_CENTER, 0, b);
         return 13;
     }
     if (!strcmp(b, "DPAD") || !strcmp(b, "UD") || !strcmp(b, "LR")) {
-        u32 base = gui_rgb(0x6F8295), hi = gui_rgb(HEX_TEXT);
+        u32 base = gui_rgb(muted ? HEX_LINE : 0x6F8295), hi = gui_rgb(muted ? HEX_MUTED : HEX_TEXT);
         bool ud = !strcmp(b, "UD"), lr = !strcmp(b, "LR"), all = !ud && !lr;
         // Cross: vertical arm, horizontal arm, then highlighted halves
         gui_rect(x + 4.5f, cy - 6.5f, 4, 13, (ud || all) ? hi : base);
@@ -348,17 +687,110 @@ float gui_button(float x, float cy, const char *b) {
     }
     // START / SELECT
     float w = gui_text_w(0.32f, b) + 8;
-    gui_rrect(x, cy - 5.5f, w, 11, 5.5f, gui_rgb(button_hex(b)));
+    gui_rrect(x, cy - 5.5f, w, 11, 5.5f, fill);
     gui_text_mid(x + w / 2, cy - 5.5f, 11, 0.32f, ink, GUI_CENTER, 0, b);
     return w;
+}
+
+float gui_button(float x, float cy, const char *b) {
+    return button_glyph(x, cy, b, false);
+}
+
+// A button glyph names a key ("A"), a drawn icon ("^up", "^down",
+// "^search") or a key then an icon ("A^up")
+enum { BTN_ICON_NONE = 0, BTN_ICON_UP, BTN_ICON_DOWN, BTN_ICON_SEARCH };
+#define BTN_ICON_W 10
+
+static void split_glyph(const char *glyph, char *key, size_t key_size, int *icon) {
+    *icon = BTN_ICON_NONE;
+    key[0] = '\0';
+    if (!glyph) return;
+    const char *caret = strchr(glyph, '^');
+    size_t n = caret ? (size_t)(caret - glyph) : strlen(glyph);
+    if (n >= key_size) n = key_size - 1;
+    memcpy(key, glyph, n);
+    key[n] = '\0';
+    if (!caret) return;
+    if (!strcmp(caret + 1, "up")) *icon = BTN_ICON_UP;
+    else if (!strcmp(caret + 1, "down")) *icon = BTN_ICON_DOWN;
+    else if (!strcmp(caret + 1, "search")) *icon = BTN_ICON_SEARCH;
+}
+
+static float glyph_part_w(const char *key, int icon) {
+    float w = key[0] ? gui_button_w(key) : 0;
+    if (icon) w += (w > 0 ? 3 : 0) + BTN_ICON_W;
+    return w;
+}
+
+float gui_btn_content_w(const char *glyph, const char *label) {
+    char key[12];
+    int icon;
+    split_glyph(glyph, key, sizeof(key), &icon);
+    float w = glyph_part_w(key, icon);
+    if (label && *label) w += (w > 0 ? 4 : 0) + gui_text_w(GUI_S_SMALL, label);
+    return w;
+}
+
+void gui_btn(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex, bool pressed) {
+    gui_btn_ex(r, glyph, label, style, tone_hex, pressed, false);
+}
+
+void gui_btn_ex(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex,
+                bool pressed, bool on) {
+    if (r.w <= 0 || r.h <= 0) return;
+    if (style == GUI_BTN_DISABLED) pressed = false;
+    if (!tone_hex) tone_hex = HEX_ACCENT;
+    if (pressed) r = gui_rect_grow(r, -1);   // the 0.97-scale equivalent at this size
+    u32 text;
+    switch (style) {
+        case GUI_BTN_PRIMARY:
+            gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R,
+                      pressed ? gui_mix(tone_hex, 0x000000, 0.20f) : gui_rgb(tone_hex));
+            text = HEX_INK;
+            break;
+        case GUI_BTN_TONAL:
+            gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R, gui_rgb(HEX_LINE));
+            gui_rrect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, GUI_BTN_R - 1,
+                      gui_mix(HEX_PANEL_HI, tone_hex, on ? (pressed ? 0.55f : 0.35f) : (pressed ? 0.35f : 0)));
+            text = HEX_TEXT;
+            break;
+        default:
+            gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R, gui_rgb(HEX_BG2));
+            text = HEX_MUTED;
+            break;
+    }
+    // Glyph (key, icon) + label centred, never closer than 6 px to the edges
+    char key[12];
+    int icon;
+    split_glyph(glyph, key, sizeof(key), &icon);
+    float gw = glyph_part_w(key, icon);
+    if (gw > 0) gw += 4;
+    char fitted[GUI_WRAP_LINE];
+    gui_fit(label ? label : "", GUI_S_SMALL, r.w - 12 - gw, fitted, sizeof(fitted));
+    float cw = gw + gui_text_w(GUI_S_SMALL, fitted);
+    if (!fitted[0] && gw > 0) cw -= 4;
+    float x = r.x + (r.w - cw) / 2;
+    if (x < r.x + 6) x = r.x + 6;
+    float cy = r.y + r.h / 2;
+    if (key[0]) x += button_glyph(x, cy, key, style == GUI_BTN_DISABLED) + (icon ? 3 : 4);
+    if (icon) {
+        u32 c = gui_rgb(text);
+        float icx = x + BTN_ICON_W / 2.0f;
+        if (icon == BTN_ICON_UP) gui_icon_up(icx, cy, 9, c);
+        else if (icon == BTN_ICON_DOWN) gui_icon_down(icx, cy, 9, c);
+        else gui_icon_search(icx, cy, 11, c);
+        x += BTN_ICON_W + 4;
+    }
+    if (fitted[0]) gui_text_mid(x, r.y, r.h, GUI_S_SMALL, gui_rgb(text), GUI_LEFT, 0, fitted);
 }
 
 void gui_bar(float x, float y, float w, float h, float frac, u32 color) {
     gui_rrect(x, y, w, h, h / 2, gui_rgb(HEX_BG2));
     if (frac < 0) {
         // Indeterminate: a segment sliding back and forth
+        // Wall-clock phase (~1.75 s period): right however often it's drawn
         float seg = w * 0.3f;
-        float t = (sinf(ticks * 0.06f) + 1) / 2;
+        float t = (sinf((float)(gui_now_ms() % 1745) * (2.0f * (float)M_PI / 1745.0f)) + 1) / 2;
         gui_rrect(x + (w - seg) * t, y, seg, h, h / 2, color);
         return;
     }
@@ -373,7 +805,7 @@ void gui_bar(float x, float y, float w, float h, float frac, u32 color) {
 
 void gui_spinner(float cx, float cy, float r, u32 color) {
     const int dots = 8;
-    int head = (ticks / 4) % dots;
+    int head = (int)((gui_now_ms() / 66) % dots);   // ~0.5 s per turn, wall clock
     for (int i = 0; i < dots; i++) {
         float a = (float)i / dots * 2 * (float)M_PI;
         int age = (head - i + dots) % dots;
@@ -385,6 +817,10 @@ void gui_spinner(float cx, float cy, float r, u32 color) {
 
 void gui_scrollbar(float x, float y, float h, int first, int visible, int total, float smooth_first) {
     (void)first;
+    gui_scrollbar_ex(x, y, h, visible, total, smooth_first, HEX_DIM);
+}
+
+void gui_scrollbar_ex(float x, float y, float h, int visible, int total, float smooth_first, u32 thumb_hex) {
     if (total <= visible || total <= 0) return;
     gui_rrect(x, y, 3, h, 1.5f, gui_rgb(HEX_BG2));
     float th = h * visible / total;
@@ -392,7 +828,7 @@ void gui_scrollbar(float x, float y, float h, int first, int visible, int total,
     float ty = y + (h - th) * (smooth_first / (float)(total - visible));
     if (ty < y) ty = y;
     if (ty > y + h - th) ty = y + h - th;
-    gui_rrect(x, ty, 3, th, 1.5f, gui_rgb(HEX_DIM));
+    gui_rrect(x, ty, 3, th, 1.5f, gui_rgb(thumb_hex));
 }
 
 void gui_panel(float x, float y, float w, float h) {
@@ -400,7 +836,7 @@ void gui_panel(float x, float y, float w, float h) {
     gui_rrect(x, y, w, h, 7, gui_rgb(HEX_PANEL));
 }
 
-void gui_card(float x, float y, float w, float h, const char *title, u32 tone) {
+void gui_card_ex(float x, float y, float w, float h, const char *title, u32 tone, bool x_icon) {
     // Drop shadow
     gui_rrect(x + 2, y + 3, w, h, 8, gui_rgb(0x070B10));
     gui_rrect(x - 1, y - 1, w + 2, h + 2, 8, gui_mix(HEX_LINE, tone, 0.4f));
@@ -410,18 +846,50 @@ void gui_card(float x, float y, float w, float h, const char *title, u32 tone) {
         gui_rrect(x, y, w, 24, 7, gui_rgb(HEX_PANEL_HI));
         gui_rect(x, y + 14, w, 10, gui_rgb(HEX_PANEL_HI));
         gui_rect(x, y + 24, w, 1, gui_rgb(HEX_LINE));
-        gui_rrect(x + 9, y + 8, 4, 8, 2, gui_rgb(tone));
-        gui_text_mid(x + 19, y, 24, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - 28, title);
+        float tx = x + 19;
+        if (x_icon) {
+            // An error: a cross in a tone disc instead of the tone tab
+            gui_circle(x + 15, y + 12, 6.5f, gui_rgb(tone));
+            gui_icon_x(x + 15, y + 12, 9, gui_rgb(HEX_INK));
+            tx = x + 27;
+        } else {
+            gui_rrect(x + 9, y + 8, 4, 8, 2, gui_rgb(tone));
+        }
+        gui_text_mid(tx, y, 24, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, w - (tx - x) - 9, title);
+    }
+}
+
+void gui_card(float x, float y, float w, float h, const char *title, u32 tone) {
+    gui_card_ex(x, y, w, h, title, tone, false);
+}
+
+// A ring of 16 segments (citro2d has no ring primitive)
+void gui_ring(float cx, float cy, float r, float thick, u32 color) {
+    const int n = 16;
+    for (int i = 0; i < n; i++) {
+        float a0 = (float)i / n * 2 * (float)M_PI, a1 = (float)(i + 1) / n * 2 * (float)M_PI;
+        C2D_DrawLine(cx + cosf(a0) * r, cy + sinf(a0) * r, color, cx + cosf(a1) * r, cy + sinf(a1) * r, color,
+                     thick, 0.5f);
     }
 }
 
 void gui_dim(void) {
-    gui_rect(0, 0, screen_w, GUI_H, gui_rgba(0x05090D, 0xB4));
+    gui_dim_alpha(GUI_SCRIM_ALPHA);
+    if (screen_id == GUI_BOTTOM) scrim_drawn = true;
+}
+
+void gui_header_bar_ex(bool line) {
+    gui_rect(0, 0, screen_w, GUI_HEADER_H, gui_rgb(HEX_BG2));
+    if (line) gui_rect(0, GUI_HEADER_H - 1, screen_w, 1, gui_rgb(HEX_LINE));
 }
 
 void gui_header_bar(void) {
-    gui_rect(0, 0, screen_w, GUI_HEADER_H, gui_rgb(HEX_BG2));
-    gui_rect(0, GUI_HEADER_H - 1, screen_w, 1, gui_rgb(HEX_LINE));
+    gui_header_bar_ex(true);
+}
+
+void gui_scroll_edges(float x, float w, float top_y, float bottom_y, bool above, bool below) {
+    if (above) gui_vgrad(x, top_y, w, 6, gui_rgba(HEX_BG2, 0xFF), gui_rgba(HEX_BG2, 0x00));
+    if (below) gui_vgrad(x, bottom_y - 6, w, 6, gui_rgba(HEX_BG2, 0x00), gui_rgba(HEX_BG2, 0xFF));
 }
 
 float gui_status_icons(float x_right, float cy) {
@@ -465,7 +933,8 @@ void gui_header_tabs(const char *const *labels, int count, int active) {
     float cy = GUI_HEADER_H / 2.0f;
     float x = 30;
     x += gui_button(x, cy, "L") + 4;
-    x = gui_tabs(x, 4, 18, labels, count, active) + 4;
+    static GuiTabsAnim anim;   // one strip, shared by every tab's header
+    x = gui_tabs(&anim, x, 4, 18, labels, count, active, NULL) + 4;
     gui_button(x, cy, "R");
     if (screen_id == GUI_TOP) {
         float left = gui_status_icons(screen_w - 8, cy);
@@ -496,17 +965,60 @@ void gui_footer(const GuiHint *hints, int count) {
     }
 }
 
-float gui_tabs(float x, float y, float h, const char *const *labels, int count, int active) {
-    float pad = 9, total = 0;
-    for (int i = 0; i < count; i++) total += gui_text_w(GUI_S_SMALL, labels[i]) + pad * 2;
-    gui_rrect(x, y, total + 4, h, h / 2, gui_rgb(HEX_BG));
+#define TAB_PAD 9
+
+float gui_tabs_layout(float x, float y, float h, const char *const *labels, int count, GuiRect *rects) {
     float cx = x + 2;
+    if (count > GUI_TABS_MAX) count = GUI_TABS_MAX;
     for (int i = 0; i < count; i++) {
-        float w = gui_text_w(GUI_S_SMALL, labels[i]) + pad * 2;
-        bool on = (i == active);
-        if (on) gui_rrect(cx, y + 2, w, h - 4, (h - 4) / 2, gui_rgb(HEX_ACCENT));
-        gui_text_mid(cx + w / 2, y, h, GUI_S_SMALL, gui_rgb(on ? HEX_INK : HEX_DIM), GUI_CENTER, 0, labels[i]);
+        float w = gui_text_w(GUI_S_SMALL, labels[i]) + TAB_PAD * 2;
+        if (rects) rects[i] = gui_rect_make(cx, y, w, h);
         cx += w;
     }
-    return x + total + 4;
+    return cx + 2;
+}
+
+float gui_tabs(GuiTabsAnim *a, float x, float y, float h, const char *const *labels, int count, int active,
+               GuiRect *rects) {
+    GuiRect seg[GUI_TABS_MAX];
+    if (count > GUI_TABS_MAX) count = GUI_TABS_MAX;
+    float right = gui_tabs_layout(x, y, h, labels, count, seg);
+    if (rects)
+        for (int i = 0; i < count; i++) rects[i] = seg[i];
+    gui_rrect(x, y, right - x, h, h / 2, gui_rgb(HEX_BG));
+    if (count <= 0) return right;
+
+    bool on = active >= 0 && active < count;
+    float tx = on ? seg[active].x - x : 0, tw = on ? seg[active].w : 0;
+    float px = tx, pw = tw;
+    if (a) {
+        if (!a->init || a->count != count) {
+            gui_spring_set(&a->x, tx);
+            gui_spring_set(&a->w, tw);
+            a->count = count;
+            a->init = true;
+        }
+        // Once a frame; a retarget mid-flight continues from where the pill is
+        if (a->frame != ticks) {
+            a->frame = ticks;
+            gui_spring(&a->x, tx, GUI_RESP_PILL, frame_dt);
+            gui_spring(&a->w, tw, GUI_RESP_PILL, frame_dt);
+        }
+        px = a->x.x;
+        pw = a->w.x;
+        // A finger on another segment: a soft press under its label
+        int held = a->held - 1;
+        if (held >= 0 && held < count && held != active)
+            gui_rrect(seg[held].x, y + 2, seg[held].w, h - 4, (h - 4) / 2, gui_mix(HEX_BG, HEX_ACCENT, 0.25f));
+    }
+    if (on && pw > 0) gui_rrect(x + px, y + 2, pw, h - 4, (h - 4) / 2, gui_rgb(HEX_ACCENT));
+    for (int i = 0; i < count; i++) {
+        // Label colour by how much of its segment the pill covers
+        float s0 = seg[i].x - x, s1 = s0 + seg[i].w;
+        float o0 = s0 > px ? s0 : px, o1 = s1 < px + pw ? s1 : px + pw;
+        float cover = on && o1 > o0 ? (o1 - o0) / seg[i].w : 0;
+        gui_text_mid(seg[i].x + seg[i].w / 2, y, h, GUI_S_SMALL, gui_mix(HEX_DIM, HEX_INK, cover), GUI_CENTER, 0,
+                     labels[i]);
+    }
+    return right;
 }

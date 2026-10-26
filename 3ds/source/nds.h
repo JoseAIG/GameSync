@@ -3,6 +3,13 @@
 
 #include "common.h"
 #include "archive.h"
+#include "folder_scan.h"
+
+// What counts as a DS ROM (".nds") and where its save lives ("<stem>.sav"
+// beside it, else in "saves/"): nds_scan() and the folder picker's preview
+// share these rules.
+extern const FolderRules nds_folder_rules;
+#define NDS_ITEM_LABEL ".nds ROMs"
 
 // Scan an SD card directory for NDS ROMs with .sav files.
 // Fills titles starting at offset, up to max_titles.

@@ -21,4 +21,28 @@ fi
 gcc $CFLAGS -o "$out/test_catalog_data" tests/test_catalog_data.c source/catalog_data.c
 "$out/test_catalog_data" "$out" ${CATALOG_JSON:+"$CATALOG_JSON"}
 
+# Modules that include common.h build against tests/host/3ds.h (types only)
+HOST_INC="-Itests/host -Iinclude"
+
+gcc $CFLAGS $HOST_INC -o "$out/test_history_parse" tests/test_history_parse.c source/history_parse.c
+"$out/test_history_parse"
+
+gcc $CFLAGS -o "$out/test_gui_motion" tests/test_gui_motion.c source/gui_motion.c -lm
+"$out/test_gui_motion"
+
+gcc $CFLAGS $HOST_INC -o "$out/test_config_file" tests/test_config_file.c source/config_file.c
+"$out/test_config_file"
+
+gcc $CFLAGS -o "$out/test_ui_format" tests/test_ui_format.c source/ui_format.c
+"$out/test_ui_format"
+
+gcc $CFLAGS $HOST_INC -o "$out/test_ui_gesture" tests/test_ui_gesture.c source/ui_gesture.c source/gui_motion.c -lm
+"$out/test_ui_gesture"
+
+gcc $CFLAGS -o "$out/test_folder_scan" tests/test_folder_scan.c source/folder_scan.c
+"$out/test_folder_scan"
+
+gcc $CFLAGS -o "$out/test_ui_job" tests/test_ui_job.c source/ui_job.c
+"$out/test_ui_job"
+
 rm -rf "$out"

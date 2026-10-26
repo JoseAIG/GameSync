@@ -15,6 +15,11 @@ void network_exit(void);
 // answered.
 bool network_select_server(AppConfig *config);
 
+// GET /status on the address requests go to now (config_active_url): true
+// when the server answers 200. `version` (may be NULL) gets the "version"
+// it reports, "" if none.
+bool network_probe_status(const AppConfig *config, char *version, int version_size);
+
 // Did the server answer the most recent request? -1 nothing sent yet,
 // 0 no answer (down / unreachable), 1 answered (any HTTP status).
 int network_server_state(void);

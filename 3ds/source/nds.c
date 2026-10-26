@@ -45,53 +45,28 @@ static u64 nds_gamecode_to_title_id(const char *code) {
     return tid;
 }
 
-// Check if a string ends with a suffix (case-insensitive)
-static bool ends_with_ci(const char *str, const char *suffix) {
-    int slen = strlen(str);
-    int suflen = strlen(suffix);
-    if (suflen > slen) return false;
-    for (int i = 0; i < suflen; i++) {
-        char a = str[slen - suflen + i];
-        char b = suffix[i];
-        if (a >= 'A' && a <= 'Z') a += 32;
-        if (b >= 'A' && b <= 'Z') b += 32;
-        if (a != b) return false;
-    }
-    return true;
-}
+// What counts as a DS ROM and where its save lives. One source of truth:
+// the folder picker's preview counts with the same rules (folder_scan.c).
+static const char *const nds_exts[] = { ".nds", NULL };
+const FolderRules nds_folder_rules = { nds_exts, ".sav", "saves" };
 
-// Find the .sav file for an NDS ROM. Checks:
+// Find the .sav file for an NDS ROM `rom_name` in folder `dir`. Checks:
 // 1. Same directory: <dir>/<stem>.sav
 // 2. saves/ subfolder: <dir>/saves/<stem>.sav
 // Returns true and fills sav_path_out on success.
-static bool find_sav_for_rom(const char *rom_path, char *sav_path_out, int out_size) {
-    // Extract directory and stem from rom_path
-    char dir[MAX_PATH_LEN];
-    char stem[MAX_PATH_LEN];
-    strncpy(dir, rom_path, MAX_PATH_LEN - 1);
-    dir[MAX_PATH_LEN - 1] = '\0';
-
-    // Find last / to split dir and filename
-    char *last_slash = strrchr(dir, '/');
-    if (!last_slash) return false;
-
-    char *filename = last_slash + 1;
-    strncpy(stem, filename, MAX_PATH_LEN - 1);
-    stem[MAX_PATH_LEN - 1] = '\0';
-    *last_slash = '\0';  // dir is now just the directory part
-
-    // Remove .nds extension from stem
-    char *dot = strrchr(stem, '.');
-    if (dot) *dot = '\0';
+static bool find_sav_for_rom(const char *dir, const char *rom_name, char *sav_path_out, int out_size) {
+    char sav_name[MAX_PATH_LEN], sub[MAX_PATH_LEN];
+    if (!folder_save_name(&nds_folder_rules, rom_name, sav_name, sizeof(sav_name))) return false;
 
     // Check same directory
-    snprintf(sav_path_out, out_size, "%s/%s.sav", dir, stem);
+    folder_path_join(dir, sav_name, sav_path_out, out_size);
     struct stat st;
     if (stat(sav_path_out, &st) == 0 && S_ISREG(st.st_mode))
         return true;
 
     // Check saves/ subfolder
-    snprintf(sav_path_out, out_size, "%s/saves/%s.sav", dir, stem);
+    folder_path_join(dir, nds_folder_rules.save_subdir, sub, sizeof(sub));
+    folder_path_join(sub, sav_name, sav_path_out, out_size);
     if (stat(sav_path_out, &st) == 0 && S_ISREG(st.st_mode))
         return true;
 
@@ -113,11 +88,11 @@ int nds_scan(const char *nds_dir, TitleInfo *titles, int offset, int max_titles)
         if (entry->d_name[0] == '.') continue;
 
         // Only process .nds files
-        if (!ends_with_ci(entry->d_name, ".nds")) continue;
+        if (!folder_name_has_ext(entry->d_name, nds_folder_rules.exts)) continue;
 
-        // Build full ROM path
+        // Build full ROM path (a folder at the root, "sdmc:/", gets no "//")
         char rom_path[MAX_PATH_LEN];
-        snprintf(rom_path, sizeof(rom_path), "%s/%s", nds_dir, entry->d_name);
+        folder_path_join(nds_dir, entry->d_name, rom_path, sizeof(rom_path));
 
         // Read game code from ROM header
         char code[5];
@@ -136,34 +111,17 @@ int nds_scan(const char *nds_dir, TitleInfo *titles, int offset, int max_titles)
 
         // Find matching .sav file (or set default path for downloads)
         char sav_path[MAX_PATH_LEN];
-        bool has_save = find_sav_for_rom(rom_path, sav_path, sizeof(sav_path));
+        bool has_save = find_sav_for_rom(nds_dir, entry->d_name, sav_path, sizeof(sav_path));
         if (!has_save) {
-            // Build default sav_path: prefer saves/ subfolder if it exists
-            char dir[MAX_PATH_LEN];
-            strncpy(dir, rom_path, MAX_PATH_LEN - 1);
-            dir[MAX_PATH_LEN - 1] = '\0';
-            char *sl = strrchr(dir, '/');
-            char stem[MAX_PATH_LEN];
-            if (sl) {
-                strncpy(stem, sl + 1, MAX_PATH_LEN - 1);
-                stem[MAX_PATH_LEN - 1] = '\0';
-                *sl = '\0';
-            } else {
-                strncpy(stem, rom_path, MAX_PATH_LEN - 1);
-                stem[MAX_PATH_LEN - 1] = '\0';
-                dir[0] = '\0';
-            }
-            char *dot = strrchr(stem, '.');
-            if (dot) *dot = '\0';
-
-            // Check if saves/ subfolder exists
-            char saves_sub[MAX_PATH_LEN];
-            snprintf(saves_sub, sizeof(saves_sub), "%s/saves", dir);
+            // Default sav_path: prefer the saves/ subfolder if it exists
+            char sav_name[MAX_PATH_LEN], saves_sub[MAX_PATH_LEN];
+            folder_save_name(&nds_folder_rules, entry->d_name, sav_name, sizeof(sav_name));
+            folder_path_join(nds_dir, nds_folder_rules.save_subdir, saves_sub, sizeof(saves_sub));
             struct stat st;
             if (stat(saves_sub, &st) == 0) {
-                snprintf(sav_path, sizeof(sav_path), "%s/saves/%s.sav", dir, stem);
+                folder_path_join(saves_sub, sav_name, sav_path, sizeof(sav_path));
             } else {
-                snprintf(sav_path, sizeof(sav_path), "%s/%s.sav", dir, stem);
+                folder_path_join(nds_dir, sav_name, sav_path, sizeof(sav_path));
             }
         }
 

@@ -42,6 +42,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -173,8 +174,11 @@ fun SavesScreen(
                 val r = state.result
                 val msg = "Sync done — ↑${r.uploaded} ↓${r.downloaded}" +
                         (if (r.conflicts.isNotEmpty()) " ⚠${r.conflicts.size} conflicts" else "") +
-                        (if (r.errors.isNotEmpty()) " ✗${r.errors.size} errors" else "")
-                snackbarHostState.showSnackbar(msg)
+                        (if (r.errors.isNotEmpty()) " ✗${r.errors.size} errors\n${r.errors.first()}" else "")
+                snackbarHostState.showSnackbar(
+                    msg,
+                    duration = if (r.errors.isNotEmpty()) SnackbarDuration.Long else SnackbarDuration.Short
+                )
                 viewModel.resetSyncState()
             }
             is SyncState.Error -> {

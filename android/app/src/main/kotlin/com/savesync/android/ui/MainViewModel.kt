@@ -1258,17 +1258,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (system != "3DS") return null
         if (!hex16TitleIdRegex.matches(titleInfo.title_id)) return null
 
-        // Per-emulator override wins over Emudeck. The override is expected
-        // to be the title root (sdmc/Nintendo 3DS/<id>/<id>/title); we feed
-        // it via candidateTitleRoots so defaultSaveDir's findTitleRoot picks
-        // it as the highest-priority candidate.
+        // Per-emulator override wins over Emudeck. The override may be
+        // Azahar's user folder or any level down to the title root
+        // (sdmc/Nintendo 3DS/<id>/<id>/title); we feed the resolved title
+        // root via candidateTitleRoots so defaultSaveDir picks it.
         val override = saveDirOverrides[AzaharEmulator.EMULATOR_KEY]
             ?.takeIf { it.isNotBlank() }
+        // A missing override folder (unmounted SD card, typo) must not get
+        // downloads written into a freshly created stray tree.
+        if (override != null && !File(override).isDirectory) return null
         val saveDir = if (override != null) {
             AzaharEmulator.defaultSaveDir(
                 storageBaseDir = Environment.getExternalStorageDirectory(),
                 titleId = titleInfo.title_id,
-                candidateTitleRoots = listOf(File(override))
+                candidateTitleRoots = listOf(
+                    AzaharEmulator.resolveOverrideTitleRoot(File(override))
+                )
             )
         } else {
             AzaharEmulator.defaultSaveDir(
@@ -2047,7 +2052,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val localSaves = if (activeFilter == "All") allLocalSaves
                                  else allLocalSaves.filter { it.systemName == activeFilter }
                 val result = engine.sync(localSaves)
-                _syncState.value = SyncState.Success(result)
+                // A broken save-folder override silently yields "nothing to
+                // sync" for that emulator; say so instead.
+                val overrideWarnings = EmulatorRegistry.saveDirOverrideWarnings(saveDirOverrides)
+                _syncState.value = SyncState.Success(
+                    result.copy(errors = overrideWarnings + result.errors)
+                )
                 // Refresh list so downloaded server-only entries drop the isServerOnly flag
                 // and status icons reflect the new sync state
                 scanSaves()

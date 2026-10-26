@@ -42,6 +42,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.savesync.android.emulators.EmulatorCatalog
 import com.savesync.android.emulators.EmulatorDescriptor
+import com.savesync.android.emulators.EmulatorRegistry
 import com.savesync.android.emulators.impl.RetroArchEmulator
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.FolderPickerDialog
@@ -108,6 +109,9 @@ fun EmulatorsScreen(
                 EmulatorCard(
                     descriptor = descriptor,
                     overridePath = settings.saveDirOverrides[descriptor.key],
+                    overrideWarning = EmulatorRegistry.saveDirOverrideWarning(
+                        descriptor.key, settings.saveDirOverrides[descriptor.key]
+                    ),
                     onBrowse = { folderPickerForEmulator = descriptor.key },
                     onClear = { viewModel.clearSaveDirOverride(descriptor.key) },
                     extras = if (descriptor.key == RetroArchEmulator.EMULATOR_KEY) {
@@ -152,6 +156,7 @@ fun EmulatorsScreen(
 private fun EmulatorCard(
     descriptor: EmulatorDescriptor,
     overridePath: String?,
+    overrideWarning: String?,
     onBrowse: () -> Unit,
     onClear: () -> Unit,
     extras: (@Composable () -> Unit)? = null,
@@ -200,6 +205,14 @@ private fun EmulatorCard(
                     fontWeight = if (isOverridden) FontWeight.Bold else FontWeight.Normal,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            if (overrideWarning != null) {
+                Text(
+                    text = overrideWarning,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
 

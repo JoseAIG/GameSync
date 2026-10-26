@@ -1,3 +1,5 @@
+import hmac
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -7,6 +9,15 @@ from app.services import share_token
 
 # Paths that never require an API key
 _OPEN_PATHS = {"/", "/docs", "/openapi.json", "/api/v1/status"}
+
+
+def _key_matches(candidate: str | None) -> bool:
+    """Constant-time comparison so response timing doesn't leak the key."""
+    if not candidate:
+        return False
+    return hmac.compare_digest(
+        candidate.encode("utf-8"), settings.api_key.encode("utf-8")
+    )
 
 
 class APIKeyMiddleware(BaseHTTPMiddleware):
@@ -29,12 +40,14 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 # Bad/expired token: fall through to api_key check so a
                 # legitimate api_key on the same request still wins.
 
-        # Accept the key via header (devices) or query param (direct download links)
-        api_key = (
-            request.headers.get("X-API-Key")
-            or request.query_params.get("api_key")
-        )
-        if api_key != settings.api_key:
+        # Accept the key via header (devices) or query param (direct download
+        # links from the web UI).  The query form leaks the key into proxy and
+        # tunnel logs and browser history, so it can be switched off with
+        # SYNC_ALLOW_QUERY_API_KEY=false.
+        api_key = request.headers.get("X-API-Key")
+        if not api_key and settings.allow_query_api_key:
+            api_key = request.query_params.get("api_key")
+        if not _key_matches(api_key):
             return JSONResponse(
                 status_code=401,
                 content={"detail": "Invalid or missing API key"},

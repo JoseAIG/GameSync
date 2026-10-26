@@ -412,3 +412,40 @@ class TestUpdateProxySSRF:
         )
         r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
         assert r.json()["available"] is True
+
+
+# ── Auth ────────────────────────────────────────────────────────────────────
+
+
+class TestApiKeyAuth:
+    def test_uses_constant_time_compare(self, client, api_key, monkeypatch):
+        import hmac
+
+        from app.middleware import auth
+
+        calls = []
+        real = hmac.compare_digest
+
+        def spy(a, b):
+            calls.append((a, b))
+            return real(a, b)
+
+        monkeypatch.setattr(auth.hmac, "compare_digest", spy)
+        assert client.get("/api/v1/titles", headers={"X-API-Key": api_key}).status_code == 200
+        assert client.get("/api/v1/titles", headers={"X-API-Key": "nope"}).status_code == 401
+        assert len(calls) == 2
+
+    def test_non_ascii_key_is_rejected_not_crashing(self, client):
+        r = client.get("/api/v1/titles", params={"api_key": "ñandú"})
+        assert r.status_code == 401
+
+    def test_query_key_accepted_by_default(self, client, api_key):
+        r = client.get("/api/v1/titles", params={"api_key": api_key})
+        assert r.status_code == 200
+
+    def test_query_key_can_be_disabled(self, client, api_key, monkeypatch):
+        monkeypatch.setattr(settings, "allow_query_api_key", False)
+        r = client.get("/api/v1/titles", params={"api_key": api_key})
+        assert r.status_code == 401
+        r = client.get("/api/v1/titles", headers={"X-API-Key": api_key})
+        assert r.status_code == 200

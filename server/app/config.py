@@ -178,6 +178,11 @@ class Settings(BaseSettings):
     # internet.  When False, the web UI loads without a key and prompts the
     # user to paste it (stored in their browser's localStorage).
     lan_admin: bool = False
+    # Accept the API key as ``?api_key=`` in the URL (used by the web UI for
+    # direct download links).  Keys in URLs end up in reverse-proxy / tunnel
+    # logs and browser history; set False to require the X-API-Key header
+    # (share links via ``?token=`` keep working).
+    allow_query_api_key: bool = True
     # Escape hatch: allow booting with the placeholder/empty api_key.  Off by
     # default so a fresh deploy fails loudly instead of running wide open.
     allow_weak_key: bool = False

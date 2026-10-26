@@ -289,6 +289,10 @@ static SyncResult write_save_safely(const AppConfig *config, const TitleInfo *ti
                                     const ArchiveFile *files, int file_count,
                                     SyncProgressCb progress) {
     char msg[128];
+
+    // A bundle with no files would wipe the save; never treat it as a save
+    if (file_count <= 0) return SYNC_ERR_BUNDLE;
+
     ArchiveFile *old_files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
     if (!old_files) return SYNC_ERR_BACKUP;
 

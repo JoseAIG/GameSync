@@ -58,9 +58,11 @@ static int compare_names(const void *a, const void *b) {
     return strcmp((const char *)a, (const char *)b);
 }
 
-// Keep only the newest `keep` backups of a title. Backup folder names are
-// timestamps (YYYYMMDD-HHMMSS), so name order is age order.
-static void prune_backups(const char *title_dir, int keep) {
+// Keep only the newest `keep` backups of a title, counting the one just
+// made (`current`, which is never deleted). Folder names are timestamps
+// (YYYYMMDD-HHMMSS), so name order is age order unless the clock was
+// moved back.
+static void prune_backups(const char *title_dir, const char *current, int keep) {
     DIR *dp = opendir(title_dir);
     if (!dp) return;
 
@@ -71,12 +73,13 @@ static void prune_backups(const char *title_dir, int keep) {
     struct dirent *ent;
     while ((ent = readdir(dp)) != NULL && count < MAX_BACKUP_DIRS) {
         if (ent->d_name[0] == '.' || strlen(ent->d_name) >= 32) continue;
+        if (strcmp(ent->d_name, current) == 0) continue;
         snprintf(names[count++], 32, "%s", ent->d_name);
     }
     closedir(dp);
 
     qsort(names, count, 32, compare_names);
-    for (int i = 0; i < count - keep; i++) {
+    for (int i = 0; i < count - (keep - 1); i++) {
         char path[MAX_PATH_LEN * 2];
         snprintf(path, sizeof(path), "%s/%s", title_dir, names[i]);
         remove_tree(path);
@@ -107,6 +110,7 @@ bool backup_save(const char *title_id_hex, const ArchiveFile *files, int file_co
     struct stat st;
     for (int n = 1; stat(dir, &st) == 0 && n < 100; n++)
         snprintf(dir, sizeof(dir), "%s/%s_%02d", title_dir, stamp, n);
+    if (stat(dir, &st) == 0) return false;  // Never mix two saves in one folder
 
     if (!mkdir_p(dir)) return false;
 
@@ -131,7 +135,7 @@ bool backup_save(const char *title_id_hex, const ArchiveFile *files, int file_co
         if (!ok) { remove_tree(dir); return false; }
     }
 
-    prune_backups(title_dir, keep);
+    prune_backups(title_dir, strrchr(dir, '/') + 1, keep);
 
     if (out_dir && out_size > 0) snprintf(out_dir, out_size, "%s", dir);
     return true;

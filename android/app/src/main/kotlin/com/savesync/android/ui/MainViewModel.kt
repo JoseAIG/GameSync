@@ -57,6 +57,7 @@ import com.savesync.android.sync.LocalBackups
 import com.savesync.android.sync.localSaveTimestamp
 import com.savesync.android.workers.SyncWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.currentCoroutineContext
@@ -2297,74 +2298,108 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun detectSystemFolders() {
         viewModelScope.launch {
             val romScanDir = effectiveRomScanDir(settingsStore.settingsFlow.first())
-            _detectedSystemFolders.value = EmulatorRegistry.detectSystemFolders(romScanDir)
+            _detectedSystemFolders.value = withContext(Dispatchers.IO) {
+                EmulatorRegistry.detectSystemFolders(romScanDir)
+            }
         }
     }
 
     /** Persists a per-system ROM folder override and triggers a rescan. */
-    fun setRomDirOverride(system: String, path: String) {
+    fun setRomDirOverride(system: String, path: String): Job =
         viewModelScope.launch {
             settingsStore.setRomDirOverride(system, path)
             scanSaves()
         }
-    }
 
     /** Removes a per-system override (reverts to auto-detected folder) and triggers a rescan. */
-    fun clearRomDirOverride(system: String) {
+    fun clearRomDirOverride(system: String): Job =
         viewModelScope.launch {
             settingsStore.clearRomDirOverride(system)
             scanSaves()
         }
+
+    // ── Settings: each control commits on its own ──────────────────────────
+    //
+    // Every setter writes only its own field (SettingsStore.updateSettings
+    // takes partial params) and returns the Job, so the screen can show
+    // "Saved" once the write has landed.  Folder and format changes rescan;
+    // auto-sync changes reschedule the worker; connection changes rebuild the
+    // API client and ping the server, never a rescan.
+
+    /** The stored settings, read once (the [settings] StateFlow starts as defaults). */
+    suspend fun loadSettings(): Settings = settingsStore.settingsFlow.first()
+
+    /** Commits the server URL and/or API key: client rebuild + ping, no rescan. */
+    fun commitServerConnection(serverUrl: String? = null, apiKey: String? = null): Job =
+        viewModelScope.launch {
+            if (serverUrl == null && apiKey == null) return@launch
+            settingsStore.updateSettings(serverUrl = serverUrl, apiKey = apiKey)
+            ApiClient.invalidate()
+            pingServerNow()
+        }
+
+    /** Turns auto sync on or off and (re)schedules the background worker. */
+    fun setAutoSync(enabled: Boolean): Job = viewModelScope.launch {
+        settingsStore.updateSettings(autoSyncEnabled = enabled)
+        val current = settingsStore.settingsFlow.first()
+        scheduleOrCancelAutoSync(enabled, current.autoSyncIntervalMinutes)
     }
 
-    fun saveSettings(
-        serverUrl: String,
-        apiKey: String,
-        autoSync: Boolean,
-        intervalMinutes: Int,
-        romScanDir: String = "",
-        emudeckDir: String = "",
-        saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN,
-        beetleSaturnPerCoreFolder: Boolean = true,
-        cdGamesPerContentFolder: Boolean = false,
-        segaCdSyncFormat: SegaCdSyncFormat = SegaCdSyncFormat.GENESIS_PLUS_GX,
-        ps2Emulator: Ps2EmulatorChoice = Ps2EmulatorChoice.AETHERSX2
-    ) {
-        viewModelScope.launch {
-            settingsStore.updateSettings(
-                serverUrl = serverUrl,
-                apiKey = apiKey,
-                autoSyncEnabled = autoSync,
-                autoSyncIntervalMinutes = intervalMinutes,
-                romScanDir = romScanDir,
-                emudeckDir = emudeckDir,
-                saturnSyncFormat = saturnSyncFormat,
-                beetleSaturnPerCoreFolder = beetleSaturnPerCoreFolder,
-                cdGamesPerContentFolder = cdGamesPerContentFolder,
-                segaCdSyncFormat = segaCdSyncFormat,
-                ps2Emulator = ps2Emulator
-            )
-            ApiClient.invalidate()
-            scheduleOrCancelAutoSync(autoSync, intervalMinutes)
-            scanSaves()
+    /** Changes the auto-sync interval; reschedules only while auto sync is on. */
+    fun setAutoSyncInterval(minutes: Int): Job = viewModelScope.launch {
+        settingsStore.updateSettings(autoSyncIntervalMinutes = minutes)
+        val current = settingsStore.settingsFlow.first()
+        if (current.autoSyncEnabled) scheduleOrCancelAutoSync(true, minutes)
+    }
+
+    /** ROM directory (blank clears it); rescans and re-detects system folders. */
+    fun setRomScanDir(path: String): Job = viewModelScope.launch {
+        settingsStore.updateSettings(romScanDir = path)
+        afterFolderChange()
+    }
+
+    /** Emudeck folder (blank clears it); rescans and re-detects system folders. */
+    fun setEmudeckDir(path: String): Job = viewModelScope.launch {
+        settingsStore.updateSettings(emudeckDir = path)
+        afterFolderChange()
+    }
+
+    fun setSaturnSyncFormat(format: SaturnSyncFormat): Job = viewModelScope.launch {
+        settingsStore.updateSettings(saturnSyncFormat = format)
+        scanSaves()
+    }
+
+    fun setSegaCdSyncFormat(format: SegaCdSyncFormat): Job = viewModelScope.launch {
+        settingsStore.updateSettings(segaCdSyncFormat = format)
+        scanSaves()
+    }
+
+    fun setPs2Emulator(choice: Ps2EmulatorChoice): Job = viewModelScope.launch {
+        settingsStore.updateSettings(ps2Emulator = choice)
+        scanSaves()
+    }
+
+    private suspend fun afterFolderChange() {
+        val romScanDir = effectiveRomScanDir(settingsStore.settingsFlow.first())
+        _detectedSystemFolders.value = withContext(Dispatchers.IO) {
+            EmulatorRegistry.detectSystemFolders(romScanDir)
         }
+        scanSaves()
     }
 
     /** Persists a per-emulator save folder override and triggers a rescan. */
-    fun setSaveDirOverride(emulatorKey: String, path: String) {
+    fun setSaveDirOverride(emulatorKey: String, path: String): Job =
         viewModelScope.launch {
             settingsStore.setSaveDirOverride(emulatorKey, path)
             scanSaves()
         }
-    }
 
     /** Removes a per-emulator save folder override and triggers a rescan. */
-    fun clearSaveDirOverride(emulatorKey: String) {
+    fun clearSaveDirOverride(emulatorKey: String): Job =
         viewModelScope.launch {
             settingsStore.clearSaveDirOverride(emulatorKey)
             scanSaves()
         }
-    }
 
     /**
      * Persists just the two RetroArch-specific toggles, used by

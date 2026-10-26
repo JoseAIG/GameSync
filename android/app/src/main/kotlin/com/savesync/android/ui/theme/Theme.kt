@@ -76,6 +76,8 @@ object GsShapes {
     val Pill = RoundedCornerShape(10.dp)
     val Choice = RoundedCornerShape(20.dp)
     val Hud = RoundedCornerShape(16.dp)
+    /** Text and dropdown fields (the focus ring follows their outline). */
+    val Field = RoundedCornerShape(4.dp)
 }
 
 /** Elevation per layer: rows sit flat, floating layers cast a shadow. */

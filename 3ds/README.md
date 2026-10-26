@@ -125,7 +125,8 @@ key that does the same thing.
 - **History restore**: before a saved version is written, the top screen shows
   the save on the console now (size, files, and whether it changed since the
   last sync) beside the chosen version (date, size, files), and the card says
-  whether the current save is backed up to the SD first. Only **A** restores.
+  whether the current save is backed up to the SD first. Only **A** (or
+  tapping **Restore**) writes it; **B** or **Cancel** leaves the save alone.
 
 Holding the D-pad repeats, and after a second Up / Down speed up. The
 highlight glides between rows; when a list wraps around it jumps to the other

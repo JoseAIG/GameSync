@@ -74,6 +74,7 @@ import com.savesync.android.findComponentActivity
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.gsEdgeBump
+import com.savesync.android.ui.components.AlphabetHud
 import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsButton
@@ -453,6 +454,7 @@ fun RomCatalogScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
+                                    holdNav.announceLetter(firstLetter(filtered[selectedIndex].name))
                                     follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
@@ -614,7 +616,8 @@ fun RomCatalogScreen(
                         )
                     }
                 }
-
+                // Over the list while a hold jumps by letter.
+                AlphabetHud(holdNav)
             }
 
             CatalogFooter(total = catalog.size, shown = filtered.size, raOnly = raOnly)

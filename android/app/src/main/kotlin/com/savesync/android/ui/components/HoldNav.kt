@@ -1,8 +1,40 @@
 package com.savesync.android.ui.components
 
 import android.os.SystemClock
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.GsElevation
+import com.savesync.android.ui.theme.GsShapes
+import com.savesync.android.ui.theme.LocalHighContrast
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsPopIn
+import com.savesync.android.ui.theme.gsPopOut
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEvent
 import androidx.compose.ui.input.key.KeyEventType
@@ -40,6 +72,42 @@ class HoldNavState {
     private var pressedDir: Int = 0
     private var repeatJob: Job? = null
     private var releaseJob: Job? = null
+
+    private val _mode = mutableStateOf(HoldMode.Idle)
+    /** Where the hold is in its ramp; the alphabet HUD shows while it is [HoldMode.Alpha]. */
+    val mode: State<HoldMode> = _mode
+
+    private val _letter = mutableStateOf("")
+    /** The letter the last alphabet jump landed on (what the HUD shows). */
+    val letter: State<String> = _letter
+    /** Last letter that ticked in this hold; cleared on a fresh press. */
+    private var tickedLetter: String = ""
+
+    /** The Tick fired on each letter change (set by [rememberHoldNavState]). */
+    var tick: (() -> Unit)? = null
+
+    internal fun setMode(mode: HoldMode) {
+        if (_mode.value != mode) _mode.value = mode
+    }
+
+    /** A fresh press starts a new hold: page mode, and its first letter will tick. */
+    internal fun beginHold() {
+        tickedLetter = ""
+        setMode(HoldMode.Page)
+    }
+
+    /**
+     * An alphabet jump landed on [letter]: the HUD shows it and, when it is a
+     * new letter, one Tick fires — before the frame that draws it.
+     */
+    fun announceLetter(letter: String) {
+        if (letter.isEmpty()) return
+        if (_letter.value != letter) _letter.value = letter
+        if (letter != tickedLetter) {
+            tickedLetter = letter
+            tick?.invoke()
+        }
+    }
 
     fun onKeyDown(
         dir: Int,
@@ -81,6 +149,7 @@ class HoldNavState {
             pressedDir = 0
             repeatJob?.cancel()
             repeatJob = null
+            setMode(HoldMode.Idle)
             // Reset active direction so the next press is treated as fresh
             // by onPress (otherwise this.dir would still match and held
             // would be a stale value from the previous hold).
@@ -90,8 +159,75 @@ class HoldNavState {
     }
 }
 
+/** Where a left/right hold is: a single press, faster pages, or letter jumps. */
+enum class HoldMode { Idle, Page, Alpha }
+
 @Composable
-fun rememberHoldNavState(): HoldNavState = remember { HoldNavState() }
+fun rememberHoldNavState(): HoldNavState {
+    val haptics = LocalGsHaptics.current
+    return remember(haptics) {
+        HoldNavState().also { state -> state.tick = { haptics?.perform(GsHaptic.Tick) } }
+    }
+}
+
+/** How long the alphabet HUD stays after the hold ends (restarted by each letter). */
+const val ALPHA_HUD_LINGER_MS = 500L
+
+/**
+ * The alphabet HUD: while a left/right hold is jumping by letter, a rounded
+ * square in the middle of the list shows the letter it landed on.  It pops
+ * in (opacity only under reduced motion) and leaves [ALPHA_HUD_LINGER_MS]
+ * after the hold ends.  It is not focusable and takes no input, so the hold
+ * keeps working underneath; TalkBack hears each letter (polite live region).
+ * Place it over the list, in a Box.
+ */
+@Composable
+fun AlphabetHud(holdNav: HoldNavState, modifier: Modifier = Modifier) {
+    val mode by holdNav.mode
+    val letter by holdNav.letter
+    val reduce = LocalReduceMotion.current
+    val high = LocalHighContrast.current
+    var visible by remember { mutableStateOf(false) }
+    // Keyed on the letter too: each new letter restarts the linger timer.
+    LaunchedEffect(mode, letter) {
+        if (mode == HoldMode.Alpha && letter.isNotEmpty()) {
+            visible = true
+        } else if (visible) {
+            delay(ALPHA_HUD_LINGER_MS)
+            visible = false
+        }
+    }
+    Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = gsPopIn(reduce),
+            exit = gsPopOut(reduce),
+            label = "alphabetHud",
+        ) {
+            Box(
+                modifier = Modifier
+                    .semantics {
+                        liveRegion = LiveRegionMode.Polite
+                        contentDescription = letter
+                    }
+                    .shadow(GsElevation.Hud, GsShapes.Hud)
+                    .clip(GsShapes.Hud)
+                    .background(if (high) GsColors.Panel else GsColors.Panel.copy(alpha = 0.92f))
+                    .border(1.dp, if (high) GsColors.Text else GsColors.Line, GsShapes.Hud)
+                    .sizeIn(minWidth = 72.dp, minHeight = 72.dp)
+                    .padding(12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    letter,
+                    style = MaterialTheme.typography.headlineSmall.copy(fontSize = 32.sp, lineHeight = 36.sp),
+                    fontWeight = FontWeight.Bold,
+                    color = GsColors.Accent,
+                )
+            }
+        }
+    }
+}
 
 private const val HOLD_FAST_AFTER_MS = 500L
 private const val HOLD_ALPHA_AFTER_MS = 1500L
@@ -124,6 +260,7 @@ fun HoldNavState.onPress(
     val freshPress = this.dir != dir || sinceLastInput > RESET_GAP_MS
     lastInput = now
     if (freshPress) {
+        beginHold()
         this.dir = dir
         heldSince = now
         lastAction = now
@@ -134,6 +271,7 @@ fun HoldNavState.onPress(
     val sinceLastAction = now - lastAction
     when {
         held >= HOLD_ALPHA_AFTER_MS -> {
+            setMode(HoldMode.Alpha)
             if (sinceLastAction >= ALPHA_CADENCE_MS) {
                 lastAction = now
                 onAlphabet(dir)

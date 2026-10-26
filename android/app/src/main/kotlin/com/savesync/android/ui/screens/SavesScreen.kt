@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import com.savesync.android.ui.components.PullThresholdHaptic
 import com.savesync.android.ui.components.gsEdgeBump
+import com.savesync.android.ui.components.AlphabetHud
 import com.savesync.android.ui.components.GsDialogHost
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -560,6 +561,7 @@ fun SavesScreen(
                                     val to = if (found >= 0) found
                                         else if (d > 0) saves.size - 1 else 0
                                     select(to)
+                                    holdNav.announceLetter(firstLetter(saves[to].displayName))
                                     follower.follow(to, reduceMotion)
                                 }
                             },
@@ -666,6 +668,7 @@ fun SavesScreen(
                         )
                     }
                 } else {
+                    Box(Modifier.weight(1f)) {
                     SavesList(
                         rows = rows,
                         syncStateEntities = syncStateEntities,
@@ -675,9 +678,12 @@ fun SavesScreen(
                         onSaveClick = onNavigateToDetail,
                         onSelectIndex = { select(it) },
                         modifier = Modifier
-                            .weight(1f)
+                            .fillMaxSize()
                             .gsEdgeBump(follower)
                     )
+                    // Over the list while a hold jumps by letter.
+                    AlphabetHud(holdNav)
+                    }
                 }
             }
         }

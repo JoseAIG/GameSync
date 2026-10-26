@@ -67,6 +67,7 @@ import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.gsEdgeBump
+import com.savesync.android.ui.components.AlphabetHud
 import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsDialog
@@ -325,6 +326,7 @@ fun InstalledGamesScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
+                                    holdNav.announceLetter(firstLetter(filtered[selectedIndex].displayName))
                                     follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
@@ -449,6 +451,8 @@ fun InstalledGamesScreen(
                         )
                     }
                 }
+                // Over the list while a hold jumps by letter.
+                AlphabetHud(holdNav)
             }
 
             InstalledFooter(total = roms.size, shown = filtered.size, totalBytes = roms.sumOf { it.size })

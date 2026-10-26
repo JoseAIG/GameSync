@@ -152,6 +152,12 @@ el fork.
      sugerencias) en todos los campos de texto: `server_url`, `server_url_alt`,
      `api_key`, `nds_dir` y búsqueda. Alcanza para todo; no hace falta uno propio.
   2. **Búsqueda/filtro** de juegos por nombre con ese teclado.
+  2b. **Selector de carpetas estilo FBI** para toda ruta (`nds_dir` y futuras):
+     - navegar la SD con la cruceta o el táctil: entrar con A, subir con B,
+       elegir la carpeta actual con X/START;
+     - al elegir, **validar y mostrar qué encontró**, p. ej. "12 ROMs .nds, 10
+       partidas en saves/". Si no encuentra nada, avisa antes de guardar;
+     - la ruta escrita a mano (teclado) queda solo como opción avanzada.
   3. **Pantalla táctil:** tocar un juego, botones grandes de acción, desplazar
      la lista arrastrando.
   4. **Interfaz gráfica con `citro2d`** (devkitPro, licencia zlib) y la fuente

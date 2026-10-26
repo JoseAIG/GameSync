@@ -1,6 +1,11 @@
 package com.savesync.android.ui.components
 
 import androidx.compose.material.icons.filled.Check
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.GsMotion
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -52,10 +57,13 @@ fun SystemFilterChip(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val color = GsColors.Text
+    val reduce = LocalReduceMotion.current
     Box(modifier = modifier) {
         GsHitTarget(onClick = { expanded = true }) { indication ->
             Row(
                 modifier = Modifier
+                    // The chip grows or shrinks to its new label.
+                    .then(if (reduce) Modifier else Modifier.animateContentSize(GsMotion.quick(IntSize.VisibilityThreshold)))
                     .clip(RoundedCornerShape(16.dp))
                     .background(GsColors.PanelHi)
                     .border(

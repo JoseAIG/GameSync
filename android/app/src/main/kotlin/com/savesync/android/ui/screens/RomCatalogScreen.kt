@@ -73,6 +73,12 @@ import com.savesync.android.catalog.RomCatalogFilter
 import com.savesync.android.findComponentActivity
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.takeStep
+import com.savesync.android.ui.components.gsFilterNudge
+import com.savesync.android.ui.components.raNudgeSign
+import com.savesync.android.ui.components.filterNudgeSign
+import com.savesync.android.ui.components.NudgeOnChange
+import com.savesync.android.ui.components.rememberFilterNudge
 import com.savesync.android.ui.components.GsListScrollEdges
 import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.AlphabetHud
@@ -349,13 +355,21 @@ fun RomCatalogScreen(
 
     // Helper that cycles the system filter (null = all systems), driven by
     // SELECT (activity-level systemCycleEvents flow).
+    val filterNudge = rememberFilterNudge()
+    val pendingSystemStep = remember { intArrayOf(0) }
     fun cycleSystem(delta: Int) {
         if (systems.isEmpty()) return
         val all = listOf<String?>(null) + systems
         val idx = all.indexOf(activeSystem).let { if (it < 0) 0 else it }
         val next = (idx + delta + all.size) % all.size
+        pendingSystemStep[0] = delta
         systemFilter = all[next]
     }
+    // A filter change slides the list in from the way it moved (M5-7).
+    NudgeOnChange(filterNudge, activeSystem) { old, new ->
+        filterNudgeSign(listOf<String?>(null) + systems, old, new, pendingSystemStep.takeStep())
+    }
+    NudgeOnChange(filterNudge, raOnly) { _, on -> raNudgeSign(on) }
 
     // SELECT cycles the system filter (the sub-tab chip) — the Activity
     // emits on systemCycleEvents and we apply it here so the chip stays in
@@ -613,7 +627,9 @@ fun RomCatalogScreen(
                                 selectedIndex = index
                                 confirmTarget = rom
                             },
-                            modifier = Modifier.gsEdgeBump(follower),
+                            modifier = Modifier
+                                .gsEdgeBump(follower)
+                                .gsFilterNudge(filterNudge),
                         )
                     }
                 }

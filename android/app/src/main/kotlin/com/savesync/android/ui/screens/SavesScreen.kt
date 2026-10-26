@@ -27,6 +27,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import com.savesync.android.ui.components.PullThresholdHaptic
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.animation.animateContentSize
+import com.savesync.android.ui.components.takeStep
+import com.savesync.android.ui.components.gsFilterNudge
+import com.savesync.android.ui.components.filterNudgeSign
+import com.savesync.android.ui.components.NudgeOnChange
+import com.savesync.android.ui.components.rememberFilterNudge
 import com.savesync.android.ui.components.GsListScrollEdges
 import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.AlphabetHud
@@ -280,11 +287,17 @@ fun SavesScreen(
     // SELECT steps the system filter (the sub-tab chip) — the Activity emits
     // on systemCycleEvents and we apply it here so the chip stays in sync.
     val activity = context.findComponentActivity() as? MainActivity
+    // A filter change slides the list in from the way it moved (M5-7); the
+    // press's own step is kept so a wrap still points forward.
+    val filterNudge = rememberFilterNudge()
+    val pendingSystemStep = remember { intArrayOf(0) }
+    val pendingStatusStep = remember { intArrayOf(0) }
     LaunchedEffect(activity, availableFilters, selectedFilter) {
         activity?.systemCycleEvents?.collect { delta ->
             if (availableFilters.isEmpty()) return@collect
             val idx = availableFilters.indexOf(selectedFilter).let { if (it < 0) 0 else it }
             val next = (idx + delta + availableFilters.size) % availableFilters.size
+            pendingSystemStep[0] = delta
             viewModel.setFilter(availableFilters[next])
         }
     }
@@ -294,8 +307,15 @@ fun SavesScreen(
             val all = listOf<SaveSyncStatus?>(null) + availableStatusFilters
             val idx = all.indexOf(statusFilter).let { if (it < 0) 0 else it }
             val next = (idx + delta + all.size) % all.size
+            pendingStatusStep[0] = delta
             viewModel.setStatusFilter(all[next])
         }
+    }
+    NudgeOnChange(filterNudge, selectedFilter) { old, new ->
+        filterNudgeSign(availableFilters, old, new, pendingSystemStep.takeStep())
+    }
+    NudgeOnChange(filterNudge, statusFilter) { old, new ->
+        filterNudgeSign(listOf<SaveSyncStatus?>(null) + availableStatusFilters, old, new, pendingStatusStep.takeStep())
     }
 
     // Outcome of an A-button smart sync.  A conflict can only be settled on
@@ -681,6 +701,7 @@ fun SavesScreen(
                         modifier = Modifier
                             .fillMaxSize()
                             .gsEdgeBump(follower)
+                            .gsFilterNudge(filterNudge)
                     )
                     // Where rows scroll under the chips / over the footer.
                     GsListScrollEdges(listState)
@@ -1000,9 +1021,12 @@ private fun StatusFilterChip(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
+        val reduce = LocalReduceMotion.current
         GsHitTarget(onClick = { expanded = true }) { indication ->
             Row(
                 modifier = Modifier
+                    // The chip grows or shrinks to its new label.
+                    .then(if (reduce) Modifier else Modifier.animateContentSize(GsMotion.quick(IntSize.VisibilityThreshold)))
                     .clip(RoundedCornerShape(16.dp))
                     .background(GsColors.Panel)
                     .then(indication)

@@ -236,6 +236,11 @@ void ui_list_edge(UiListAnim *a, UiListEdge edge) {
     }
 }
 
+void ui_list_crossfade(UiListAnim *a) {
+    u64 now = ui_gesture_now();
+    a->wrap_ms = now ? now : 1;
+}
+
 void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected) {
     if (count <= 0) return;
     int s = *selected;

@@ -37,6 +37,10 @@ void ui_format_when_at(const char *iso, int utc_offset_minutes, int64_t now_loca
 // XXXX" (its first 4 characters), or "Another device" without an id
 void ui_device_label_for(const char *console_id, const char *local_id, char *out, int out_size);
 
+// How long ago, from a monotonic delta: "just now" (under a minute),
+// "1 min ago", "12 min ago", "3 h ago", "2 days ago"
+void ui_format_ago(uint64_t ms, char *out, int out_size);
+
 // ---------------------------------------------------------------------------
 // Text entry
 // ---------------------------------------------------------------------------

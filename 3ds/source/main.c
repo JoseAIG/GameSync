@@ -31,6 +31,10 @@ static int view_total = 0;   // titles in the view before the search
 // Last compare with the server (A), shown on the top screen for that title
 static SaveDetails last_details;
 static int last_details_idx = -1;
+// When this session last synced that title (gui_clock_ms(), 0 = it came
+// from a compare): the top screen says "just now" from it, never from the
+// console's settable clock
+static u64 synced_ms = 0;
 
 static SavesView view;
 static UiListAnim saves_anim;   // the save list's presentation state
@@ -69,8 +73,10 @@ static int title_compare(const void *a, const void *b) {
     return strcasecmp(ta->name, tb->name);
 }
 
-// Rebuild the filtered index list from view_mode and the search
-static void rebuild_filter(void) {
+// Rebuild the filtered index list from view_mode and the search. The title
+// at titles[keep_idx] stays selected if it is still visible, at the same
+// row on screen (`keep_off` rows below the top); otherwise the first row is.
+static void rebuild_filter_keeping(int keep_idx, int keep_off) {
     filtered_count = 0;
     view_total = 0;
     for (int i = 0; i < title_count; i++) {
@@ -85,10 +91,32 @@ static void rebuild_filter(void) {
         if (ui_name_matches(titles[i].name, search))
             filtered[filtered_count++] = i;
     }
-    // Reset selection (and whatever the list was doing with the old rows)
-    selected = 0;
-    scroll_offset = 0;
+    int pos = -1;
+    for (int i = 0; i < filtered_count && keep_idx >= 0; i++)
+        if (filtered[i] == keep_idx) pos = i;
+    if (pos >= 0) {
+        // A drag may have left the selection off screen: keep it in view
+        if (keep_off < 0) keep_off = 0;
+        if (keep_off > LIST_VISIBLE - 1) keep_off = LIST_VISIBLE - 1;
+        int max_scroll = filtered_count > LIST_VISIBLE ? filtered_count - LIST_VISIBLE : 0;
+        int sc = pos - keep_off;
+        if (sc > max_scroll) sc = max_scroll;
+        if (sc < 0) sc = 0;
+        selected = pos;
+        scroll_offset = sc;
+    } else {
+        selected = 0;
+        scroll_offset = 0;
+    }
+    // Whatever the list was doing with the old rows ends; the new ones fade in
     ui_list_reset(&saves_anim);
+    ui_list_crossfade(&saves_anim);
+}
+
+static int sel_title_idx(void);
+
+static void rebuild_filter(void) {
+    rebuild_filter_keeping(sel_title_idx(), selected - scroll_offset);
 }
 
 // Get the actual title index for the current selection
@@ -113,6 +141,18 @@ static void clear_marks(void) {
 }
 
 static void scan_titles(void) {
+    // The selected title, to find it again in the new (re-sorted) list
+    char keep_id[17] = "";
+    FS_MediaType keep_media = 0;
+    bool keep_nds = false;
+    int keep_off = selected - scroll_offset;
+    int idx = sel_title_idx();
+    if (idx >= 0) {
+        snprintf(keep_id, sizeof(keep_id), "%s", titles[idx].title_id_hex);
+        keep_media = titles[idx].media_type;
+        keep_nds = titles[idx].is_nds;
+    }
+
     ui_busy("Loading", "Scanning titles...");
     title_count = titles_scan(titles, MAX_TITLES, config.nds_dir);
 
@@ -123,8 +163,13 @@ static void scan_titles(void) {
         qsort(titles, title_count, sizeof(TitleInfo), title_compare);
     }
 
+    int keep = -1;
+    for (int i = 0; i < title_count && keep_id[0] && keep < 0; i++)
+        if (strcmp(titles[i].title_id_hex, keep_id) == 0 && titles[i].media_type == keep_media &&
+            titles[i].is_nds == keep_nds)
+            keep = i;
     last_details_idx = -1;
-    rebuild_filter();
+    rebuild_filter_keeping(keep, keep_off);
 }
 
 // Clamp scroll so the selected item is always visible
@@ -152,6 +197,7 @@ static void refresh_view(void) {
     view.status_tone = status_tone;
     int idx = sel_title_idx();
     view.details = (idx >= 0 && idx == last_details_idx) ? &last_details : NULL;
+    view.synced_ms = view.details ? synced_ms : 0;
     view.title_count = title_count;
     view.bar = &saves_bar;
     view.held = saves_held;
@@ -396,6 +442,7 @@ static bool compare_title(int idx, const char *what) {
     pr.frac = -1;
     ui_progress(&pr);
 
+    synced_ms = 0;
     if (!sync_get_save_details(&config, t, &last_details)) {
         last_details_idx = -1;
         set_status(UI_TONE_ERR, "Failed to load save details");
@@ -429,6 +476,46 @@ static void server_query_failed(const char *what) {
     set_status(UI_TONE_ERR, "Server unreachable, nothing changed");
 }
 
+// After a successful transfer the copies match: if the top screen was
+// showing this title's compare, update it to what was sent / received
+// instead of falling back to "Press A". The server's timestamp of an
+// upload isn't known until the next compare (and the console clock may be
+// wrong), so the time shown is synced_ms.
+_Static_assert(sizeof(((SaveDetails *)0)->server_hash) == sizeof(((SaveDetails *)0)->local_hash) &&
+               sizeof(((SaveDetails *)0)->last_synced_hash) == sizeof(((SaveDetails *)0)->server_hash) &&
+               sizeof(((SaveDetails *)0)->server_console_id) == sizeof(((AppConfig *)0)->console_id),
+               "details_after_sync copies these fields whole");
+
+static void details_after_sync(const TitleInfo *t, bool uploaded) {
+    int idx = (int)(t - titles);
+    if (idx != last_details_idx) {
+        last_details_idx = -1;
+        return;
+    }
+    SaveDetails *d = &last_details;
+    if (uploaded) {
+        d->server_exists = true;
+        d->server_file_count = d->local_file_count;
+        d->server_size = d->local_size;
+        memcpy(d->server_hash, d->local_hash, sizeof(d->server_hash));
+        memcpy(d->server_console_id, config.console_id, sizeof(d->server_console_id));
+        d->server_last_sync[0] = '\0';
+    } else {
+        d->local_exists = true;
+        d->local_file_count = d->server_file_count;
+        d->local_size = d->server_size;
+        memcpy(d->local_hash, d->server_hash, sizeof(d->local_hash));
+    }
+    d->server_error = false;
+    d->server_status = 0;
+    d->server_error_msg[0] = '\0';
+    d->is_synced = true;
+    d->has_last_synced = true;
+    memcpy(d->last_synced_hash, d->server_hash, sizeof(d->last_synced_hash));
+    synced_ms = gui_clock_ms();
+    if (!synced_ms) synced_ms = 1;
+}
+
 static void upload_title(TitleInfo *t) {
     op_title = "Uploading";
     SyncResult res = sync_title(&config, t, sync_progress);
@@ -436,11 +523,12 @@ static void upload_title(TitleInfo *t) {
         set_status(UI_TONE_OK, "Uploaded: %.40s", t->name);
         t->in_conflict = false;
         t->sync_state = TSTATE_UPLOADED;
+        details_after_sync(t, true);
     } else {
         set_status(UI_TONE_ERR, "Upload failed: %s", sync_result_str(res));
         t->sync_state = TSTATE_FAILED;
+        last_details_idx = -1;
     }
-    last_details_idx = -1;
 }
 
 static void download_title(TitleInfo *t) {
@@ -450,11 +538,12 @@ static void download_title(TitleInfo *t) {
         set_status(UI_TONE_OK, "Downloaded: %.40s", t->name);
         t->in_conflict = false;
         t->sync_state = TSTATE_DOWNLOADED;
+        details_after_sync(t, false);
     } else {
         set_status(UI_TONE_ERR, "Download failed: %s", sync_result_str(res));
         t->sync_state = TSTATE_FAILED;
+        last_details_idx = -1;
     }
-    last_details_idx = -1;
 }
 
 static void toggle_mark(int idx) {

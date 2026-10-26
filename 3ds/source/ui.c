@@ -853,7 +853,9 @@ void ui_draw_saves_top(const SavesView *v) {
         }
         kv(rx, y + lh, 50, colw, "Server", line, d->server_error ? HEX_ERR : HEX_TEXT);
         char date[32];
-        format_date(d->server_last_sync, date, sizeof(date));
+        // Synced this session: say how long ago (monotonic), not a date
+        if (v->synced_ms) ui_format_ago(gui_clock_ms() - v->synced_ms, date, sizeof(date));
+        else format_date(d->server_last_sync, date, sizeof(date));
         kv(rx, y + 2 * lh, 50, colw, "Synced", d->server_exists ? date : "-", HEX_DIM);
         kv(rx, y + 3 * lh, 50, colw, "Last ok", d->has_last_synced ? d->last_synced_hash : "never", HEX_DIM);
     } else {

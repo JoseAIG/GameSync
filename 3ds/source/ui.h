@@ -239,6 +239,7 @@ typedef struct {
     const char *status;
     UiTone status_tone;
     const SaveDetails *details;  // last compare of the selected title, or NULL
+    u64 synced_ms;             // with details: gui_clock_ms() of a sync this session, 0 = none
     int title_count;           // all titles (X works when the view is empty)
     // Live input state for drawing (zero when drawn behind a dialog)
     const UiBar *bar;

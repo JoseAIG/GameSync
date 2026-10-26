@@ -77,6 +77,20 @@ static void test_labels(void) {
     CHECK_STR(out, "12.0 KB");
     ui_format_size_str(3 * 1024 * 1024 / 2, out, sizeof(out));
     CHECK_STR(out, "1.5 MB");
+    ui_format_ago(0, out, sizeof(out));
+    CHECK_STR(out, "just now");
+    ui_format_ago(59999, out, sizeof(out));
+    CHECK_STR(out, "just now");
+    ui_format_ago(60000, out, sizeof(out));
+    CHECK_STR(out, "1 min ago");
+    ui_format_ago(59 * 60000 + 59999, out, sizeof(out));
+    CHECK_STR(out, "59 min ago");
+    ui_format_ago(3 * 3600000ULL + 5, out, sizeof(out));
+    CHECK_STR(out, "3 h ago");
+    ui_format_ago(24 * 3600000ULL, out, sizeof(out));
+    CHECK_STR(out, "1 day ago");
+    ui_format_ago(50 * 3600000ULL, out, sizeof(out));
+    CHECK_STR(out, "2 days ago");
     ui_format_date_str("2026-10-12T21:14:03.5+00:00", out, sizeof(out));
     CHECK_STR(out, "2026-10-12 21:14");
 }

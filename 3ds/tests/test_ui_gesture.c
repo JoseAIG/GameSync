@@ -653,6 +653,18 @@ static void test_rubberband(void) {
     CHECK(gui_rubberband(100, 176, 0.55f) < gui_rubberband(200, 176, 0.55f));
 }
 
+// A new filter fades the rows in without moving, snapping or nudging
+static void test_list_crossfade(void) {
+    UiListAnim a = { 0 };
+    fake_now = 7000;
+    ui_list_crossfade(&a);
+    CHECK(a.wrap_ms == 7000);
+    CHECK(!a.snap && a.flash_ms == 0 && a.nudge.x == 0);
+    fake_now = 0;
+    ui_list_crossfade(&a);
+    CHECK(a.wrap_ms != 0);   // 0 would mean "never"
+}
+
 int main(void) {
     ui_gesture_set_clock(fake_clock);
     test_touch_edges();
@@ -673,5 +685,6 @@ int main(void) {
     test_list_stop_and_velocity_window();
     test_list_detached();
     test_list_range_and_edges();
+    test_list_crossfade();
     TEST_DONE();
 }

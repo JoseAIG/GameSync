@@ -166,6 +166,18 @@ void ui_device_label_for(const char *console_id, const char *local_id, char *out
         snprintf(out, out_size, "Another device");
 }
 
+void ui_format_ago(uint64_t ms, char *out, int out_size) {
+    uint64_t min = ms / 60000;
+    if (min < 1)
+        snprintf(out, out_size, "just now");
+    else if (min < 60)
+        snprintf(out, out_size, "%u min ago", (unsigned)min);
+    else if (min < 24 * 60)
+        snprintf(out, out_size, "%u h ago", (unsigned)(min / 60));
+    else
+        snprintf(out, out_size, "%u day%s ago", (unsigned)(min / 1440), min / 1440 == 1 ? "" : "s");
+}
+
 const char *ui_text_field_error(const char *text, bool url, bool allow_empty) {
     if (!text) text = "";
     if (!text[0]) return allow_empty ? NULL : "Enter a value";

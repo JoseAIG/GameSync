@@ -203,6 +203,10 @@ typedef enum {
 } UiListEdge;
 void ui_list_edge(UiListAnim *a, UiListEdge edge);
 
+// The rows changed under the viewport (a new filter): fade them in from
+// 30% over GUI_FADE_MS, like a wrap, without moving anything
+void ui_list_crossfade(UiListAnim *a);
+
 // v055's list keys on `*selected`: UP / DOWN move one row and wrap, LEFT /
 // RIGHT move `page` rows and clamp, reporting edges to ui_list_edge().
 void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected);

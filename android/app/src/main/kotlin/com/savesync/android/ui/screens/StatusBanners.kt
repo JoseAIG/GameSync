@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import com.savesync.android.emulators.EmulatorCatalog
 import com.savesync.android.ui.components.BannerKind
 import com.savesync.android.ui.components.BannerState
 import com.savesync.android.ui.components.GsBanner
@@ -72,4 +73,21 @@ fun StatusBanners(
             }
         }
     }
+}
+
+/**
+ * The missing-folder banner's copy for the emulators whose save-folder
+ * override points nowhere: "Azahar folder not found — 3DS saves are hidden.
+ * Tap to fix." for one, "N emulator folders not found — tap to fix" for
+ * more.  Empty when none.
+ */
+internal fun missingFolderBannerText(emulatorKeys: List<String>): String {
+    if (emulatorKeys.isEmpty()) return ""
+    if (emulatorKeys.size > 1) return "${emulatorKeys.size} emulator folders not found — tap to fix"
+    val key = emulatorKeys.first()
+    val descriptor = EmulatorCatalog.ALL.firstOrNull { it.key == key }
+    val name = descriptor?.displayName ?: key
+    val system = descriptor?.systemHint?.removePrefix("Nintendo ")?.takeIf { it.isNotBlank() }
+    return if (system != null) "$name folder not found — $system saves are hidden. Tap to fix."
+    else "$name folder not found — its saves are hidden. Tap to fix."
 }

@@ -82,7 +82,15 @@ import com.savesync.android.emulators.Ps2EmulatorChoice
 sealed class SyncState {
     object Idle : SyncState()
     object Syncing : SyncState()
-    data class Success(val result: SyncResult) : SyncState()
+    /**
+     * [overrideWarnings]: save-folder overrides that point nowhere, kept out
+     * of [SyncResult.errors] (they are a condition, shown as a banner), but
+     * still named in the Sync-all notice.
+     */
+    data class Success(
+        val result: SyncResult,
+        val overrideWarnings: List<String> = emptyList(),
+    ) : SyncState()
     data class Error(val message: String) : SyncState()
 }
 
@@ -468,6 +476,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _serverOnline = MutableStateFlow<Boolean?>(null)
     val serverOnline: StateFlow<Boolean?> = _serverOnline
 
+    /**
+     * Emulator key → message for every save-folder override that points
+     * nowhere usable (the fork's missing-override warning; no silent
+     * fallback).  Computed on the IO dispatcher whenever the overrides
+     * change, after each scan and on resume ([refreshOverrideWarnings]), so
+     * no screen reads the disk while composing.
+     */
+    private val _overrideWarnings = MutableStateFlow<Map<String, String>>(emptyMap())
+    val overrideWarnings: StateFlow<Map<String, String>> = _overrideWarnings
+
+    /** Re-checks the save-folder overrides (e.g. the user created the folder meanwhile). */
+    fun refreshOverrideWarnings() {
+        viewModelScope.launch {
+            val overrides = settingsStore.settingsFlow.first().saveDirOverrides
+            _overrideWarnings.value = withContext(Dispatchers.IO) {
+                EmulatorRegistry.saveDirOverrideWarningMap(overrides)
+            }
+        }
+    }
+
     // ── Installed Games tab ─────────────────────────────────────────
     private val _installedRoms = MutableStateFlow<List<InstalledRom>>(emptyList())
     val installedRoms: StateFlow<List<InstalledRom>> = _installedRoms
@@ -517,6 +545,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         scanSaves()
+        viewModelScope.launch {
+            settingsStore.settingsFlow
+                .map { it.saveDirOverrides }
+                .distinctUntilChanged()
+                .collect { overrides ->
+                    _overrideWarnings.value = withContext(Dispatchers.IO) {
+                        EmulatorRegistry.saveDirOverrideWarningMap(overrides)
+                    }
+                }
+        }
         // Keep the header's server dot honest: a cheap GET /status now and
         // every 30 s while the app is open.
         viewModelScope.launch {
@@ -1010,6 +1048,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 activeSaveScans--
                 _savesScanning.value = activeSaveScans > 0
+                // A scan is when a missing folder would have mattered.
+                refreshOverrideWarnings()
             }
         }
     }
@@ -2176,11 +2216,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val result = engine.sync(localSaves)
                 applyConflictOutcome(result)
                 // A broken save-folder override silently yields "nothing to
-                // sync" for that emulator; say so instead.
-                val overrideWarnings = EmulatorRegistry.saveDirOverrideWarnings(saveDirOverrides)
-                _syncState.value = SyncState.Success(
-                    result.copy(errors = overrideWarnings + result.errors)
-                )
+                // sync" for that emulator; say so — as a warning, not an error.
+                val overrideWarnings = withContext(Dispatchers.IO) {
+                    EmulatorRegistry.saveDirOverrideWarningMap(saveDirOverrides)
+                }
+                _overrideWarnings.value = overrideWarnings
+                _syncState.value = SyncState.Success(result, overrideWarnings.values.toList())
                 // Refresh list so downloaded server-only entries drop the isServerOnly flag
                 // and status icons reflect the new sync state
                 scanSaves()

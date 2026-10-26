@@ -49,6 +49,15 @@ import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.FolderPickerDialog
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import com.savesync.android.ui.components.GsBanner
+import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsExpandIn
+import com.savesync.android.ui.theme.gsShrinkOut
 
 /**
  * Per-emulator save folder configuration screen, reachable from
@@ -68,6 +77,8 @@ fun EmulatorsScreen(
     onNavigateBack: () -> Unit,
 ) {
     val settings by viewModel.settings.collectAsState()
+    // Computed off the main thread by the view model; composition reads no files.
+    val overrideWarnings by viewModel.overrideWarnings.collectAsState()
 
     var folderPickerForEmulator by remember { mutableStateOf<String?>(null) }
 
@@ -105,9 +116,7 @@ fun EmulatorsScreen(
             EmulatorCard(
                 descriptor = descriptor,
                 overridePath = settings.saveDirOverrides[descriptor.key],
-                overrideWarning = EmulatorRegistry.saveDirOverrideWarning(
-                    descriptor.key, settings.saveDirOverrides[descriptor.key]
-                ),
+                overrideWarning = overrideWarnings[descriptor.key],
                 onBrowse = { folderPickerForEmulator = descriptor.key },
                 onClear = { viewModel.clearSaveDirOverride(descriptor.key) },
                 extras = if (descriptor.key == RetroArchEmulator.EMULATOR_KEY) {
@@ -203,11 +212,21 @@ private fun EmulatorCard(
                 )
             }
 
-            if (overrideWarning != null) {
-                Text(
-                    text = overrideWarning,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+            // The fork's missing-folder warning: a Warn row right above the
+            // buttons that fix it, staying until the folder exists or the
+            // override is cleared.  The message is kept as it was.
+            val reduce = LocalReduceMotion.current
+            val lastWarning = remember { arrayOf("") }
+            if (overrideWarning != null) lastWarning[0] = overrideWarning
+            AnimatedVisibility(
+                visible = overrideWarning != null,
+                enter = gsExpandIn(reduce),
+                exit = gsShrinkOut(reduce),
+            ) {
+                GsBanner(
+                    text = lastWarning[0],
+                    color = GsColors.Warn,
+                    leadingIcon = Icons.Filled.Warning,
                 )
             }
 
@@ -217,17 +236,31 @@ private fun EmulatorCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedButton(
-                    onClick = onBrowse,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        Icons.Default.FolderOpen,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (isOverridden) "Change" else "Set Override")
+                // While the override points nowhere, Change is the way out:
+                // promoted to the filled Accent button.
+                val browseLabel = if (isOverridden) "Change" else "Set Override"
+                if (overrideWarning != null) {
+                    Button(
+                        onClick = onBrowse,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = GsColors.Accent,
+                            contentColor = GsColors.Ink,
+                        ),
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(browseLabel)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onBrowse,
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(browseLabel)
+                    }
                 }
                 if (isOverridden) {
                     OutlinedButton(onClick = onClear) {

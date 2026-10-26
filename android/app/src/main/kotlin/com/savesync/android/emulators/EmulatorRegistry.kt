@@ -189,7 +189,20 @@ object EmulatorRegistry {
 
     /** [saveDirOverrideWarning] for every configured override. */
     fun saveDirOverrideWarnings(saveDirOverrides: Map<String, String>): List<String> =
-        saveDirOverrides.mapNotNull { (key, path) -> saveDirOverrideWarning(key, path) }
+        saveDirOverrideWarningMap(saveDirOverrides).values.toList()
+
+    /**
+     * Emulator key → warning for every configured override that points
+     * nowhere usable, in [EmulatorCatalog.ALL] order.  Reads the disk: call
+     * it off the main thread.
+     */
+    fun saveDirOverrideWarningMap(saveDirOverrides: Map<String, String>): Map<String, String> {
+        val order = EmulatorCatalog.ALL.map { it.key }
+        return saveDirOverrides.entries
+            .sortedBy { (key, _) -> order.indexOf(key).let { if (it < 0) Int.MAX_VALUE else it } }
+            .mapNotNull { (key, path) -> saveDirOverrideWarning(key, path)?.let { key to it } }
+            .toMap()
+    }
 
     /**
      * Discover all saves, applying user-chosen system overrides where present.

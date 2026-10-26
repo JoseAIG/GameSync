@@ -34,6 +34,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -474,6 +478,17 @@ private fun MainApp() {
         }
     }
 
+    // Coming back to the app (e.g. after creating the folder in a file
+    // manager) re-checks the emulator save-folder overrides.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) viewModel.refreshOverrideWarnings()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // START → exit, after asking (A / START again exits, B stays).
     var showExitDialog by remember { mutableStateOf(false) }
     LaunchedEffect(activity) {
@@ -585,6 +600,7 @@ private fun MainApp() {
                         syncStateEntities = syncStateEntities,
                         onNavigateToDetail = { titleId -> navController.navigate("detail/$titleId") },
                         onNavigateToTab = onNavigateToTab,
+                        onNavigateToEmulators = { navController.navigate("emulators") },
                     )
                 }
                 composable(TAB_ROUTES[1]) {

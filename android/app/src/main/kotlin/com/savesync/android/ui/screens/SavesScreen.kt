@@ -94,6 +94,7 @@ import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveSyncStatus
 import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.SaveDetailState
+import com.savesync.android.sync.SyncResult
 import com.savesync.android.ui.SaveRow
 import com.savesync.android.ui.resolveSelection
 import com.savesync.android.ui.syncAllCopy
@@ -146,6 +147,8 @@ fun SavesScreen(
     syncStateEntities: List<SyncStateEntity>,
     onNavigateToDetail: (String) -> Unit = {},
     onNavigateToTab: (Int) -> Unit = {},
+    /** The emulator save-folder screen (missing-folder banner and notice). */
+    onNavigateToEmulators: () -> Unit = {},
 ) {
     val context = LocalContext.current
     // Rows arrive with what is known at once, then with hashed statuses.
@@ -156,6 +159,8 @@ fun SavesScreen(
     val scanning by viewModel.savesScanning.collectAsState()
     // Titles waiting on a conflict decision (banner, tab dot, filter).
     val conflictIds by viewModel.conflictTitleIds.collectAsState()
+    // Save-folder overrides that point nowhere (computed off the main thread).
+    val overrideWarnings by viewModel.overrideWarnings.collectAsState()
 
     /** Banner tap / notice "Review": show the saves waiting on a conflict. */
     fun reviewConflicts() {
@@ -295,24 +300,15 @@ fun SavesScreen(
         when (val state = syncState) {
             is SyncState.Success -> {
                 val r = state.result
-                // Errors win (and keep the first error's text, as the fork's
-                // Long snackbar did); then conflicts; else a plain success.
-                val kind = when {
-                    r.errors.isNotEmpty() -> GsNoticeKind.Error
-                    r.conflicts.isNotEmpty() -> GsNoticeKind.Warning
-                    else -> GsNoticeKind.Success
-                }
-                val message = syncAllMessage(r.uploaded, r.downloaded, r.conflicts.size, r.errors)
                 notifier.show(
-                    // Conflicts: "Review" applies the Conflict filter (the pad
-                    // path is L2/R2, which now offers Conflict).
-                    if (kind == GsNoticeKind.Warning) GsNotice(
-                        kind, message,
-                        actionLabel = "Review",
-                        onAction = { reviewConflicts() },
-                    ) else GsNotice(kind, message),
+                    syncAllNotice(
+                        result = r,
+                        overrideWarnings = state.overrideWarnings,
+                        onReview = { reviewConflicts() },
+                        onFix = onNavigateToEmulators,
+                    ),
                     // A conflict is a Warning that still rejects.
-                    hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
+                    hapticOverride = if (r.errors.isEmpty() && r.conflicts.isNotEmpty()) GsHaptic.Reject else null,
                 )
                 viewModel.resetSyncState()
             }
@@ -444,8 +440,14 @@ fun SavesScreen(
         // handled at the Activity level and never reach here.
         // Ongoing conditions, within the banner budget.
         StatusBanners(
-            state = BannerState(conflictCount = conflictIds.size),
+            state = BannerState(
+                conflictCount = conflictIds.size,
+                missingFolderCount = overrideWarnings.size,
+            ),
+            folderText = missingFolderBannerText(overrideWarnings.keys.toList()),
             onReviewConflicts = { reviewConflicts() },
+            // Touch only; a pad reaches it through Settings → Emulator configuration.
+            onFixFolders = onNavigateToEmulators,
         )
         // Reserved 2dp under the chips: a scan behind a list shows a thin
         // bar here, without pushing the rows down.
@@ -1060,6 +1062,31 @@ internal fun errorNotice(message: String, openSettings: () -> Unit): GsNotice =
     } else {
         GsNotice(GsNoticeKind.Error, message)
     }
+
+/**
+ * The Sync-all result notice.  Errors win and keep the first error's text
+ * (the fork's Long snackbar); conflicts are a Warning with "Review"; a
+ * missing emulator folder keeps the result a Warning that names the first
+ * one, with "Fix" → the emulator screen.  Folder warnings are a condition,
+ * not an error: they never count as errors.
+ */
+internal fun syncAllNotice(
+    result: SyncResult,
+    overrideWarnings: List<String>,
+    onReview: () -> Unit,
+    onFix: () -> Unit,
+): GsNotice {
+    val base = syncAllMessage(result.uploaded, result.downloaded, result.conflicts.size, result.errors)
+    if (result.errors.isNotEmpty()) return GsNotice(GsNoticeKind.Error, base)
+    val message = overrideWarnings.firstOrNull()?.let { "$base\n$it" } ?: base
+    return when {
+        result.conflicts.isNotEmpty() ->
+            GsNotice(GsNoticeKind.Warning, message, actionLabel = "Review", onAction = onReview)
+        overrideWarnings.isNotEmpty() ->
+            GsNotice(GsNoticeKind.Warning, message, actionLabel = "Fix", onAction = onFix)
+        else -> GsNotice(GsNoticeKind.Success, base)
+    }
+}
 
 /** "Sync done: 3 uploaded, 2 downloaded, 1 conflict" + the first error on its own line. */
 internal fun syncAllMessage(uploaded: Int, downloaded: Int, conflicts: Int, errors: List<String>): String =

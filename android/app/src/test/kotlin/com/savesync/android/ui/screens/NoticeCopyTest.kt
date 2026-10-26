@@ -30,4 +30,53 @@ class NoticeCopyTest {
         assertEquals(GsNoticeKind.Error, other.kind)
         assertNull(other.actionLabel)
     }
+
+    private fun result(
+        uploaded: Int = 3,
+        conflicts: List<String> = emptyList(),
+        errors: List<String> = emptyList(),
+    ) = com.savesync.android.sync.SyncResult(uploaded, 0, conflicts, errors)
+
+    @Test
+    fun `a missing folder makes the sync-all notice a Warning that names it, with Fix`() {
+        var fixed = false
+        val n = syncAllNotice(
+            result(),
+            overrideWarnings = listOf("Azahar save folder not found: /x."),
+            onReview = {},
+            onFix = { fixed = true },
+        )
+        assertEquals(GsNoticeKind.Warning, n.kind)
+        assertEquals("Sync done: 3 uploaded, 0 downloaded\nAzahar save folder not found: /x.", n.message)
+        assertEquals("Fix", n.actionLabel)
+        n.onAction?.invoke()
+        assertEquals(true, fixed)
+    }
+
+    @Test
+    fun `errors still win over folder warnings, and warnings are not errors`() {
+        val n = syncAllNotice(result(errors = listOf("timeout")), listOf("Azahar folder"), {}, {})
+        assertEquals(GsNoticeKind.Error, n.kind)
+        assertEquals("Sync done: 3 uploaded, 0 downloaded, 1 error\ntimeout", n.message)
+    }
+
+    @Test
+    fun `conflicts offer Review, a clean sync is a Success`() {
+        val c = syncAllNotice(result(conflicts = listOf("Zelda")), emptyList(), {}, {})
+        assertEquals(GsNoticeKind.Warning, c.kind)
+        assertEquals("Review", c.actionLabel)
+        val ok = syncAllNotice(result(), emptyList(), {}, {})
+        assertEquals(GsNoticeKind.Success, ok.kind)
+        assertNull(ok.actionLabel)
+    }
+
+    @Test
+    fun `missing-folder banner copy`() {
+        assertEquals(
+            "Azahar folder not found — 3DS saves are hidden. Tap to fix.",
+            missingFolderBannerText(listOf(com.savesync.android.emulators.impl.AzaharEmulator.EMULATOR_KEY)),
+        )
+        assertEquals("2 emulator folders not found — tap to fix", missingFolderBannerText(listOf("a", "b")))
+        assertEquals("", missingFolderBannerText(emptyList()))
+    }
 }

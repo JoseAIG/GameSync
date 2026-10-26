@@ -68,6 +68,7 @@ import androidx.compose.material.ripple.rememberRipple
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.layout.onSizeChanged
@@ -434,6 +435,8 @@ fun GsBanner(
     color: Color,
     modifier: Modifier = Modifier,
     onClick: (() -> Unit)? = null,
+    /** A 16dp icon before the text, tinted like it (e.g. Warning). */
+    leadingIcon: ImageVector? = null,
 ) {
     val high = LocalHighContrast.current
     val textColor = textVariantOf(color)
@@ -459,6 +462,16 @@ fun GsBanner(
                 .fillMaxHeight()
                 .background(color)
         )
+        if (leadingIcon != null) {
+            Icon(
+                leadingIcon,
+                contentDescription = null,
+                tint = textColor,
+                modifier = Modifier
+                    .padding(start = 12.dp)
+                    .size(16.dp),
+            )
+        }
         Text(
             text,
             color = textColor,
@@ -466,7 +479,7 @@ fun GsBanner(
             fontWeight = FontWeight.Medium,
             modifier = Modifier
                 .weight(1f)
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = if (leadingIcon != null) 8.dp else 12.dp, vertical = 8.dp),
         )
         if (onClick != null) {
             Icon(

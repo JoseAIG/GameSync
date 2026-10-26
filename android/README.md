@@ -244,7 +244,11 @@ emulator's save folder runs that emulator's own check instead (Azahar:
 *Found sdmc/Nintendo 3DS/…/title (14 titles)*). When nothing there is
 recognisable the line turns amber and *Select* asks before using the
 folder. The list slides the way you went, and going up returns to where
-you were in the parent folder.
+you were in the parent folder. With a keyboard or remote on a phone, the
+first key only shows which folder is highlighted; a touch hides it again.
+On a short screen (a handheld in landscape, or large text) the path and
+contents line keep to one line each and the button hints are left out, so
+the folder list keeps its room.
 
 ### Pickers on the save detail screen
 

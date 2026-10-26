@@ -38,6 +38,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -57,6 +58,11 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
@@ -134,150 +140,186 @@ fun FolderPickerDialog(
         listing?.parent?.let { open(it) }
     }
 
+    // Keys pressed in a Dialog window never reach MainActivity, so the app's
+    // input tracker can't switch to Pad mode here.  The picker tracks it
+    // itself: a key shows the focused row's highlight (the first one only
+    // reveals it, as on the list screens), a touch hides it again.
+    val outerMode = LocalInputMode.current
+    var keysInDialog by remember { mutableStateOf(false) }
+    // A row (not a button, whose ring always shows) holds focus.
+    var listFocused by remember { mutableStateOf(false) }
+    val padMode = outerMode == GsInputMode.Pad || keysInDialog
+    val config = LocalConfiguration.current
+    val short = pickerIsShort(config.screenHeightDp, config.fontScale)
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(
-            modifier = Modifier
-                .widthIn(max = 640.dp)
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 24.dp),
-            shape = GsShapes.Dialog,
-            color = GsColors.Panel,
-            border = BorderStroke(1.dp, GsColors.Line),
-            shadowElevation = GsElevation.DialogShadow,
-            tonalElevation = GsElevation.DialogTonal,
+        CompositionLocalProvider(
+            LocalInputMode provides if (padMode) GsInputMode.Pad else GsInputMode.Touch,
         ) {
-            Column(
+            Surface(
                 modifier = Modifier
+                    .widthIn(max = 640.dp)
                     .fillMaxWidth()
-                    .heightIn(max = 560.dp)
-                    .padding(16.dp)
-                    // Focus is always inside the dialog, so its root sees X.
-                    .onPreviewKeyEvent { event ->
-                        if (event.type == KeyEventType.KeyDown && event.key == Key.ButtonX) {
-                            if (event.nativeKeyEvent.repeatCount == 0) goUp()
-                            true
-                        } else {
-                            false
+                    .padding(horizontal = 16.dp, vertical = if (short) 8.dp else 24.dp)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                            keysInDialog = false
                         }
                     },
+                shape = GsShapes.Dialog,
+                color = GsColors.Panel,
+                border = BorderStroke(1.dp, GsColors.Line),
+                shadowElevation = GsElevation.DialogShadow,
+                tonalElevation = GsElevation.DialogTonal,
             ) {
-                Text(
-                    "Select folder",
-                    style = MaterialTheme.typography.titleMedium,
-                    color = GsColors.Text,
-                )
-                Spacer(Modifier.size(4.dp))
-                Text(
-                    text = listing?.dir?.absolutePath ?: target?.absolutePath ?: "",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = GsColors.Accent2,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                // Live contents line: what GameSync would find here.
-                val check = listing?.check
-                Text(
-                    text = check?.summary ?: "Checking…",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = if (check != null && !check.ok) GsColors.WarnText else gsTextMuted(),
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Spacer(Modifier.size(8.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 560.dp)
+                        .padding(if (short) 12.dp else 16.dp)
+                        // Focus is always inside the dialog, so its root sees X.
+                        .onPreviewKeyEvent { event ->
+                            if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                            if (!padMode) {
+                                keysInDialog = true
+                                // The reveal press: nothing fires on a row the
+                                // user couldn't see highlighted.
+                                if (listFocused && event.key in PICKER_REVEAL_SWALLOWED) {
+                                    return@onPreviewKeyEvent true
+                                }
+                            }
+                            if (event.key == Key.ButtonX) {
+                                if (event.nativeKeyEvent.repeatCount == 0) goUp()
+                                true
+                            } else {
+                                false
+                            }
+                        },
+                ) {
+                    Text(
+                        "Select folder",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = GsColors.Text,
+                    )
+                    Spacer(Modifier.size(4.dp))
+                    Text(
+                        text = listing?.dir?.absolutePath ?: target?.absolutePath ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = GsColors.Accent2,
+                        maxLines = if (short) 1 else 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    // Live contents line: what GameSync would find here.
+                    val check = listing?.check
+                    Text(
+                        text = check?.summary ?: "Checking…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (check != null && !check.ok) GsColors.WarnText else gsTextMuted(),
+                        maxLines = if (short) 1 else 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.size(if (short) 4.dp else 8.dp))
 
-                // Storage shortcuts (when more than one volume is mounted)
-                if (storageRoots.size > 1) {
-                    Row(
-                        modifier = Modifier
-                            .horizontalScroll(rememberScrollState())
-                            .padding(bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        val internal = Environment.getExternalStorageDirectory().absolutePath
-                        storageRoots.forEach { root ->
-                            OutlinedButton(
-                                onClick = { open(root) },
-                                modifier = Modifier.gsFocusRing(),
-                            ) {
-                                Icon(Icons.Default.Storage, contentDescription = null, modifier = Modifier.size(14.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text(
-                                    if (root.absolutePath == internal) "Internal" else root.name,
-                                    style = MaterialTheme.typography.labelSmall,
-                                )
+                    // Storage shortcuts (when more than one volume is mounted)
+                    if (storageRoots.size > 1) {
+                        Row(
+                            modifier = Modifier
+                                .horizontalScroll(rememberScrollState())
+                                .padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            val internal = Environment.getExternalStorageDirectory().absolutePath
+                            storageRoots.forEach { root ->
+                                OutlinedButton(
+                                    onClick = { open(root) },
+                                    modifier = Modifier.gsFocusRing(),
+                                ) {
+                                    Icon(Icons.Default.Storage, contentDescription = null, modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        if (root.absolutePath == internal) "Internal" else root.name,
+                                        style = MaterialTheme.typography.labelSmall,
+                                    )
+                                }
                             }
                         }
                     }
-                }
 
-                // ── Directory listing: slides the way you went ───────────
-                AnimatedContent(
-                    targetState = listing,
-                    contentKey = { it?.dir?.absolutePath },
-                    transitionSpec = {
-                        pickerTransition(
-                            pickerMotionFor(initialState?.dir?.absolutePath, targetState?.dir?.absolutePath, reduce)
-                        )
-                    },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                        .clipToBounds(),
-                    label = "folderListing",
-                ) { shown ->
-                    if (shown == null) {
-                        Box(Modifier.fillMaxWidth().padding(12.dp)) {
-                            Text("Loading…", style = MaterialTheme.typography.bodySmall, color = gsTextMuted())
-                        }
-                    } else {
-                        FolderList(
-                            listing = shown,
-                            positions = positions,
-                            onOpen = { open(it) },
-                        )
-                    }
-                }
-
-                // ── Action buttons, always visible at the bottom ─────────
-                Spacer(Modifier.size(12.dp))
-                Row(modifier = Modifier.fillMaxWidth()) {
-                    OutlinedButton(
-                        onClick = onDismiss,
-                        modifier = Modifier.weight(1f).gsFocusRing()
-                    ) {
-                        Text("Cancel")
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    val current = listing
-                    Button(
-                        onClick = {
-                            val l = current ?: return@Button
-                            if (l.check.ok) onFolderSelected(l.dir.absolutePath)
-                            else confirmUnrecognised = l
+                    // ── Directory listing: slides the way you went ───────────
+                    AnimatedContent(
+                        targetState = listing,
+                        contentKey = { it?.dir?.absolutePath },
+                        transitionSpec = {
+                            pickerTransition(
+                                pickerMotionFor(initialState?.dir?.absolutePath, targetState?.dir?.absolutePath, reduce)
+                            )
                         },
-                        enabled = current != null && current.dir == target,
-                        modifier = Modifier.weight(2f).gsFocusRing()
-                    ) {
-                        Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            text = "Select \"${current?.dir?.name ?: ""}\"",
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f)
+                            .clipToBounds()
+                            .onFocusChanged { listFocused = it.hasFocus },
+                        label = "folderListing",
+                    ) { shown ->
+                        if (shown == null) {
+                            Box(Modifier.fillMaxWidth().padding(12.dp)) {
+                                Text("Loading…", style = MaterialTheme.typography.bodySmall, color = gsTextMuted())
+                            }
+                        } else {
+                            FolderList(
+                                listing = shown,
+                                positions = positions,
+                                onOpen = { open(it) },
+                            )
+                        }
+                    }
+
+                    // ── Action buttons, always visible at the bottom ─────────
+                    Spacer(Modifier.size(if (short) 8.dp else 12.dp))
+                    Row(modifier = Modifier.fillMaxWidth()) {
+                        OutlinedButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.weight(1f).gsFocusRing()
+                        ) {
+                            Text("Cancel")
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        val current = listing
+                        Button(
+                            onClick = {
+                                val l = current ?: return@Button
+                                if (l.check.ok) onFolderSelected(l.dir.absolutePath)
+                                else confirmUnrecognised = l
+                            },
+                            enabled = current != null && current.dir == target,
+                            modifier = Modifier.weight(2f).gsFocusRing()
+                        ) {
+                            Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "Select \"${current?.dir?.name ?: ""}\"",
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                    // A short window keeps its rows: the buttons already carry
+                    // the labels, so the hints go first.
+                    if (!short) {
+                        GsFooterHints(
+                            hints = listOf(
+                                GsHint(GsButton.A, "Open"),
+                                GsHint(GsButton.X, "Up"),
+                                GsHint(GsButton.B, "Cancel"),
+                            ),
+                            modifier = Modifier.padding(top = 8.dp),
                         )
                     }
                 }
-                GsFooterHints(
-                    hints = listOf(
-                        GsHint(GsButton.A, "Open"),
-                        GsHint(GsButton.X, "Up"),
-                        GsHint(GsButton.B, "Cancel"),
-                    ),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
             }
         }
     }
@@ -296,6 +338,21 @@ fun FolderPickerDialog(
         )
     }
 }
+
+/** Keys the picker's reveal press consumes, as on the list screens: A (and Enter / centre), X and Y. */
+private val PICKER_REVEAL_SWALLOWED = setOf(
+    Key.ButtonA, Key.Enter, Key.NumPadEnter, Key.DirectionCenter, Key.ButtonX, Key.ButtonY,
+)
+
+/**
+ * True when the window is too short (in text-scaled terms) for the picker's
+ * full header and footer: it then keeps one line of path and contents,
+ * tighter padding and no footer hints, so the folder list keeps its rows.
+ */
+internal fun pickerIsShort(screenHeightDp: Int, fontScale: Float): Boolean =
+    screenHeightDp / fontScale.coerceAtLeast(1f) < PICKER_SHORT_HEIGHT_DP
+
+internal const val PICKER_SHORT_HEIGHT_DP = 480
 
 /** One folder's contents, read on IO. */
 private class DirListing(

@@ -40,4 +40,15 @@ class FolderPickerMotionTest {
         assertNull(childToward("$root/ROMs", root))
         assertNull(childToward(root, root))
     }
+
+    @Test
+    fun `a landscape handheld or large text makes the picker short`() {
+        assertTrue(pickerIsShort(screenHeightDp = 360, fontScale = 1f))
+        assertFalse(pickerIsShort(screenHeightDp = 800, fontScale = 1f))
+        // Same window, text twice as big: half the rows fit.
+        assertTrue(pickerIsShort(screenHeightDp = 800, fontScale = 2f))
+        // Small text never makes a short window tall.
+        assertTrue(pickerIsShort(screenHeightDp = 360, fontScale = 0.85f))
+        assertFalse(pickerIsShort(screenHeightDp = PICKER_SHORT_HEIGHT_DP, fontScale = 1f))
+    }
 }

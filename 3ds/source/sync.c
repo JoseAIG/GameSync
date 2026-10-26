@@ -10,7 +10,7 @@
 #include <inttypes.h>
 #include <sys/stat.h>
 
-#define MAX_SAVE_FILES 64
+#define MAX_SAVE_FILES 256
 #define STATE_DIR "sdmc:/3ds/3dssync/state"
 #define MAX_UPLOAD_SIZE 0x70000  // 448KB compressed - bundles are zlib compressed
 

@@ -91,12 +91,12 @@ The 3DS SSL module is old: TLS 1.2 at most, a small set of cipher suites, and in
 - Every file of a downloaded bundle is checked against its SHA-256 before anything is written; a mismatch aborts the download.
 - The current save is backed up to the SD card first (see `local_backups`). If it cannot be read or backed up completely, nothing is written.
 - If writing or committing the new save fails, the previous save is written back. To recover by hand, copy the files from the backup folder into the save with a save manager such as Checkpoint.
-- A save with more than 64 files is refused instead of being uploaded incompletely.
+- A save with more than 256 files is refused instead of being uploaded incompletely.
 
 ## Limitations
 
 - **Extra data (extdata) is not synced.** Only the title's save data archive (`ARCHIVE_USER_SAVEDATA`) is read and written. Games that keep part of their state in extdata (often StreetPass, downloaded content or photos) will only partly sync; back up extdata separately with a save manager such as Checkpoint.
-- A save may have at most 64 files, and its compressed bundle must fit in 448 KB to upload; downloads are limited to about 2 MB.
+- A save may have at most 256 files, and its compressed bundle must fit in 448 KB to upload; downloads are limited to about 2 MB.
 - File names inside a save are handled as ASCII; non-ASCII names are not supported.
 - Cartridge titles are never included in *Sync all*; sync them one at a time.
 

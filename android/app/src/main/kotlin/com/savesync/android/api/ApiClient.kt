@@ -98,6 +98,8 @@ object ApiClient {
             } else {
                 HttpLoggingInterceptor.Level.NONE
             }
+            // Never write the server credential to logcat.
+            redactHeader("X-API-Key")
         }
         val defaultLogger = HttpLoggingInterceptor().apply {
             level = if (BuildConfig.DEBUG) {
@@ -105,6 +107,8 @@ object ApiClient {
             } else {
                 HttpLoggingInterceptor.Level.NONE
             }
+            // Never write the server credential to logcat.
+            redactHeader("X-API-Key")
         }
         val routedLogger = Interceptor { chain ->
             val segs = chain.request().url.encodedPathSegments

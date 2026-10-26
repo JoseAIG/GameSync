@@ -70,7 +70,7 @@ object EmulatorCatalog {
             key = AzaharEmulator.EMULATOR_KEY,
             displayName = "Azahar",
             systemHint = "Nintendo 3DS",
-            defaultPathHint = "sdmc/Nintendo 3DS/.../title/"
+            defaultPathHint = "<Azahar user folder>/sdmc/Nintendo 3DS/…/title/"
         ),
         EmulatorDescriptor(
             key = CemuEmulator.EMULATOR_KEY,
@@ -176,6 +176,20 @@ object EmulatorRegistry {
             )
         )
     }
+
+    /**
+     * Problem with a configured save-folder override for [emulatorKey], or
+     * null when it looks usable (or the emulator has no such check).
+     */
+    fun saveDirOverrideWarning(emulatorKey: String, overridePath: String?): String? =
+        when (emulatorKey) {
+            AzaharEmulator.EMULATOR_KEY -> AzaharEmulator.overrideWarning(overridePath)
+            else -> null
+        }
+
+    /** [saveDirOverrideWarning] for every configured override. */
+    fun saveDirOverrideWarnings(saveDirOverrides: Map<String, String>): List<String> =
+        saveDirOverrides.mapNotNull { (key, path) -> saveDirOverrideWarning(key, path) }
 
     /**
      * Discover all saves, applying user-chosen system overrides where present.

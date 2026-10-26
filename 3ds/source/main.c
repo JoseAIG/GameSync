@@ -28,6 +28,7 @@ static SaveDetails last_details;
 static int last_details_idx = -1;
 
 static SavesView view;
+static UiListAnim saves_anim;   // the save list's presentation state
 
 #define LIST_VISIBLE SAVES_ROWS
 
@@ -125,6 +126,7 @@ static void refresh_view(void) {
     view.count = filtered_count;
     view.selected = selected;
     view.scroll = scroll_offset;
+    view.anim = &saves_anim;
     view.view_mode = view_mode;
     view.marked = count_marked();
     view.status = status;
@@ -622,24 +624,9 @@ static UiNav saves_tab(void) {
         UiNav nav = ui_tab_nav(kDown);
         if (nav != UI_NAV_STAY) return nav;
 
-        if (kRep & KEY_DOWN && filtered_count > 0) {
-            selected = (selected + 1) % filtered_count;
-            update_scroll();
-        }
-        if (kRep & KEY_UP && filtered_count > 0) {
-            selected = (selected - 1 + filtered_count) % filtered_count;
-            update_scroll();
-        }
-        // Page down
-        if (kRep & KEY_RIGHT && filtered_count > 0) {
-            selected += LIST_VISIBLE;
-            if (selected >= filtered_count) selected = filtered_count - 1;
-            update_scroll();
-        }
-        // Page up
-        if (kRep & KEY_LEFT && filtered_count > 0) {
-            selected -= LIST_VISIBLE;
-            if (selected < 0) selected = 0;
+        // UP / DOWN one row (wrapping), LEFT / RIGHT a page (clamped)
+        if (kRep & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT) && filtered_count > 0) {
+            ui_list_keys(&saves_anim, kRep, filtered_count, LIST_VISIBLE, &selected);
             update_scroll();
         }
 

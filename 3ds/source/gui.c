@@ -438,6 +438,10 @@ void gui_spinner(float cx, float cy, float r, u32 color) {
 
 void gui_scrollbar(float x, float y, float h, int first, int visible, int total, float smooth_first) {
     (void)first;
+    gui_scrollbar_ex(x, y, h, visible, total, smooth_first, HEX_DIM);
+}
+
+void gui_scrollbar_ex(float x, float y, float h, int visible, int total, float smooth_first, u32 thumb_hex) {
     if (total <= visible || total <= 0) return;
     gui_rrect(x, y, 3, h, 1.5f, gui_rgb(HEX_BG2));
     float th = h * visible / total;
@@ -445,7 +449,7 @@ void gui_scrollbar(float x, float y, float h, int first, int visible, int total,
     float ty = y + (h - th) * (smooth_first / (float)(total - visible));
     if (ty < y) ty = y;
     if (ty > y + h - th) ty = y + h - th;
-    gui_rrect(x, ty, 3, th, 1.5f, gui_rgb(HEX_DIM));
+    gui_rrect(x, ty, 3, th, 1.5f, gui_rgb(thumb_hex));
 }
 
 void gui_panel(float x, float y, float w, float h) {

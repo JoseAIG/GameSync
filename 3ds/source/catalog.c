@@ -1244,8 +1244,15 @@ static void install(Catalog *cat, const CatEntry *entry) {
 static void move_to(Catalog *cat, int index, bool wrap) {
     if (cat->total <= 0) return;
     if (wrap) {
-        index = (index % cat->total + cat->total) % cat->total;
+        int wrapped = (index % cat->total + cat->total) % cat->total;
+        if (wrapped != index)
+            ui_list_edge(&cat->anim, cat->total > 1 ? UI_EDGE_WRAP
+                                     : index < 0 ? UI_EDGE_CLAMP_TOP : UI_EDGE_CLAMP_BOTTOM);
+        index = wrapped;
     } else {
+        // A page press with nowhere left to go
+        if (index < 0 && cat->selected == 0) ui_list_edge(&cat->anim, UI_EDGE_CLAMP_TOP);
+        if (index >= cat->total && cat->selected == cat->total - 1) ui_list_edge(&cat->anim, UI_EDGE_CLAMP_BOTTOM);
         if (index < 0) index = 0;
         if (index >= cat->total) index = cat->total - 1;
     }

@@ -367,10 +367,7 @@ int ui_choose(UiTone tone, const char *title, const char *const *items, int coun
 
         hidScanInput();
         u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        if (rep & KEY_UP) selected = (selected - 1 + count) % count;
-        if (rep & KEY_DOWN) selected = (selected + 1) % count;
-        if (rep & KEY_LEFT) selected = selected - rows < 0 ? 0 : selected - rows;
-        if (rep & KEY_RIGHT) selected = selected + rows >= count ? count - 1 : selected + rows;
+        ui_list_keys(&anim, rep, count, rows, &selected);
         if (selected < scroll) scroll = selected;
         if (selected >= scroll + rows) scroll = selected - rows + 1;
         if (down & KEY_TOUCH) {
@@ -414,6 +411,27 @@ UiNav ui_tab_nav(u32 down) {
 // drawn over its edges afterwards. Until lists can clip, the content then
 // steps a row at a time like v055 (only the highlight glides) and only rows
 // inside the viewport are drawn.
+void ui_list_edge(UiListAnim *a, UiListEdge edge) {
+    u64 now = gui_clock_ms();
+    if (now == 0) now = 1;   // 0 means "never"
+    a->flash_ms = now;
+    if (edge == UI_EDGE_WRAP) {
+        a->wrap_ms = now;
+        a->snap = true;
+    } else if (!gui_reduce_motion()) {
+        // The sign follows the press: up for LEFT / UP, down for RIGHT / DOWN
+        a->nudge.x = edge == UI_EDGE_CLAMP_TOP ? -6.0f : 6.0f;
+        a->nudge.v = 0;
+    }
+}
+
+// 1 at `since_ms`, falling to 0 over GUI_FADE_MS (0 when `since_ms` is 0)
+static float edge_fade(u64 since_ms) {
+    u64 now = gui_now_ms();
+    if (!since_ms || now < since_ms || now - since_ms >= GUI_FADE_MS) return 0;
+    return 1.0f - (float)(now - since_ms) / GUI_FADE_MS;
+}
+
 static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float row_h,
                       int count, int selected, int scroll, UiRowFn row, void *ctx, bool contained) {
     if (!a->init || a->count != count) {
@@ -422,6 +440,12 @@ static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float 
         a->count = count;
         a->init = true;
     }
+    // A wrap jumps (gliding across the whole list would sweep every row)
+    if (a->snap) {
+        gui_spring_set(&a->sel, (float)selected);
+        gui_spring_set(&a->scroll, (float)scroll);
+        a->snap = false;
+    }
     // Long jumps snap, short moves glide. The springs keep their velocity
     // across retargets, so a held D-pad glides continuously.
     if (fabsf(a->sel.x - selected) > rows) gui_spring_set(&a->sel, (float)selected);
@@ -429,11 +453,16 @@ static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float 
     float dt = gui_dt();
     gui_spring(&a->sel, (float)selected, GUI_RESP_SELECT, dt);
     gui_spring(&a->scroll, (float)scroll, GUI_RESP_SELECT, dt);
+    gui_spring(&a->nudge, 0, GUI_RESP_NUDGE, dt);
+
+    // After a wrap the rows fade in from 30% (toward the background)
+    float wrap = edge_fade(a->wrap_ms);
+    if (wrap > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(0.7f * wrap * 255)));
 
     bool bar = count > rows;
     float rw = bar ? w - 7 : w;
     if (count > 0 && selected >= 0) {
-        float sy = y + (a->sel.x - a->scroll.x) * row_h;
+        float sy = y + (a->sel.x - a->scroll.x) * row_h + a->nudge.x;
         gui_rrect(x + 3, sy + 1, rw - 6, row_h - 2, 5, gui_rgb(HEX_ACCENT));
     }
     int first = (int)floorf(a->scroll.x);
@@ -447,14 +476,40 @@ static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float 
         if (selected < 0) hl = 0;
         row(ctx, i, x, ry, rw, row_h, hl, false);
     }
+    if (wrap > 0) C2D_Fade(0);
     // Mask the row sliding out at the bottom
     if (!contained) gui_rect(x, y + rows * row_h, w, row_h, gui_rgb(HEX_BG));
-    if (bar) gui_scrollbar(x + w - 6, y + 3, rows * row_h - 6, scroll, rows, count, a->scroll.x);
+    // The thumb flashes bright at an edge and settles back to dim
+    if (bar)
+        gui_scrollbar_ex(x + w - 6, y + 3, rows * row_h - 6, rows, count, a->scroll.x,
+                         gui_mix_hex(HEX_DIM, HEX_TEXT, edge_fade(a->flash_ms)));
 }
 
 void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
              int count, int selected, int scroll, UiRowFn row, void *ctx) {
     list_draw(a, x, y, w, rows, row_h, count, selected, scroll, row, ctx, false);
+}
+
+void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected) {
+    if (count <= 0) return;
+    int s = *selected;
+    if (rep & KEY_UP) {
+        if (s == 0) ui_list_edge(a, count > 1 ? UI_EDGE_WRAP : UI_EDGE_CLAMP_TOP);
+        s = (s - 1 + count) % count;
+    }
+    if (rep & KEY_DOWN) {
+        if (s == count - 1) ui_list_edge(a, count > 1 ? UI_EDGE_WRAP : UI_EDGE_CLAMP_BOTTOM);
+        s = (s + 1) % count;
+    }
+    if (rep & KEY_LEFT) {
+        if (s == 0) ui_list_edge(a, UI_EDGE_CLAMP_TOP);
+        s = s - page < 0 ? 0 : s - page;
+    }
+    if (rep & KEY_RIGHT) {
+        if (s == count - 1) ui_list_edge(a, UI_EDGE_CLAMP_BOTTOM);
+        s = s + page >= count ? count - 1 : s + page;
+    }
+    *selected = s;
 }
 
 int ui_list_touch(float y, int rows, float row_h, int count, int scroll) {
@@ -652,8 +707,7 @@ static void saves_row(void *ctx, int index, float x, float y, float w, float h, 
 
 void ui_draw_saves_bottom(const SavesView *v) {
     if (v->count > 0) {
-        static UiListAnim anim;
-        ui_list(&anim, 0, SAVES_LIST_Y, GUI_BOT_W, SAVES_ROWS, SAVES_ROW_H,
+        ui_list(v->anim, 0, SAVES_LIST_Y, GUI_BOT_W, SAVES_ROWS, SAVES_ROW_H,
                 v->count, v->selected, v->scroll, saves_row, (void *)v);
     } else {
         gui_text(GUI_BOT_W / 2.0f, 104, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, "No saves to show");
@@ -973,10 +1027,7 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
 
         hidScanInput();
         u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        if (rep & KEY_UP) v.selected = (v.selected - 1 + v.count) % v.count;
-        if (rep & KEY_DOWN) v.selected = (v.selected + 1) % v.count;
-        if (rep & KEY_LEFT) v.selected = v.selected - HIST_ROWS < 0 ? 0 : v.selected - HIST_ROWS;
-        if (rep & KEY_RIGHT) v.selected = v.selected + HIST_ROWS >= v.count ? v.count - 1 : v.selected + HIST_ROWS;
+        ui_list_keys(&v.anim, rep, v.count, HIST_ROWS, &v.selected);
         if (down & KEY_TOUCH) {
             int i = ui_list_touch(GUI_HEADER_H, HIST_ROWS, HIST_ROW_H, v.count, v.scroll);
             if (i >= 0) v.selected = i;
@@ -1087,10 +1138,12 @@ static void config_row(void *ctx, int index, float x, float y, float w, float h,
         gui_text_mid(x + w - 14, y, h, GUI_S_BODY, gui_mix(HEX_MUTED, HEX_INK, hl), GUI_RIGHT, 0, ">");
 }
 
+// Kept across visits to the tab, like the selection
+static UiListAnim config_anim;
+
 static void config_bottom(void *ctx) {
     ConfigView *v = ctx;
-    static UiListAnim anim;
-    ui_list(&anim, 0, GUI_HEADER_H + 4, GUI_BOT_W, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, v->selected, 0,
+    ui_list(&config_anim, 0, GUI_HEADER_H + 4, GUI_BOT_W, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, v->selected, 0,
             config_row, v);
     gui_header_bar();
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Settings");
@@ -1129,11 +1182,23 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
 
         hidScanInput();
         u32 down = hidKeysDown(), rep = hidKeysDownRepeat();
-        if (rep & KEY_UP) v.selected = (v.selected - 1 + CFG_ITEMS) % CFG_ITEMS;
-        if (rep & KEY_DOWN) v.selected = (v.selected + 1) % CFG_ITEMS;
-        // Page up / down: the whole list fits on one page
-        if (rep & KEY_LEFT) v.selected = 0;
-        if (rep & KEY_RIGHT) v.selected = CFG_ITEMS - 1;
+        if (rep & KEY_UP) {
+            if (v.selected == 0) ui_list_edge(&config_anim, UI_EDGE_WRAP);
+            v.selected = (v.selected - 1 + CFG_ITEMS) % CFG_ITEMS;
+        }
+        if (rep & KEY_DOWN) {
+            if (v.selected == CFG_ITEMS - 1) ui_list_edge(&config_anim, UI_EDGE_WRAP);
+            v.selected = (v.selected + 1) % CFG_ITEMS;
+        }
+        // Page up / down: the whole list fits on one page, so first / last
+        if (rep & KEY_LEFT) {
+            if (v.selected == 0) ui_list_edge(&config_anim, UI_EDGE_CLAMP_TOP);
+            v.selected = 0;
+        }
+        if (rep & KEY_RIGHT) {
+            if (v.selected == CFG_ITEMS - 1) ui_list_edge(&config_anim, UI_EDGE_CLAMP_BOTTOM);
+            v.selected = CFG_ITEMS - 1;
+        }
         if (down & KEY_TOUCH) {
             int i = ui_list_touch(GUI_HEADER_H + 4, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, 0);
             if (i >= 0) v.selected = i;

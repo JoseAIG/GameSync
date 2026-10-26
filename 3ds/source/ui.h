@@ -120,7 +120,29 @@ typedef struct {
     GuiSpring scroll;   // viewport top
     int count;
     bool init;
+    // Edge feedback (ui_list_edge)
+    GuiSpring nudge;    // px added to the highlight: the "nothing more here" nudge
+    u64 wrap_ms;        // gui_clock_ms() of the last wrap (rows cross-fade), 0 = none
+    u64 flash_ms;       // of the last wrap or clamp (scrollbar thumb flash), 0 = none
+    bool snap;          // a wrap: jump to the new selection on the next draw
 } UiListAnim;
+
+// The caller's key handler reports the edges it hits (only it knows a key
+// was pressed): a wrap (UP on the first row, DOWN on the last) jumps there
+// and cross-fades the rows in; a press that can't move further (LEFT on the
+// first row, RIGHT on the last, or UP/DOWN in a one-row list) nudges the
+// highlight 6 px that way and springs back. Both flash the scrollbar thumb.
+typedef enum {
+    UI_EDGE_WRAP = 0,
+    UI_EDGE_CLAMP_TOP,
+    UI_EDGE_CLAMP_BOTTOM,
+} UiListEdge;
+void ui_list_edge(UiListAnim *anim, UiListEdge edge);
+
+// v055's list keys on `*selected`: UP / DOWN move one row and wrap, LEFT /
+// RIGHT move a page and clamp. `rep` = hidKeysDownRepeat(). Reports the
+// edges it hits to ui_list_edge().
+void ui_list_keys(UiListAnim *anim, u32 rep, int count, int page, int *selected);
 
 // Draws one row. `hl` is how much of the row the gliding highlight bar
 // covers (1 = fully under it, 0 = clear of it): pick every colour that
@@ -157,6 +179,7 @@ typedef struct {
     const int *filtered;       // visible -> titles[] index
     int count;                 // visible count
     int selected, scroll;
+    UiListAnim *anim;          // the list's presentation state (owned by the caller)
     int view_mode;
     int marked;
     const char *status;

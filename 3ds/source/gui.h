@@ -169,6 +169,8 @@ float gui_button_w(const char *button);
 void gui_bar(float x, float y, float w, float h, float frac, u32 color);
 void gui_spinner(float cx, float cy, float r, u32 color);
 void gui_scrollbar(float x, float y, float h, int first, int visible, int total, float smooth_first);
+// The same with the thumb colour given (0xRRGGBB)
+void gui_scrollbar_ex(float x, float y, float h, int visible, int total, float smooth_first, u32 thumb_hex);
 
 // Rounded card with a title strip. tone = title accent colour (0xRRGGBB)
 void gui_card(float x, float y, float w, float h, const char *title, u32 tone);

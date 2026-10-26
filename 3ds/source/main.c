@@ -755,6 +755,7 @@ int main(int argc, char *argv[]) {
         ui_exit();
         return 0;
     }
+    gui_set_reduce_motion(config.reduce_motion);
 
     // Initialize network
     if (!network_init()) {

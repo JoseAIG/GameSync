@@ -63,6 +63,7 @@ typedef struct {
     int local_backups;      // Copies of the previous save kept before overwriting (0 = off)
     bool tls_verify;        // Verify HTTPS server certificates (default true)
     bool update_check;      // Allow checking for / installing app updates (default true)
+    bool reduce_motion;     // Fades and snaps instead of slides and springs (default false)
 } AppConfig;
 
 #endif // COMMON_H

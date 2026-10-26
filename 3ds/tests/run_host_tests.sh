@@ -30,4 +30,7 @@ gcc $CFLAGS $HOST_INC -o "$out/test_history_parse" tests/test_history_parse.c so
 gcc $CFLAGS -o "$out/test_gui_motion" tests/test_gui_motion.c source/gui_motion.c -lm
 "$out/test_gui_motion"
 
+gcc $CFLAGS $HOST_INC -o "$out/test_config_file" tests/test_config_file.c source/config_file.c
+"$out/test_config_file"
+
 rm -rf "$out"

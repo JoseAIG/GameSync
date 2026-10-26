@@ -14,6 +14,12 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.LinearProgressIndicator
+import com.savesync.android.ui.components.PullThresholdHaptic
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -145,6 +151,8 @@ fun SavesScreen(
     val rows by viewModel.saveRows.collectAsState()
     val saves = remember(rows) { rows.map { it.entry } }
     val checking by viewModel.savesChecking.collectAsState()
+    // A save scan is running (pull-to-refresh, Settings → Rescan, startup).
+    val scanning by viewModel.savesScanning.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val syncState by viewModel.syncState.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
@@ -417,9 +425,28 @@ fun SavesScreen(
         // everything, Y opens details, B only closes search.  L1/R1 (tabs),
         // L2/R2 (status filter), SELECT (system) and START (exit) are
         // handled at the Activity level and never reach here.
+        // Reserved 2dp under the chips: a scan behind a list shows a thin
+        // bar here, without pushing the rows down.
+        Box(Modifier.fillMaxWidth().height(2.dp)) {
+            if (scanning && rows.isNotEmpty()) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxSize(),
+                    color = GsColors.Accent,
+                    trackColor = Color.Transparent,
+                )
+            }
+        }
+        // The pull indicator tracks the scan only (the header slot shows a
+        // sync).  Pulling rescans the emulator folders — which also asks the
+        // server for its server-only saves — and re-checks the server.
+        val swipeState = rememberSwipeRefreshState(isRefreshing = scanning)
+        PullThresholdHaptic(swipeState)
         SwipeRefresh(
-            state = rememberSwipeRefreshState(isRefreshing = isSyncing),
-            onRefresh = { viewModel.scanSaves() },
+            state = swipeState,
+            onRefresh = {
+                viewModel.scanSaves()
+                viewModel.pingServer()
+            },
             modifier = Modifier
                 .fillMaxWidth()
                 .weight(1f)
@@ -550,7 +577,10 @@ fun SavesScreen(
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
                 }
-                if (rows.isEmpty()) {
+                if (rows.isEmpty() && scanning) {
+                    // Never "No saves found" while the folders are being read.
+                    CenterLoader(text = "Scanning emulator folders…")
+                } else if (rows.isEmpty()) {
                     if (checking == 0) {
                         EmptyState(
                             activeFilter = selectedFilter,
@@ -649,11 +679,18 @@ private fun EmptyState(
     statusFilter: SaveSyncStatus?,
     searchQuery: String
 ) {
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+    // Scrollable, so pull-to-refresh works on an empty list too; the inner
+    // column is at least a viewport tall so the message stays centred.
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        val viewport = maxHeight
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .heightIn(min = viewport),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
             val hasAnyFilter = activeFilter != "All" || statusFilter != null || searchQuery.isNotBlank()
             if (hasAnyFilter) {
                 Text(

@@ -535,8 +535,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * True while any save scan runs (scans can overlap: they are counted).
+     * Saves shows a loader instead of "No saves found" while it is true.
+     */
+    private val _savesScanning = MutableStateFlow(false)
+    val savesScanning: StateFlow<Boolean> = _savesScanning
+    /** Scans in flight; only touched on the main thread (viewModelScope). */
+    private var activeSaveScans = 0
+
     fun scanSaves() {
         viewModelScope.launch {
+            activeSaveScans++
+            _savesScanning.value = true
             try {
                 // Use settingsFlow.first() — not settings.value — so we always read the
                 // real persisted DataStore value. settings.value returns the StateFlow's
@@ -549,7 +560,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val emudeckDir = currentSettings.emudeckDir
                 val romDirOverrides = currentSettings.romDirOverrides
                 val saveDirOverrides = currentSettings.saveDirOverrides
-                val rawLocalSaves = EmulatorRegistry.discoverAllSaves(
+                // Walking emulator folders blocks: keep it off the main thread
+                // so the scanning loader can draw.
+                val rawLocalSaves = withContext(Dispatchers.IO) { EmulatorRegistry.discoverAllSaves(
                     overrides = overrides,
                     romScanDir = romScanDir,
                     emudeckDir = emudeckDir,
@@ -560,12 +573,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ps2Emulator = currentSettings.ps2Emulator,
                     beetleSaturnPerCoreFolder = currentSettings.beetleSaturnPerCoreFolder,
                     cdGamesPerContentFolder = currentSettings.cdGamesPerContentFolder
-                )
+                ) }
                     .filterNot { entry -> isEmptyPs1Card(entry) }
                     .map { entry -> overridePs1TitleFromCard(entry) }
 
                 // Discover all ROMs the emulators know about (with expected save paths)
-                val allRomEntries = EmulatorRegistry.discoverAllRomEntries(
+                val allRomEntries = withContext(Dispatchers.IO) { EmulatorRegistry.discoverAllRomEntries(
                     romScanDir = romScanDir,
                     emudeckDir = emudeckDir,
                     romDirOverrides = romDirOverrides,
@@ -575,7 +588,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ps2Emulator = currentSettings.ps2Emulator,
                     beetleSaturnPerCoreFolder = currentSettings.beetleSaturnPerCoreFolder,
                     cdGamesPerContentFolder = currentSettings.cdGamesPerContentFolder
-                )
+                ) }
 
                 val serverOnlySaves: List<SaveEntry>
                 val localSaves: List<SaveEntry>
@@ -961,8 +974,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 _allSaves.value = sortSaves(dedupeAliasedEntries(localSaves + serverOnlySaves))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _allSaves.value = emptyList()
+            } finally {
+                activeSaveScans--
+                _savesScanning.value = activeSaveScans > 0
             }
         }
     }

@@ -133,6 +133,7 @@ fun SettingsScreen(
     val effectiveRomScanDir = EmudeckPaths.romsDir(emudeckDir)?.absolutePath ?: romScanDir
     val syncState by viewModel.syncState.collectAsState()
     val catalogLoading by viewModel.romCatalogLoading.collectAsState()
+    val savesScanning by viewModel.savesScanning.collectAsState()
     val catalogRefreshStatus by viewModel.catalogRefreshStatus.collectAsState()
 
     // With a controller attached, land on the first entry so the D-pad has
@@ -164,13 +165,13 @@ fun SettingsScreen(
         ) {
             Button(
                 onClick = { viewModel.scanSaves() },
-                enabled = syncState !is SyncState.Syncing,
+                enabled = syncState !is SyncState.Syncing && !savesScanning,
                 modifier = Modifier
                     .weight(1f)
                     .focusRequester(firstEntryFocus)
                     .gsFocusRing()
             ) {
-                Text("Rescan saves")
+                Text(if (savesScanning) "Rescanning…" else "Rescan saves")
             }
             Button(
                 onClick = { viewModel.refreshCatalog() },

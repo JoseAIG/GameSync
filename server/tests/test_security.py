@@ -171,3 +171,99 @@ class TestGcImportGameCodeValidation:
         assert body["skipped"] == ["A/.."]
         # Nothing was written at the save_dir root.
         assert not (tmp_save_dir / "current").exists()
+
+
+# ── Zip bomb / request size ─────────────────────────────────────────────────
+
+
+def _bomb(declared_size: int, real_size: int) -> bytes:
+    """v2 bundle whose header declares ``declared_size`` but inflates to
+    ``real_size`` bytes of zeros."""
+    import zlib
+
+    payload = b"\x00" * real_size
+    return (
+        b"3DSS"
+        + struct.pack("<I", 2)
+        + struct.pack(">Q", TITLE_ID)
+        + struct.pack("<I", 1700000000)
+        + struct.pack("<I", 1)
+        + struct.pack("<I", declared_size)
+        + zlib.compress(payload, 9)
+    )
+
+
+class TestDecompressionLimits:
+    def test_inflation_beyond_declared_size_is_rejected(self):
+        # Declares 1 KiB but inflates to 64 MiB: must stop at the declared size.
+        with pytest.raises(BundleError, match="exceeds declared"):
+            parse_bundle(_bomb(1024, 64 * 1024 * 1024))
+
+    def test_declared_size_over_limit_is_rejected(self, monkeypatch):
+        monkeypatch.setattr(settings, "max_decompressed_bytes", 1024 * 1024)
+        with pytest.raises(BundleError, match="too large"):
+            parse_bundle(_bomb(2 * 1024 * 1024, 2 * 1024 * 1024))
+
+    def test_truncated_stream_is_rejected(self):
+        data = _bundle([("main", b"A" * 10000)])
+        with pytest.raises(BundleError):
+            parse_bundle(data[:-20])
+
+    def test_large_legit_bundle_still_parses(self):
+        # An 8 MB memory-card image (PS2 / GC) is a normal upload.
+        card = bytes(range(256)) * (8 * 1024 * 1024 // 256)
+        parsed = parse_bundle(_bundle([("card.mc2", card)]))
+        assert parsed.files[0].data == card
+
+    def test_upload_of_bomb_returns_400(self, client, auth_headers):
+        r = _upload(client, auth_headers, _bomb(1024, 16 * 1024 * 1024))
+        assert r.status_code == 400
+
+
+class TestUploadSizeLimit:
+    def test_content_length_over_limit_is_rejected(
+        self, client, auth_headers, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "max_upload_bytes", 1024)
+        r = client.post(
+            f"/api/v1/saves/{TITLE_HEX}/raw",
+            content=b"x" * 2048,
+            headers={**auth_headers, "Content-Type": "application/octet-stream"},
+        )
+        assert r.status_code == 413
+        assert not storage.title_exists(TITLE_HEX)
+
+    def test_chunked_body_over_limit_is_rejected(
+        self, client, auth_headers, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "max_upload_bytes", 1024)
+
+        def chunks():
+            for _ in range(4):
+                yield b"x" * 512
+
+        r = client.post(
+            f"/api/v1/saves/{TITLE_HEX}/raw",
+            content=chunks(),
+            headers={**auth_headers, "Content-Type": "application/octet-stream"},
+        )
+        assert r.status_code == 413
+        assert not storage.title_exists(TITLE_HEX)
+
+    def test_body_under_limit_is_accepted(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(settings, "max_upload_bytes", 4096)
+        r = client.post(
+            f"/api/v1/saves/{TITLE_HEX}/raw",
+            content=b"x" * 2048,
+            headers={**auth_headers, "Content-Type": "application/octet-stream"},
+        )
+        assert r.status_code == 200
+
+    def test_limit_applies_to_json_endpoints(self, client, auth_headers, monkeypatch):
+        monkeypatch.setattr(settings, "max_upload_bytes", 64)
+        r = client.post(
+            "/api/v1/sync",
+            json={"titles": [], "console_id": "x" * 200},
+            headers=auth_headers,
+        )
+        assert r.status_code == 413

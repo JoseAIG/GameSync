@@ -55,6 +55,7 @@ from app.models.save import (
     BundleFile,
     SaveBundle,
 )
+from app.config import settings
 from app.services.safe_path import UnsafePathError, validate_relative_path
 
 
@@ -200,10 +201,26 @@ def parse_bundle(data: bytes) -> SaveBundle:
     else:
         # v2/v3: zlib compressed
         compressed_payload = data[offset:]
+        max_size = settings.max_decompressed_bytes
+        if max_size > 0 and size_field > max_size:
+            raise BundleError(
+                f"Uncompressed payload too large: {size_field} bytes "
+                f"(limit {max_size})"
+            )
+        # Never inflate past the declared size: a small zlib stream can
+        # expand to gigabytes (zip bomb).  One extra byte lets us tell
+        # "exactly the declared size" from "more data than declared".
+        decomp = zlib.decompressobj()
         try:
-            payload = zlib.decompress(compressed_payload)
+            payload = decomp.decompress(compressed_payload, size_field + 1)
         except zlib.error as e:
             raise BundleError(f"Decompression failed: {e}")
+        if len(payload) > size_field or decomp.unconsumed_tail:
+            raise BundleError(
+                f"Decompressed size mismatch: payload exceeds declared {size_field} bytes"
+            )
+        if not decomp.eof:
+            raise BundleError("Decompression failed: truncated zlib stream")
 
         if len(payload) != size_field:
             raise BundleError(

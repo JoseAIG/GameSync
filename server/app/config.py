@@ -132,6 +132,14 @@ class Settings(BaseSettings):
     # ``keys.txt``.  When unset we fall back to the per-request scratch dir.
     rom_wiiu_cwd: str = ""
     api_key: str = "anything"
+    # Upper bound on a request body, enforced from Content-Length before the
+    # body is read and again while it streams in.  The largest saves seen in
+    # practice are 8 MB memory-card images (PS2 / GameCube) and multi-MB
+    # PS3 / Wii U save folders, so 64 MiB leaves ample headroom.  0 disables.
+    max_upload_bytes: int = 64 * 1024 * 1024
+    # Upper bound on the uncompressed payload of a zlib bundle (v2+), so a
+    # tiny upload cannot inflate into gigabytes of RAM.  0 disables.
+    max_decompressed_bytes: int = 256 * 1024 * 1024
     host: str = "0.0.0.0"
     port: int = 8000
     max_history_versions: int = 10

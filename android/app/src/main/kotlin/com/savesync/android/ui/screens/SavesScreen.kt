@@ -501,7 +501,7 @@ fun SavesScreen(
                         syncStateEntities = syncStateEntities,
                         viewModel = viewModel,
                         listState = listState,
-                        selectedIndex = selectedIndex,
+                        selectedIndex = { selectedIndex },
                         onSaveClick = onNavigateToDetail,
                         onSelectIndex = { selectedIndex = it },
                         modifier = Modifier.weight(1f)
@@ -624,12 +624,15 @@ private fun SavesList(
     syncStateEntities: List<SyncStateEntity>,
     viewModel: MainViewModel,
     listState: androidx.compose.foundation.lazy.LazyListState,
-    selectedIndex: Int,
+    /** Read lazily so a D-pad step recomposes only the two rows that change. */
+    selectedIndex: () -> Int,
     onSaveClick: (String) -> Unit,
     onSelectIndex: (Int) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val syncMap = syncStateEntities.associateBy { it.titleId }
+    // Built once per sync-state change, not once per row per frame.
+    val syncMap = remember(syncStateEntities) { syncStateEntities.associateBy { it.titleId } }
+    val timeFormat = remember { SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()) }
 
     LazyColumn(
         modifier = modifier.fillMaxWidth(),
@@ -639,12 +642,13 @@ private fun SavesList(
     ) {
         itemsIndexed(saves, key = { _, entry -> entry.titleId }) { index, entry ->
             val syncStatus = viewModel.computeSyncStatus(entry, syncMap[entry.titleId], cheapOnly = true)
-            val isSelected = index == selectedIndex
+            val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
             SaveCard(
                 entry = entry,
                 syncState = syncMap[entry.titleId],
                 syncStatus = syncStatus,
                 isSelected = isSelected,
+                timeFormat = timeFormat,
                 onClick = {
                     onSelectIndex(index)
                     onSaveClick(entry.titleId)
@@ -664,6 +668,7 @@ private fun SaveCard(
     syncState: SyncStateEntity?,
     syncStatus: SaveSyncStatus,
     isSelected: Boolean,
+    timeFormat: SimpleDateFormat,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -698,7 +703,7 @@ private fun SaveCard(
             if (!entry.isServerOnly) {
                 syncState?.lastSyncedAt?.let { ts ->
                     Text(
-                        text = formatTimestamp(ts),
+                        text = timeFormat.format(Date(ts)),
                         style = MaterialTheme.typography.labelSmall,
                         color = GsColors.Muted
                     )
@@ -895,10 +900,6 @@ fun systemChipColor(systemName: String): Color {
     }
 }
 
-private fun formatTimestamp(millis: Long): String {
-    val sdf = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
-    return sdf.format(Date(millis))
-}
 /** The Settings tab's index in the tab strip (MainActivity.TAB_ROUTES). */
 internal const val SETTINGS_TAB = 4
 

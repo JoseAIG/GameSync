@@ -553,25 +553,15 @@ fun RomCatalogScreen(
                         )
                     }
                     else -> {
-                        LazyColumn(
-                            state = listState,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            itemsIndexed(
-                                filtered,
-                                key = { _, rom -> "${rom.system}:${rom.rom_id ?: rom.filename}" }
-                            ) { index, rom ->
-                                CatalogRomCard(
-                                    rom = rom,
-                                    isSelected = index == selectedIndex,
-                                    onClick = {
-                                        selectedIndex = index
-                                        confirmTarget = rom
-                                    }
-                                )
-                            }
-                        }
+                        CatalogList(
+                            roms = filtered,
+                            listState = listState,
+                            selectedIndex = { selectedIndex },
+                            onRowClick = { index, rom ->
+                                selectedIndex = index
+                                confirmTarget = rom
+                            },
+                        )
                     }
                 }
 
@@ -648,7 +638,38 @@ fun RomCatalogScreen(
                 "Saves into the ROM folder configured in Settings " +
                     "(or the system-specific override, if set).",
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Muted,
+                color = gsDim(),
+            )
+        }
+    }
+}
+
+/**
+ * The catalog rows.  [selectedIndex] is read lazily inside each row's
+ * derivedStateOf, so a D-pad step recomposes only the two rows whose
+ * highlight changes.
+ */
+@Composable
+private fun CatalogList(
+    roms: List<RomEntry>,
+    listState: LazyListState,
+    selectedIndex: () -> Int,
+    onRowClick: (Int, RomEntry) -> Unit,
+) {
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        itemsIndexed(
+            roms,
+            key = { _, rom -> "${rom.system}:${rom.rom_id ?: rom.filename}" }
+        ) { index, rom ->
+            val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
+            CatalogRomCard(
+                rom = rom,
+                isSelected = isSelected,
+                onClick = { onRowClick(index, rom) },
             )
         }
     }

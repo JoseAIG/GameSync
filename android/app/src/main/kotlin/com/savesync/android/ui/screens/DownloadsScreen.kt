@@ -173,7 +173,9 @@ fun DownloadsScreen(
         }
     }
 
-    val selected = downloads.getOrNull(selectedIndex)
+    // Derived, so the footer (and this screen) only recompose when the
+    // selected row's identity or status changes, not on every D-pad step.
+    val selected by remember { derivedStateOf { downloads.getOrNull(selectedIndex) } }
     val primaryLabel = when (selected?.status) {
         DownloadEntity.Status.DOWNLOADING, DownloadEntity.Status.QUEUED -> "Pause"
         DownloadEntity.Status.PAUSED -> "Resume"
@@ -201,8 +203,8 @@ fun DownloadsScreen(
                     if (primaryLabel != null) add(GsHint(GsButton.A, primaryLabel))
                     if (activeCount > 0) add(GsHint(GsButton.B, "Pause running"))
                     if (finishedCount > 0) add(GsHint(GsButton.X, "Clear finished"))
-                    if (selected != null) {
-                        add(GsHint(GsButton.Y, if (selected.isTerminal) "Remove" else "Cancel"))
+                    selected?.let { sel ->
+                        add(GsHint(GsButton.Y, if (sel.isTerminal) "Remove" else "Cancel"))
                     }
                     add(GsHint(GsButton.L1, "Tabs"))
                     add(GsHint(GsButton.START, "Exit"))
@@ -271,36 +273,16 @@ fun DownloadsScreen(
             if (downloads.isEmpty()) {
                 EmptyDownloads()
             } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    if (activeCount > 0) {
-                        item {
-                            Text(
-                                "$activeCount active · $finishedCount finished",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = GsColors.Dim,
-                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
-                            )
-                        }
-                    }
-                    itemsIndexed(downloads, key = { _, d -> d.id }) { index, download ->
-                        DownloadRow(
-                            download = download,
-                            liveProgress = liveProgress[download.id],
-                            isSelected = index == selectedIndex,
-                            onSelect = { selectedIndex = index },
-                            onPause = { viewModel.pauseDownload(download.id) },
-                            onResume = { viewModel.resumeDownload(download.id) },
-                            onCancel = { viewModel.cancelDownload(download.id) },
-                            onRemove = { viewModel.removeDownload(download.id) },
-                            onRetry = { viewModel.resumeDownload(download.id) },
-                        )
-                    }
-                }
+                DownloadsList(
+                    downloads = downloads,
+                    liveProgress = liveProgress,
+                    listState = listState,
+                    activeCount = activeCount,
+                    finishedCount = finishedCount,
+                    selectedIndex = { selectedIndex },
+                    onSelect = { selectedIndex = it },
+                    viewModel = viewModel,
+                )
             }
         }
     }
@@ -323,6 +305,55 @@ fun DownloadsScreen(
             },
             onDismiss = { removeTarget = null },
         )
+    }
+}
+
+/**
+ * The download rows.  [selectedIndex] is read lazily inside each row's
+ * derivedStateOf, so a D-pad step recomposes only the two rows whose
+ * highlight changes (progress ticks already touch only their own row).
+ */
+@Composable
+private fun DownloadsList(
+    downloads: List<DownloadEntity>,
+    liveProgress: Map<String, DownloadManager.ProgressEvent>,
+    listState: LazyListState,
+    activeCount: Int,
+    finishedCount: Int,
+    selectedIndex: () -> Int,
+    onSelect: (Int) -> Unit,
+    viewModel: MainViewModel,
+) {
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        if (activeCount > 0) {
+            item {
+                Text(
+                    "$activeCount active · $finishedCount finished",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = gsDim(),
+                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 4.dp),
+                )
+            }
+        }
+        itemsIndexed(downloads, key = { _, d -> d.id }) { index, download ->
+            val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
+            DownloadRow(
+                download = download,
+                liveProgress = liveProgress[download.id],
+                isSelected = isSelected,
+                onSelect = { onSelect(index) },
+                onPause = { viewModel.pauseDownload(download.id) },
+                onResume = { viewModel.resumeDownload(download.id) },
+                onCancel = { viewModel.cancelDownload(download.id) },
+                onRemove = { viewModel.removeDownload(download.id) },
+                onRetry = { viewModel.resumeDownload(download.id) },
+            )
+        }
     }
 }
 

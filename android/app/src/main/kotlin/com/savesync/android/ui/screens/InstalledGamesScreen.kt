@@ -405,25 +405,15 @@ fun InstalledGamesScreen(
                         CenterMessage(title = "No ROMs match this search.")
                     }
                     else -> {
-                        LazyColumn(
-                            state = listState,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            itemsIndexed(
-                                filtered,
-                                key = { _, rom -> rom.path.absolutePath }
-                            ) { index, rom ->
-                                InstalledRomCard(
-                                    rom = rom,
-                                    isSelected = index == selectedIndex,
-                                    onClick = {
-                                        selectedIndex = index
-                                        confirmTarget = rom
-                                    }
-                                )
-                            }
-                        }
+                        InstalledList(
+                            roms = filtered,
+                            listState = listState,
+                            selectedIndex = { selectedIndex },
+                            onRowClick = { index, rom ->
+                                selectedIndex = index
+                                confirmTarget = rom
+                            },
+                        )
                     }
                 }
             }
@@ -513,6 +503,37 @@ fun InstalledGamesScreen(
             },
             onDismiss = { deleteTarget = null },
         )
+    }
+}
+
+/**
+ * The installed rows.  [selectedIndex] is read lazily inside each row's
+ * derivedStateOf, so a D-pad step recomposes only the two rows whose
+ * highlight changes.
+ */
+@Composable
+private fun InstalledList(
+    roms: List<InstalledRom>,
+    listState: LazyListState,
+    selectedIndex: () -> Int,
+    onRowClick: (Int, InstalledRom) -> Unit,
+) {
+    LazyColumn(
+        state = listState,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        itemsIndexed(
+            roms,
+            key = { _, rom -> rom.path.absolutePath }
+        ) { index, rom ->
+            val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
+            InstalledRomCard(
+                rom = rom,
+                isSelected = isSelected,
+                onClick = { onRowClick(index, rom) },
+            )
+        }
     }
 }
 

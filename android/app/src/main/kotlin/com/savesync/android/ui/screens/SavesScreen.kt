@@ -102,6 +102,7 @@ import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsActionSlot
+import com.savesync.android.ui.components.BannerState
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsSubTabRow
@@ -153,6 +154,14 @@ fun SavesScreen(
     val checking by viewModel.savesChecking.collectAsState()
     // A save scan is running (pull-to-refresh, Settings → Rescan, startup).
     val scanning by viewModel.savesScanning.collectAsState()
+    // Titles waiting on a conflict decision (banner, tab dot, filter).
+    val conflictIds by viewModel.conflictTitleIds.collectAsState()
+
+    /** Banner tap / notice "Review": show the saves waiting on a conflict. */
+    fun reviewConflicts() {
+        onNavigateToTab(SAVES_TAB)
+        viewModel.setStatusFilter(SaveSyncStatus.CONFLICT)
+    }
     val settings by viewModel.settings.collectAsState()
     val syncState by viewModel.syncState.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
@@ -293,8 +302,15 @@ fun SavesScreen(
                     r.conflicts.isNotEmpty() -> GsNoticeKind.Warning
                     else -> GsNoticeKind.Success
                 }
+                val message = syncAllMessage(r.uploaded, r.downloaded, r.conflicts.size, r.errors)
                 notifier.show(
-                    GsNotice(kind, syncAllMessage(r.uploaded, r.downloaded, r.conflicts.size, r.errors)),
+                    // Conflicts: "Review" applies the Conflict filter (the pad
+                    // path is L2/R2, which now offers Conflict).
+                    if (kind == GsNoticeKind.Warning) GsNotice(
+                        kind, message,
+                        actionLabel = "Review",
+                        onAction = { reviewConflicts() },
+                    ) else GsNotice(kind, message),
                     // A conflict is a Warning that still rejects.
                     hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
                 )
@@ -309,6 +325,7 @@ fun SavesScreen(
     }
 
     val isSyncing = syncState is SyncState.Syncing
+
     val isSyncingOne = saveDetailState is SaveDetailState.Working
 
     /**
@@ -425,6 +442,11 @@ fun SavesScreen(
         // everything, Y opens details, B only closes search.  L1/R1 (tabs),
         // L2/R2 (status filter), SELECT (system) and START (exit) are
         // handled at the Activity level and never reach here.
+        // Ongoing conditions, within the banner budget.
+        StatusBanners(
+            state = BannerState(conflictCount = conflictIds.size),
+            onReviewConflicts = { reviewConflicts() },
+        )
         // Reserved 2dp under the chips: a scan behind a list shows a thin
         // bar here, without pushing the rows down.
         Box(Modifier.fillMaxWidth().height(2.dp)) {
@@ -1025,6 +1047,8 @@ fun systemChipColor(systemName: String): Color {
 
 /** The Settings tab's index in the tab strip (MainActivity.TAB_ROUTES). */
 internal const val SETTINGS_TAB = 4
+/** The Saves tab's index. */
+internal const val SAVES_TAB = 0
 
 /**
  * An Error notice for a view-model error string.  "Server URL not

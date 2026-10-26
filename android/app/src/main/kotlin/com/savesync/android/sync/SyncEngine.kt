@@ -37,8 +37,15 @@ private data class SaturnCanonicalSnapshot(
 data class SyncResult(
     val uploaded: Int,
     val downloaded: Int,
+    /** Display names of the conflicting titles. */
     val conflicts: List<String>,
-    val errors: List<String>
+    val errors: List<String>,
+    /** Title ids of [conflicts], so the UI can keep them findable. */
+    val conflictTitleIds: List<String> = emptyList(),
+    /** Titles this sync left in agreement with the server (uploaded, downloaded, up to date). */
+    val resolvedTitleIds: List<String> = emptyList(),
+    /** The server's details for each conflicting title id. */
+    val conflictInfo: Map<String, com.savesync.android.api.ConflictInfo> = emptyMap(),
 )
 
 class SyncEngine(
@@ -100,6 +107,8 @@ class SyncEngine(
         var uploaded = 0
         var downloaded = 0
         val conflicts = mutableListOf<String>()
+        val conflictIds = mutableListOf<String>()
+        val resolvedIds = mutableListOf<String>()
 
         // Build a map for quick lookup
         val saveMap = resolvedSaves.associateBy { it.titleId }
@@ -110,10 +119,14 @@ class SyncEngine(
         for (entry in rawCardEntries) {
             try {
                 when (syncRawCardEntry(entry)) {
-                    RawCardSyncOutcome.UPLOADED -> uploaded++
-                    RawCardSyncOutcome.DOWNLOADED -> downloaded++
-                    RawCardSyncOutcome.CONFLICT -> conflicts.add(entry.displayName)
-                    RawCardSyncOutcome.UP_TO_DATE, RawCardSyncOutcome.SKIPPED -> Unit
+                    RawCardSyncOutcome.UPLOADED -> { uploaded++; resolvedIds.add(entry.titleId) }
+                    RawCardSyncOutcome.DOWNLOADED -> { downloaded++; resolvedIds.add(entry.titleId) }
+                    RawCardSyncOutcome.CONFLICT -> {
+                        conflicts.add(entry.displayName)
+                        conflictIds.add(entry.titleId)
+                    }
+                    RawCardSyncOutcome.UP_TO_DATE -> resolvedIds.add(entry.titleId)
+                    RawCardSyncOutcome.SKIPPED -> Unit
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Raw-card sync failed for ${entry.titleId}", e)
@@ -145,6 +158,7 @@ class SyncEngine(
                 val success = downloadSave(entry, entry.titleId)
                 if (success) {
                     downloaded++
+                    resolvedIds.add(entry.titleId)
                     // Record sync state using the freshly-written file, not the entry
                     // (which still has isServerOnly=true and would return hash="")
                     updateSyncStateFromFile(entry)
@@ -181,14 +195,22 @@ class SyncEngine(
         }
 
         if (syncTitles.isEmpty()) {
-            return SyncResult(0, 0, emptyList(), errors)
+            return SyncResult(
+                uploaded, downloaded, conflicts, errors,
+                conflictTitleIds = conflictIds,
+                resolvedTitleIds = resolvedIds,
+            )
         }
 
         val syncResponse = try {
             api.sync(SyncRequest(titles = syncTitles, console_id = consoleId))
         } catch (e: Exception) {
             Log.e(TAG, "Sync API call failed", e)
-            return SyncResult(0, 0, emptyList(), listOf("Sync failed: ${e.message}"))
+            return SyncResult(
+                uploaded, downloaded, conflicts, errors + "Sync failed: ${e.message}",
+                conflictTitleIds = conflictIds,
+                resolvedTitleIds = resolvedIds,
+            )
         }
 
         // Process uploads
@@ -198,6 +220,7 @@ class SyncEngine(
                 val success = uploadSave(entry)
                 if (success) {
                     uploaded++
+                    resolvedIds.add(titleId)
                     updateSyncState(entry)
                 } else {
                     errors.add("Upload failed: ${entry.displayName}")
@@ -215,6 +238,7 @@ class SyncEngine(
                 val success = downloadSave(entry, titleId)
                 if (success) {
                     downloaded++
+                    resolvedIds.add(titleId)
                     updateSyncState(entry)
                 } else {
                     errors.add("Download failed: ${entry.displayName}")
@@ -233,6 +257,7 @@ class SyncEngine(
                     val success = downloadSave(entry, titleId)
                     if (success) {
                         downloaded++
+                        resolvedIds.add(titleId)
                         updateSyncState(entry)
                     }
                 } catch (e: Exception) {
@@ -246,13 +271,18 @@ class SyncEngine(
         for (titleId in syncResponse.conflict) {
             val entry = saveMap[titleId]
             conflicts.add(entry?.displayName ?: titleId)
+            conflictIds.add(titleId)
         }
+        resolvedIds.addAll(syncResponse.up_to_date)
 
         return SyncResult(
             uploaded = uploaded,
             downloaded = downloaded,
             conflicts = conflicts,
-            errors = errors
+            errors = errors,
+            conflictTitleIds = conflictIds,
+            resolvedTitleIds = resolvedIds,
+            conflictInfo = syncResponse.conflict_info.orEmpty().associateBy { it.title_id },
         )
     }
 

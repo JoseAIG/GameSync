@@ -465,6 +465,17 @@ private fun TabLabel(
     }
 }
 
+/** An 8dp status dot for a tab badge (Saves' conflicts). */
+@Composable
+fun GsDotBadge(color: Color) {
+    Box(
+        Modifier
+            .size(8.dp)
+            .clip(CircleShape)
+            .background(color)
+    )
+}
+
 /** A capsule count for a tab badge (Ink on Info is 7.1:1); grows with the font. */
 @Composable
 fun GsCountBadge(count: Int) {

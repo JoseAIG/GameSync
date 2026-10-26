@@ -35,3 +35,12 @@ fun bannersFor(state: BannerState): List<BannerKind> = buildList {
     if (state.conflictCount > 0) add(BannerKind.Conflicts)
     if (state.missingFolderCount > 0) add(BannerKind.FolderMissing)
 }.take(MAX_BANNERS)
+
+/**
+ * The conflict banner's copy.  The "L2/R2 to filter" phrase only shows with
+ * controller hints on; touch users tap the banner.
+ */
+fun conflictBannerText(count: Int, hintsOn: Boolean): String {
+    val head = if (count == 1) "1 save has a conflict" else "$count saves have conflicts"
+    return head + if (hintsOn) " — L2/R2 to filter, or tap to review" else " — tap to review"
+}

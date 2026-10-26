@@ -46,4 +46,13 @@ class GsBannersTest {
             bannersFor(BannerState(serverOnline = true, missingFolderCount = 1)),
         )
     }
+
+    @Test
+    fun `conflict banner names the pad path only with hints on`() {
+        assertEquals(
+            "3 saves have conflicts — L2/R2 to filter, or tap to review",
+            conflictBannerText(3, hintsOn = true),
+        )
+        assertEquals("1 save has a conflict — tap to review", conflictBannerText(1, hintsOn = false))
+    }
 }

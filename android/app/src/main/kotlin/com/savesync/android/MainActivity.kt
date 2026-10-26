@@ -73,6 +73,8 @@ import com.savesync.android.ui.components.GsChromeFooter
 import com.savesync.android.ui.components.GsChromeHeader
 import com.savesync.android.ui.components.GsChromeState
 import com.savesync.android.ui.components.GsCountBadge
+import com.savesync.android.ui.components.GsDotBadge
+import com.savesync.android.ui.theme.GsColors
 import com.savesync.android.ui.components.GsTabBadge
 import com.savesync.android.ui.components.LocalGsChrome
 import com.savesync.android.ui.components.chromeKeyFor
@@ -533,7 +535,9 @@ private fun MainApp() {
             topBar = {
                 // Collected here, so a count change recomposes the header only.
                 val activeDownloads by viewModel.activeDownloadCount.collectAsState()
-                val badges = remember(activeDownloads) { tabBadges(activeDownloads) }
+                val conflicts by viewModel.conflictTitleIds.collectAsState()
+                val conflictCount = conflicts.size
+                val badges = remember(activeDownloads, conflictCount) { tabBadges(activeDownloads, conflictCount) }
                 GsChromeHeader(
                     routePattern = currentRoute,
                     key = chromeKey,
@@ -647,8 +651,14 @@ private fun MainApp() {
 /**
  * The tab strip's badges.  Downloads shows how many downloads are running or
  * queued; the count shown last stays on the capsule while it pops out.
+ * Saves shows an Err dot while saves wait on a conflict decision.
  */
-private fun tabBadges(activeDownloads: Int): Map<Int, GsTabBadge> = mapOf(
+private fun tabBadges(activeDownloads: Int, conflicts: Int): Map<Int, GsTabBadge> = mapOf(
+    TAB_ROUTES.indexOf("saves") to GsTabBadge(
+        visible = conflicts > 0,
+        contentDescription = "Saves, $conflicts " + if (conflicts == 1) "conflict" else "conflicts",
+        content = { GsDotBadge(GsColors.Err) },
+    ),
     TAB_ROUTES.indexOf("downloads") to GsTabBadge(
         visible = activeDownloads > 0,
         contentDescription = "Downloads, $activeDownloads active",

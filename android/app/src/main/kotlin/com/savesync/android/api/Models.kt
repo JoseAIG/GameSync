@@ -22,7 +22,25 @@ data class SyncResponse(
     val conflict: List<String>,
     val up_to_date: List<String>,
     val server_only: List<String>,
-    val rom_available: List<String> = emptyList()
+    val rom_available: List<String> = emptyList(),
+    /** Per-conflict details (the server's ConflictInfo); parsed only, no protocol change. */
+    val conflict_info: List<ConflictInfo>? = emptyList()
+)
+
+/**
+ * What the server knows about one conflicting title (server/app/models/save.py
+ * ConflictInfo): both sides' hash and size, when and from which console the
+ * server copy came, and whether that console is this one.
+ */
+data class ConflictInfo(
+    val title_id: String,
+    val server_hash: String? = null,
+    val server_size: Long? = null,
+    val server_timestamp: String? = null,
+    val server_console_id: String? = null,
+    val client_hash: String? = null,
+    val client_size: Long? = null,
+    val same_console: Boolean? = null
 )
 
 data class SaveMeta(

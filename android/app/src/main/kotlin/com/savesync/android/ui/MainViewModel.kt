@@ -223,6 +223,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
+     * Titles waiting on a conflict decision: filled from a Sync all's or a
+     * smart sync's conflicts, cleared by a force upload / download or a sync
+     * that resolves the title.  Their status is Conflict, so the L2/R2 cycle
+     * offers it and the Saves tab shows a dot.  In memory only: the server
+     * reports the conflict again on the next sync.
+     */
+    private val _conflictTitleIds = MutableStateFlow<Set<String>>(emptySet())
+    val conflictTitleIds: StateFlow<Set<String>> = _conflictTitleIds
+
+    /** The server's details per conflicting title (the conflict card reads them). */
+    private val _conflictInfo = MutableStateFlow<Map<String, com.savesync.android.api.ConflictInfo>>(emptyMap())
+    val conflictInfo: StateFlow<Map<String, com.savesync.android.api.ConflictInfo>> = _conflictInfo
+
+    /** Folds a sync's outcome into the conflict set. */
+    private fun applyConflictOutcome(result: SyncResult) {
+        val resolved = result.resolvedTitleIds.toSet()
+        _conflictTitleIds.value = (_conflictTitleIds.value - resolved) + result.conflictTitleIds
+        _conflictInfo.value = (_conflictInfo.value - resolved) + result.conflictInfo
+    }
+
+    /** A force upload / download settled [titleId]'s conflict. */
+    private fun clearConflict(titleId: String) {
+        _conflictTitleIds.value = _conflictTitleIds.value - titleId
+        _conflictInfo.value = _conflictInfo.value - titleId
+    }
+
+    /**
      * Computed statuses, keyed by [StatusKey] (the save's files, its base
      * hash and the hashing rules), so a filter or search change never
      * re-hashes and a sync only re-hashes the titles it touched.
@@ -243,14 +270,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         syncStateEntities,
         _saturnArchiveSelectionVersion,
         settingsStore.settingsFlow.map { it.saturnSyncFormat }.distinctUntilChanged(),
-    ) { all, syncEntities, saturnVersion, saturnFormat ->
-        StatusInputs(all, syncEntities.associateBy { it.titleId }, "$saturnFormat#$saturnVersion", saturnFormat)
+        _conflictTitleIds,
+    ) { all, syncEntities, saturnVersion, saturnFormat, conflicts ->
+        StatusInputs(all, syncEntities.associateBy { it.titleId }, "$saturnFormat#$saturnVersion", saturnFormat, conflicts)
     }.transformLatest { inputs ->
         val pending = ArrayList<Int>()
         val keys = arrayOfNulls<StatusKey>(inputs.saves.size)
         val first = inputs.saves.mapIndexed { i, entry ->
             val sync = inputs.syncMap[entry.titleId]
-            val cheap = cheapStatusFor(entry, sync)
+            val cheap = cheapStatusFor(entry, sync, entry.titleId in inputs.conflicts)
             if (cheap != null) return@mapIndexed SaveRow(entry, cheap)
             val (mtime, size) = runCatching { entry.statFingerprint() }.getOrDefault(0L to 0L)
             val key = StatusKey(entry.titleId, mtime, size, sync?.lastSyncedHash, inputs.hashRules)
@@ -277,6 +305,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val syncMap: Map<String, SyncStateEntity>,
         val hashRules: String,
         val saturnFormat: SaturnSyncFormat,
+        val conflicts: Set<String>,
     )
 
     /** YabaSanshiro's shared backup.bin listed as a server-only row while it exists locally. */
@@ -287,11 +316,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             entry.saveFile?.exists() == true
 
     /** Status known without hashing, or null (see [cheapSyncStatus]). */
-    private fun cheapStatusFor(entry: SaveEntry, sync: SyncStateEntity?): SaveSyncStatus? {
+    private fun cheapStatusFor(entry: SaveEntry, sync: SyncStateEntity?, conflict: Boolean): SaveSyncStatus? {
         // A shared Saturn container is a local save even though it is listed
         // server-only (SyncEngine syncs it through the archive selection).
         val serverOnly = entry.isServerOnly && !isSharedYabaRow(entry)
-        return cheapSyncStatus(isServerOnly = serverOnly, lastSyncedHash = sync?.lastSyncedHash)
+        return cheapSyncStatus(isServerOnly = serverOnly, lastSyncedHash = sync?.lastSyncedHash, conflict = conflict)
     }
 
     /** The hashed status ([localStatus]); runs on the IO dispatcher. */
@@ -2145,6 +2174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val saveDirOverrides = currentSettings.saveDirOverrides
                 val result = engine.sync(localSaves)
+                applyConflictOutcome(result)
                 // A broken save-folder override silently yields "nothing to
                 // sync" for that emulator; say so instead.
                 val overrideWarnings = EmulatorRegistry.saveDirOverrideWarnings(saveDirOverrides)
@@ -2736,6 +2766,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val result = engine.sync(listOf(entry))
+                applyConflictOutcome(result)
                 val msg = buildString {
                     if (result.uploaded > 0) append("↑ Uploaded to server. ")
                     if (result.downloaded > 0) append("↓ Downloaded from server. ")
@@ -2821,6 +2852,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val ok = engine.uploadSave(entry)
                 if (ok) {
+                    clearConflict(entry.titleId)
                     engine.recordSyncedState(entry)
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()  // refresh status icons in the list
@@ -2855,6 +2887,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val ok = engine.downloadSave(entry, entry.titleId)
                 if (ok) {
+                    clearConflict(entry.titleId)
                     engine.recordSyncedStateFromFile(entry)
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()

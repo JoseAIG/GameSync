@@ -42,6 +42,7 @@ typedef struct {
     char api_key[MAX_API_KEY_LEN];
     char console_id[17];  // 16 hex chars + null (generated on first run)
     char nds_dir[MAX_PATH_LEN]; // NDS ROM directory on SD (e.g., "sdmc:/roms/nds")
+    int utc_offset_minutes; // Console clock offset from UTC (e.g. -240 for UTC-4)
 } AppConfig;
 
 #endif // COMMON_H

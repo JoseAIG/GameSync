@@ -71,6 +71,7 @@ static void skip_bom(char *str) {
 
 bool config_load(AppConfig *config, char *error_out, int error_size) {
     memset(config, 0, sizeof(AppConfig));
+    config->utc_offset_minutes = 0;
 
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) {
@@ -108,6 +109,13 @@ bool config_load(AppConfig *config, char *error_out, int error_size) {
             strncpy(config->api_key, val, MAX_API_KEY_LEN - 1);
         } else if (strcmp(key, "nds_dir") == 0) {
             strncpy(config->nds_dir, val, MAX_PATH_LEN - 1);
+        } else if (strcmp(key, "utc_offset_minutes") == 0) {
+            // The 3DS clock is local time without a zone; this is the offset
+            // of that clock from UTC, used to send real Unix timestamps.
+            int offset = atoi(val);
+            if (offset < -14 * 60) offset = -14 * 60;
+            if (offset > 14 * 60) offset = 14 * 60;
+            config->utc_offset_minutes = offset;
         }
     }
 
@@ -249,6 +257,7 @@ bool config_save(const AppConfig *config) {
     fprintf(f, "api_key=%s\n", config->api_key);
     if (config->nds_dir[0])
         fprintf(f, "nds_dir=%s\n", config->nds_dir);
+    fprintf(f, "utc_offset_minutes=%d\n", config->utc_offset_minutes);
 
     fclose(f);
     return true;

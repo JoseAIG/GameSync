@@ -61,6 +61,12 @@ api_key=your-secret-key
 
 The in-app config editor (L button) can also edit these values directly on the console using the system keyboard.
 
+### Optional settings
+
+| Key | Default | Meaning |
+|---|---|---|
+| `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. |
+
 ## Controls
 
 | Button | Action |

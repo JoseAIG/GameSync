@@ -112,13 +112,28 @@ static int json_parse_string_array(const char *json, const char *key,
     return count;
 }
 
+// Seconds between 1900-01-01 (osGetTime() epoch) and 1970-01-01 (Unix epoch)
+#define SECONDS_1900_TO_1970 2208988800ULL
+
+// Current time as a Unix timestamp (UTC).
+// osGetTime() returns milliseconds since 1900-01-01 on the console clock, which
+// is local time with no time zone, so the configured UTC offset is removed.
+static u32 unix_timestamp_now(const AppConfig *config) {
+    u64 secs = osGetTime() / 1000ULL;
+    if (secs < SECONDS_1900_TO_1970) return 0;
+    s64 unix_secs = (s64)(secs - SECONDS_1900_TO_1970)
+                  - (s64)config->utc_offset_minutes * 60;
+    if (unix_secs < 0) return 0;
+    if (unix_secs > 0xFFFFFFFFLL) return 0xFFFFFFFFu;
+    return (u32)unix_secs;
+}
+
 // Build JSON metadata for one title
-static int build_title_json(char *buf, int buf_size, const TitleInfo *title,
+static int build_title_json(char *buf, int buf_size, const AppConfig *config,
+                            const TitleInfo *title,
                             const char *hash, u32 total_size,
                             const char *last_synced_hash) {
-    // Get a timestamp (seconds since 2000-01-01 from 3DS, convert to rough unix)
-    u64 ms = osGetTime(); // ms since Jan 1 2000
-    u32 timestamp = (u32)(ms / 1000) + 946684800; // add seconds from 1970 to 2000
+    u32 timestamp = unix_timestamp_now(config);
 
     if (last_synced_hash && last_synced_hash[0] != '\0') {
         return snprintf(buf, buf_size,
@@ -169,8 +184,7 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
     if (progress) progress(msg);
 
     // Create bundle
-    u64 ms = osGetTime();
-    u32 timestamp = (u32)(ms / 1000) + 946684800;
+    u32 timestamp = unix_timestamp_now(config);
     u32 bundle_size;
     u8 *bundle = bundle_create(title->title_id, timestamp,
                                files, file_count, &bundle_size);
@@ -185,13 +199,17 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
         return SYNC_ERR_TOO_LARGE;
     }
 
-    // POST to server — include product code so the server can store the game name
+    // POST to server — include product code so the server can store the game name.
+    // Every upload is either directed by the three-way hash sync plan or
+    // explicitly confirmed by the user, so skip the server's timestamp check
+    // with force=true (as the Android client does). Otherwise a save uploaded
+    // by another device with a newer clock would reject this upload with 409.
     char path[128];
     if (title->product_code[0]) {
-        snprintf(path, sizeof(path), "/saves/%s?game_code=%s",
+        snprintf(path, sizeof(path), "/saves/%s?force=true&game_code=%s",
                  title->title_id_hex, title->product_code);
     } else {
-        snprintf(path, sizeof(path), "/saves/%s", title->title_id_hex);
+        snprintf(path, sizeof(path), "/saves/%s?force=true", title->title_id_hex);
     }
 
     u32 resp_size, status;
@@ -269,7 +287,7 @@ static SyncResult download_title(const AppConfig *config, const TitleInfo *title
 
 SyncResult sync_title(const AppConfig *config, const TitleInfo *title,
                       SyncProgressCb progress) {
-    // For single-title sync: always upload (the server will reject if older)
+    // For single-title sync: always upload (the user chose to upload this save)
     // Pass NULL for hash - upload_title_with_hash will compute it
     return upload_title_with_hash(config, title, progress, NULL);
 }
@@ -383,7 +401,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
 
         if (!first_title) pos += snprintf(json + pos, json_cap - pos, ",");
         first_title = false;
-        pos += build_title_json(json + pos, json_cap - pos, &titles[i],
+        pos += build_title_json(json + pos, json_cap - pos, config, &titles[i],
                                current_hash, total_size,
                                has_last_synced ? last_synced : NULL);
     }

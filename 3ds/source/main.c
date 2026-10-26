@@ -1223,6 +1223,68 @@ static bool settings_action(SettingsResult action) {
 }
 
 // ---------------------------------------------------------------------------
+// First-run setup
+// ---------------------------------------------------------------------------
+
+// Probe the server and the key just typed. Returns true to go on (it
+// answered and took the key, or "Continue anyway"), false to edit again.
+static bool setup_check(AppConfig *cfg, bool net_ok) {
+    char title[64], body[MAX_URL_LEN + 160];
+    if (net_ok) {
+        char msg[48];
+        snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
+        ui_busy("Set up", msg);
+        bool answered = network_select_server(cfg);
+        u32 key = answered ? titles_probe_key(cfg) : 0;
+        if (answered && key != 401) return true;
+        if (answered) {
+            snprintf(title, sizeof(title), "Key rejected");
+            snprintf(body, sizeof(body), "The server at %s refused this API key (401).\n"
+                     UI_DIM "It is saved anyway; you can fix it later in Settings.", config_active_url(cfg));
+        } else {
+            snprintf(title, sizeof(title), "No answer from the server");
+            snprintf(body, sizeof(body), "%s\n" UI_DIM "%s\n" UI_DIM "It is saved anyway; check WiFi and the address.",
+                     config_active_url(cfg), network_last_error()[0] ? network_last_error() : "No reply");
+        }
+    } else {
+        snprintf(title, sizeof(title), "Can't check the server");
+        snprintf(body, sizeof(body), "The network service didn't start, so the address wasn't tried.\n"
+                 UI_DIM "It is saved anyway.");
+    }
+    UiButton b[2] = { { KEY_B, "B", "Edit" }, { KEY_A, "A", "Continue anyway" } };
+    return (ui_dialog(UI_TONE_WARN, title, body, b, 2) & KEY_A) != 0;
+}
+
+// No usable config.txt: ask for the server address and the API key on the
+// console, write the file and load it. True once config_load succeeds;
+// false to go back to the config error (B in the first field).
+static bool first_run_setup(AppConfig *cfg, bool net_ok) {
+    for (;;) {
+        UiTextField url = { "Server URL", "http://192.168.1.100:8000", "Next", false, true, false };
+        if (!ui_edit_text_ex(&url, cfg->server_url, MAX_URL_LEN)) return false;
+        UiTextField key = { "API key", "The server's SYNC_API_KEY", "Save", true, false, false };
+        if (!ui_edit_text_ex(&key, cfg->api_key, MAX_API_KEY_LEN)) continue;   // back to the address
+
+        // config_save creates sdmc:/3ds/3dssync/ when it is missing
+        if (!config_save(cfg)) {
+            if (ui_error_card("Couldn't save the settings", "The SD card didn't accept " CONFIG_PATH ".",
+                              "Nothing was written.", "Check that the SD card isn't locked or full.", true))
+                continue;
+            return false;
+        }
+        if (!setup_check(cfg, net_ok)) continue;
+
+        char error[512];
+        AppConfig loaded;
+        if (config_load(&loaded, error, sizeof(error))) {
+            *cfg = loaded;
+            return true;
+        }
+        ui_message(UI_TONE_ERR, "Config error", error);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1238,18 +1300,26 @@ int main(int argc, char *argv[]) {
 
     ui_busy("Starting", "Loading config...");
 
+    // The network service first: first-run setup checks the server with it
+    bool net_ok = network_init();
+
     char config_error[512];
-    if (!config_load(&config, config_error, sizeof(config_error))) {
+    bool config_ok = config_load(&config, config_error, sizeof(config_error));
+    while (!config_ok) {
+        // No usable config.txt: set it up here (A), or exit (START)
         char msg[768];
         snprintf(msg, sizeof(msg),
             "%s\n\n"
-            UI_DIM "Expected file at:\n"
-            UI_HI "%s\n\n"
-            UI_DIM "With contents:\n"
-            UI_HI "server_url=http://<pc-ip>:8000\n"
-            UI_HI "api_key=<your-key>",
+            "Set up the server address and API key here (A), or write\n"
+            UI_HI "%s\n"
+            UI_DIM "on a PC (server_url=..., api_key=...).",
             config_error, CONFIG_PATH);
-        wait_for_start(UI_TONE_ERR, "Config error", msg);
+        static const UiButton b[] = { { KEY_START, "START", "Exit" }, { KEY_A, "A", "Set up now" } };
+        if (!(ui_dialog(UI_TONE_ERR, "Config error", msg, b, 2) & KEY_A)) break;
+        config_ok = first_run_setup(&config, net_ok);
+    }
+    if (!config_ok) {
+        if (net_ok) network_exit();
         card_spi_exit();
         psExit();
         fsExit();
@@ -1261,8 +1331,7 @@ int main(int argc, char *argv[]) {
     ui_set_local_console_id(config.console_id);
     ui_set_utc_offset(config.utc_offset_minutes);
 
-    // Initialize network
-    if (!network_init()) {
+    if (!net_ok) {
         wait_for_start(UI_TONE_ERR, "Network unavailable",
                        "Failed to start the network service.\n\nMake sure WiFi is enabled.");
         card_spi_exit();

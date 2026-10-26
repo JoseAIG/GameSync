@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import com.savesync.android.ui.components.PullThresholdHaptic
+import com.savesync.android.ui.components.GsListScrollEdges
 import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.AlphabetHud
 import com.savesync.android.ui.components.GsDialogHost
@@ -681,6 +682,8 @@ fun SavesScreen(
                             .fillMaxSize()
                             .gsEdgeBump(follower)
                     )
+                    // Where rows scroll under the chips / over the footer.
+                    GsListScrollEdges(listState)
                     // Over the list while a hold jumps by letter.
                     AlphabetHud(holdNav)
                     }

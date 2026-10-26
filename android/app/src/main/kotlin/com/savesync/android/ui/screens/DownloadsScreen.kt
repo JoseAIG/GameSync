@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Clear
 import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsListScrollEdges
 import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsNoticeKind
@@ -341,16 +342,20 @@ fun DownloadsScreen(
                     color = gsDim(),
                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 8.dp),
                 )
-                DownloadsList(
-                    downloads = downloads,
-                    liveProgress = liveProgress,
-                    listState = listState,
-                    selectedIndex = { selectedIndex },
-                    onSelect = { selectedIndex = it },
-                    onRequestCancel = { removeTarget = it },
-                    viewModel = viewModel,
-                    modifier = Modifier.gsEdgeBump(follower),
-                )
+                Box(Modifier.fillMaxWidth().weight(1f)) {
+                    DownloadsList(
+                        downloads = downloads,
+                        liveProgress = liveProgress,
+                        listState = listState,
+                        selectedIndex = { selectedIndex },
+                        onSelect = { selectedIndex = it },
+                        onRequestCancel = { removeTarget = it },
+                        viewModel = viewModel,
+                        modifier = Modifier.gsEdgeBump(follower),
+                    )
+                    // Where rows scroll under the header line / over the footer.
+                    GsListScrollEdges(listState)
+                }
             }
         }
     }

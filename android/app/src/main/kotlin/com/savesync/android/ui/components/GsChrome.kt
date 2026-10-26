@@ -1,5 +1,13 @@
 package com.savesync.android.ui.components
 
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
@@ -45,6 +53,14 @@ data class GsChromeSpec(
     val onBack: (() -> Unit)? = null,
     val actions: @Composable RowScope.() -> Unit = NoActions,
     val hints: List<GsHint> = emptyList(),
+    /**
+     * Content is scrolled under the header / above the footer: MainApp draws
+     * the scroll-edge gradient there (M5-4).  Compute each with
+     * `derivedStateOf { state.canScrollBackward }` / `canScrollForward`, so
+     * the spec changes only when the boolean flips, not on every frame.
+     */
+    val scrolledUnderTop: Boolean = false,
+    val scrolledUnderBottom: Boolean = false,
 )
 
 /** Specs by chrome key (see [chromeKeyFor]); read by MainApp's header and footer. */
@@ -151,10 +167,69 @@ fun GsChromeFooter(key: String) {
     GsFooterHints(LocalGsChrome.current.specs[key]?.hints ?: emptyList())
 }
 
+// ── Scroll edges (M5-4) ─────────────────────────────────────────────────────
+//
+// Instead of a 1dp rule under the header and over the footer, a 6dp
+// gradient fades in where content actually scrolls under a fixed surface,
+// and only while it does (§12).  The bars themselves stay opaque.
+
+/** Height of a scroll-edge gradient. */
+val GS_SCROLL_EDGE = 6.dp
+
 /**
- * A screen's sub-tab chips (system filter, status filter …) with the rule
- * under them, drawn at the top of the screen's own content so the chips move
- * with their list.
+ * MainApp's edges over the content area, from the current screen's spec
+ * (for screens that scroll right under the header and over the footer).
+ * Reads the spec itself, so only this recomposes when a flag flips.
+ */
+@Composable
+fun BoxScope.GsChromeScrollEdges(key: String) {
+    val spec = LocalGsChrome.current.specs[key]
+    GsScrollEdges(top = spec?.scrolledUnderTop == true, bottom = spec?.scrolledUnderBottom == true)
+}
+
+/**
+ * A list's own edges, for a list that sits under chips or above an
+ * in-screen footer rather than right against the app's bars.
+ */
+@Composable
+fun BoxScope.GsListScrollEdges(listState: LazyListState, color: Color = GsColors.Bg) {
+    val top by remember(listState) { derivedStateOf { listState.canScrollBackward } }
+    val bottom by remember(listState) { derivedStateOf { listState.canScrollForward } }
+    GsScrollEdges(top = top, bottom = bottom, color = color)
+}
+
+/** Top and bottom gradients in [color] @ 0.9 → transparent; alpha follows STANDARD. */
+@Composable
+fun BoxScope.GsScrollEdges(top: Boolean, bottom: Boolean, color: Color = GsColors.Bg2) {
+    ScrollEdge(visible = top, atTop = true, color = color, modifier = Modifier.align(Alignment.TopCenter))
+    ScrollEdge(visible = bottom, atTop = false, color = color, modifier = Modifier.align(Alignment.BottomCenter))
+}
+
+@Composable
+private fun ScrollEdge(visible: Boolean, atTop: Boolean, color: Color, modifier: Modifier) {
+    val alpha = animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = GsMotion.standard(),
+        label = "scrollEdge",
+    )
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(GS_SCROLL_EDGE)
+            // Read in the draw phase: the fade never recomposes anything.
+            .drawBehind {
+                val a = alpha.value
+                if (a <= 0.001f) return@drawBehind
+                val solid = color.copy(alpha = 0.9f * a)
+                val stops = if (atTop) listOf(solid, Color.Transparent) else listOf(Color.Transparent, solid)
+                drawRect(Brush.verticalGradient(stops))
+            }
+    )
+}
+
+/**
+ * A screen's sub-tab chips (system filter, status filter …), drawn at the
+ * top of the screen's own content so the chips move with their list.
  */
 @Composable
 fun GsSubTabRow(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
@@ -170,11 +245,7 @@ fun GsSubTabRow(modifier: Modifier = Modifier, content: @Composable RowScope.() 
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             content = content,
         )
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(GsColors.Line)
-        )
+        // No rule under the chips: the list below draws a scroll edge
+        // there while it is scrolled (GsListScrollEdges).
     }
 }

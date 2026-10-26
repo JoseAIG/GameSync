@@ -73,6 +73,7 @@ import com.savesync.android.catalog.RomCatalogFilter
 import com.savesync.android.findComponentActivity
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.GsListScrollEdges
 import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.AlphabetHud
 import com.savesync.android.ui.components.GsDialogHost
@@ -616,6 +617,7 @@ fun RomCatalogScreen(
                         )
                     }
                 }
+                if (filtered.isNotEmpty()) GsListScrollEdges(listState)
                 // Over the list while a hold jumps by letter.
                 AlphabetHud(holdNav)
             }

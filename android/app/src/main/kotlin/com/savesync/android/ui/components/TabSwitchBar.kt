@@ -160,12 +160,8 @@ fun GsTopBar(
                 }
             }
         }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(GsColors.Line)
-        )
+        // No rule under the header: content draws a scroll edge there
+        // while it is scrolled under (GsChromeScrollEdges).
     }
 }
 
@@ -227,12 +223,7 @@ fun GsSubScreenBar(
             actions()
             ServerDot(online, onServerDotClick)
         }
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(GsColors.Line)
-        )
+        // No rule: see GsTopBar.
     }
 }
 

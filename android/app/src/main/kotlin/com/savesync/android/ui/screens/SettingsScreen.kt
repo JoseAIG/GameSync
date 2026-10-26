@@ -51,6 +51,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -248,12 +249,19 @@ fun SettingsScreen(
     }
 
     // Footer hints, drawn by MainApp's persistent chrome.
-    GsScreenChrome("settings", SETTINGS_CHROME)
+    // The scroll edges under the header / over the footer follow the page.
+    val pageScroll = rememberScrollState()
+    val scrolledTop by remember { derivedStateOf { pageScroll.canScrollBackward } }
+    val scrolledBottom by remember { derivedStateOf { pageScroll.canScrollForward } }
+    val chromeSpec = remember(scrolledTop, scrolledBottom) {
+        SETTINGS_CHROME.copy(scrolledUnderTop = scrolledTop, scrolledUnderBottom = scrolledBottom)
+    }
+    GsScreenChrome("settings", chromeSpec)
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(pageScroll)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {

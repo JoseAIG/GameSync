@@ -95,6 +95,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -233,10 +234,15 @@ fun SaveDetailScreen(
     // Sub-screen header and hints, drawn by MainApp's persistent chrome.
     // Keyed by the title id, so a second game never shows this one's title.
     val detailTitle = entry?.displayName ?: titleId
-    val chromeSpec = remember(detailTitle, onNavigateBack) {
+    val pageScroll = rememberScrollState()
+    val scrolledTop by remember { derivedStateOf { pageScroll.canScrollBackward } }
+    val scrolledBottom by remember { derivedStateOf { pageScroll.canScrollForward } }
+    val chromeSpec = remember(detailTitle, onNavigateBack, scrolledTop, scrolledBottom) {
         GsChromeSpec(
             title = detailTitle,
             onBack = onNavigateBack,
+            scrolledUnderTop = scrolledTop,
+            scrolledUnderBottom = scrolledBottom,
             hints = listOf(
                 GsHint(GsButton.DPAD, "Move"),
                 GsHint(GsButton.A, "Select"),
@@ -515,7 +521,7 @@ fun SaveDetailScreen(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp, vertical = 12.dp)
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(pageScroll)
             .focusRequester(focusRequester)
             .focusable()
             .onPreviewKeyEvent { event ->

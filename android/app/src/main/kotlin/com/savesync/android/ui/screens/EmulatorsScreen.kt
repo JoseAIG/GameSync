@@ -29,6 +29,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -86,10 +87,15 @@ fun EmulatorsScreen(
     var folderPickerForEmulator by remember { mutableStateOf<String?>(null) }
 
     // Sub-screen header and hints, drawn by MainApp's persistent chrome.
-    val chromeSpec = remember(onNavigateBack) {
+    val pageScroll = rememberScrollState()
+    val scrolledTop by remember { derivedStateOf { pageScroll.canScrollBackward } }
+    val scrolledBottom by remember { derivedStateOf { pageScroll.canScrollForward } }
+    val chromeSpec = remember(onNavigateBack, scrolledTop, scrolledBottom) {
         GsChromeSpec(
             title = "Emulator Configuration",
             onBack = onNavigateBack,
+            scrolledUnderTop = scrolledTop,
+            scrolledUnderBottom = scrolledBottom,
             hints = listOf(
                 GsHint(GsButton.DPAD, "Move"),
                 GsHint(GsButton.A, "Select"),
@@ -102,7 +108,7 @@ fun EmulatorsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(pageScroll)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {

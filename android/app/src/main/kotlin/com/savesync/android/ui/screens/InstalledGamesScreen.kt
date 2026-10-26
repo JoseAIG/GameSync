@@ -66,6 +66,7 @@ import com.savesync.android.installed.InstalledRomsScanner
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.components.GsButton
+import com.savesync.android.ui.components.GsListScrollEdges
 import com.savesync.android.ui.components.gsEdgeBump
 import com.savesync.android.ui.components.AlphabetHud
 import com.savesync.android.ui.components.GsDialogHost
@@ -451,6 +452,7 @@ fun InstalledGamesScreen(
                         )
                     }
                 }
+                if (filtered.isNotEmpty()) GsListScrollEdges(listState)
                 // Over the list while a hold jumps by letter.
                 AlphabetHud(holdNav)
             }

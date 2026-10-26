@@ -41,4 +41,20 @@ class GsChromeTest {
         assertEquals(GsChromeSpec(hints = hints), GsChromeSpec(hints = listOf(GsHint(GsButton.A, "Sync"))))
         assertEquals(GsChromeSpec(title = "Zelda"), GsChromeSpec(title = "Zelda"))
     }
+
+    @Test
+    fun `scroll-edge flags default off and change the spec only when they flip`() {
+        val base = GsChromeSpec(title = "Settings")
+        assertFalse(base.scrolledUnderTop)
+        assertFalse(base.scrolledUnderBottom)
+        // Same flags → equal spec → GsScreenChrome writes nothing.
+        assertEquals(base.copy(scrolledUnderTop = true), base.copy(scrolledUnderTop = true))
+        assertNotEquals(base, base.copy(scrolledUnderTop = true))
+        assertNotEquals(base, base.copy(scrolledUnderBottom = true))
+    }
+
+    @Test
+    fun `scroll edge is a 6dp gradient`() {
+        assertEquals(6f, GS_SCROLL_EDGE.value)
+    }
 }

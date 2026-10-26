@@ -85,6 +85,8 @@ import com.savesync.android.ui.exit
 import com.savesync.android.ui.navMotionFor
 import com.savesync.android.sync.heldBackNoticeText
 import com.savesync.android.ui.components.GsChromeFooter
+import androidx.compose.foundation.layout.Box
+import com.savesync.android.ui.components.GsChromeScrollEdges
 import com.savesync.android.ui.components.GsChromeHeader
 import com.savesync.android.ui.components.GsChromeState
 import com.savesync.android.ui.components.GsCountBadge
@@ -610,10 +612,13 @@ private fun MainApp() {
             // tab content slides the way L1/R1 point (fade on a wrap), push
             // and pop slide, fade-only under reduced motion.  Enter and
             // pop-enter share one rule, as do the exits.
+            // Scroll edges sit over the content, under the header and over
+            // the footer, only while the screen says content is under them.
+            Box(Modifier.padding(padding).fillMaxSize()) {
             NavHost(
                 navController = navController,
                 startDestination = TAB_ROUTES[0],
-                modifier = Modifier.padding(padding),
+                modifier = Modifier.fillMaxSize(),
                 enterTransition = {
                     navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
                         .enter(reduceMotion)
@@ -694,6 +699,8 @@ private fun MainApp() {
                         openedFromConflict = backStackEntry.arguments?.getString("reason") == "conflict",
                     )
                 }
+            }
+            GsChromeScrollEdges(chromeKey)
             }
         }
 

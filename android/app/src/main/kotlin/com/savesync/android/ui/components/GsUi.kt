@@ -239,12 +239,8 @@ fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
             .fillMaxWidth()
             .background(GsColors.Bg2),
     ) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(GsColors.Line)
-        )
+        // No rule over the hints: content draws a scroll edge there while
+        // more of it is below (GsChromeScrollEdges / GsListScrollEdges).
         Row(
             modifier = Modifier
                 .fillMaxWidth()

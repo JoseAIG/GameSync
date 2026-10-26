@@ -793,6 +793,12 @@ static void do_save_menu(void) {
     // Last, so v055's items keep their places
     snprintf(search_item, sizeof(search_item), "Search saves by name%s", gui_ellipsis());
     items[n] = search_item; ids[n++] = M_SEARCH;
+    // The menu grows out of the row it is about (where it is on screen now;
+    // saves_do_y has just started bringing it into view)
+    float row_y = SAVES_LIST_Y + (selected - ui_list_view(&saves_anim) + 0.5f) * SAVES_ROW_H;
+    if (row_y < SAVES_LIST_Y) row_y = SAVES_LIST_Y;
+    if (row_y > GUI_BAR_Y) row_y = GUI_BAR_Y;
+    ui_set_modal_origin(row_y);
     int pick = ui_choose(UI_TONE_ACCENT, t->name, items, n);
     if (pick < 0) return;
 

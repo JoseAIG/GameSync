@@ -140,6 +140,11 @@ bool ui_progress_cancel_poll(void);
 // Indeterminate progress card with a message
 void ui_busy(const char *title, const char *message);
 
+// The next modal (dialog or choice list) grows out of screen y `y` on the
+// bottom screen instead of its own centre, e.g. the row a menu is about.
+// Used once.
+void ui_set_modal_origin(float y);
+
 // Pick one of `count` items from a list card (A picks, B cancels, D-pad /
 // touch moves). Returns the index, or -1 if cancelled.
 int ui_choose(UiTone tone, const char *title, const char *const *items, int count);

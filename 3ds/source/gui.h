@@ -246,8 +246,50 @@ void gui_card_ex(float x, float y, float w, float h, const char *title, u32 tone
 void gui_ring(float cx, float cy, float r, float thick, u32 color);
 // Plain panel (no title)
 void gui_panel(float x, float y, float w, float h);
-// Translucent overlay over the whole screen (behind a modal card)
+// Translucent overlay over the whole screen (behind a modal card), fully
+// dim (counts as this frame's scrim, see gui_scrim_draw)
 void gui_dim(void);
+// The same overlay at `alpha`, nothing else
+void gui_dim_alpha(u8 alpha);
+
+// ---------------------------------------------------------------------------
+// Modals: the scrim and the card's entry
+// ---------------------------------------------------------------------------
+//
+// The scrim behind modal cards is one presentation value for the whole app
+// (critically damped spring, GUI_RESP_SCRIM, stepped by gui_begin): it rises
+// while a modal is open and, after the last one returned, fades out the way
+// it came in. gui_end() draws that residual over the bottom screen on the
+// following frames, whatever loop draws them, so their input is live while
+// it fades. A modal opened mid-fade starts from where it is, so dialog ->
+// dialog or dialog -> progress card never flickers to clear and back.
+void gui_scrim_open(void);    // a modal opens (they nest)
+void gui_scrim_close(void);   // ...and returned
+void gui_scrim_full(void);    // a card drawn at rest (a bare progress frame): fully dim now
+void gui_scrim_draw(void);    // draw it at its value (gui_end then leaves it alone this frame)
+float gui_scrim_value(void);
+
+// A modal card's entry: from the open frame it rises from +8 px and grows
+// from 0.96 around its pivot (GUI_RESP_MODAL, damping 1), through the view
+// transform, so it can be drawn with ordinary coordinates; under reduced
+// motion it fades in over GUI_FADE_MS instead. Input is the caller's from
+// frame 1. The card has no exit: it is cut on the commit frame (an opaque
+// rounded card can't fade over live content) and only the scrim fades.
+typedef struct {
+    GuiSpring t;          // 0 opened .. 1 at rest
+    u64 open_ms;
+    float px, py;         // pivot
+    u32 frame;            // last stepped frame
+    bool open;
+    GuiXf xf_prev;        // the transform / fade begin() replaced
+    float fade_prev;
+} GuiModal;
+void gui_modal_open(GuiModal *m, float pivot_x, float pivot_y);
+void gui_modal_close(GuiModal *m);
+// Draws the scrim, then sets up the card's transform (or fade) for what
+// is drawn until gui_modal_end()
+void gui_modal_begin(GuiModal *m);
+void gui_modal_end(GuiModal *m);
 
 // Header bar: "GameSync" + section title on the left. On the top screen it
 // also shows the version, WiFi strength and the server status dot.

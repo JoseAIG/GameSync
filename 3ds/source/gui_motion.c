@@ -94,3 +94,31 @@ float gui_check_scale(float t) {
     float s = 1.0f - 0.4f * (1.0f + wt) * expf(-wt);
     return s > 1.0f ? 1.0f : s;
 }
+
+GuiXf gui_xf_pivot(float s, float px, float py, float dx, float dy) {
+    // s * (p - pivot) + pivot + d
+    GuiXf xf = { s, px * (1.0f - s) + dx, py * (1.0f - s) + dy };
+    return xf;
+}
+
+GuiXf gui_xf_compose(GuiXf outer, GuiXf inner) {
+    // outer(inner(p)) = so * (si * p + ti) + to
+    GuiXf xf = { outer.s * inner.s, outer.s * inner.tx + outer.tx, outer.s * inner.ty + outer.ty };
+    return xf;
+}
+
+GuiRect gui_xf_rect(GuiXf xf, GuiRect r) {
+    GuiRect o = { xf.s * r.x + xf.tx, xf.s * r.y + xf.ty, xf.s * r.w, xf.s * r.h };
+    return o;
+}
+
+bool gui_xf_is_identity(GuiXf xf) {
+    return xf.s == 1.0f && xf.tx == 0.0f && xf.ty == 0.0f;
+}
+
+GuiXf gui_modal_xf(float t, float pivot_x, float pivot_y) {
+    if (!(t > 0)) t = 0;   // also NaN
+    if (t >= 1) return GUI_XF_IDENTITY;
+    float s = GUI_MODAL_SCALE0 + (1.0f - GUI_MODAL_SCALE0) * t;
+    return gui_xf_pivot(s, pivot_x, pivot_y, 0, GUI_MODAL_RISE_PX * (1.0f - t));
+}

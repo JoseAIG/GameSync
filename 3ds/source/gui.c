@@ -68,6 +68,26 @@ u64 gui_clock_ms(void) {
 // The fade on now (toward HEX_BG), see gui_fade_push()
 static float fade_now;
 static float transition_fade_prev;
+static GuiXf transition_xf_prev = { 1.0f, 0.0f, 0.0f };
+
+// The view transform on now (what C2D_ViewTranslate/Scale were given), so
+// gui_clip() can put the scissor where the content actually is
+static GuiXf view_xf = { 1.0f, 0.0f, 0.0f };
+
+static void view_set(GuiXf xf) {
+    C2D_ViewReset();
+    if (!gui_xf_is_identity(xf)) {
+        // M = T * S: p' = s * p + t
+        C2D_ViewTranslate(xf.tx, xf.ty);
+        C2D_ViewScale(xf.s, xf.s);
+    }
+    view_xf = xf;
+}
+
+// The modal scrim: one presentation value for the whole app (see gui.h)
+static GuiSpring scrim;
+static int scrim_depth;
+static bool scrim_drawn;    // a modal drew it this frame
 
 void gui_begin(bool vsync) {
     C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : 0);
@@ -75,12 +95,26 @@ void gui_begin(bool vsync) {
     fade_now = 0;
     transition_fade_prev = 0;
     C2D_Fade(0);
+    view_set(GUI_XF_IDENTITY);
     ticks++;
     // Sampled after the vsync wait, so dt is the real frame-to-frame time
     u64 now = svcGetSystemTick();
     frame_dt = gui_dt_clamp((float)(now - frame_tick) / (float)SYSCLOCK_ARM11);
     frame_tick = now;
     frame_ms = (now - tick0) / (SYSCLOCK_ARM11 / 1000);
+
+    // The scrim follows the modals: up while one is open, down after the
+    // last returned. It is an opacity, so reduced motion keeps it (rising
+    // as a GUI_FADE_MS ramp there instead of a spring).
+    scrim_drawn = false;
+    float target = scrim_depth > 0 ? 1.0f : 0.0f;
+    if (gui_reduce_motion() && target > scrim.x) {
+        scrim.x += frame_dt * 1000.0f / GUI_FADE_MS;
+        if (scrim.x > 1) scrim.x = 1;
+        scrim.v = 0;
+    } else {
+        gui_spring_always(&scrim, target, GUI_RESP_SCRIM, frame_dt);
+    }
 }
 
 float gui_dt(void) { return frame_dt; }
@@ -92,8 +126,9 @@ void gui_screen(int screen) {
     screen_w = (screen == GUI_TOP) ? GUI_TOP_W : GUI_BOT_W;
     C2D_TargetClear(t, gui_rgb(HEX_BG));
     C2D_SceneBegin(t);
-    // A clip left on by mistake must not hide the next screen
+    // A clip or a transform left on by mistake must not reach the next screen
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    view_set(GUI_XF_IDENTITY);
     // Soft vertical gradient behind everything
     gui_vgrad(0, 0, screen_w, GUI_H, gui_rgb(0x131D29), gui_rgb(HEX_BG));
 }
@@ -111,6 +146,8 @@ static void perf_overlay(void) {
     else
         snprintf(buf, sizeof(buf), "%.1f ms", ms);
     C2D_SceneBegin(target_top);
+    view_set(GUI_XF_IDENTITY);
+    C2D_Fade(0);
     float w = gui_text_w(GUI_S_SMALL, buf) + 8;
     gui_rect(GUI_TOP_W - w - 2, 2, w, 14, gui_rgba(0x000000, 0xC0));
     gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(ms > 12.0f || gui_perf_coast_overspeed ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
@@ -118,10 +155,83 @@ static void perf_overlay(void) {
 #endif
 
 void gui_end(void) {
+    // After a modal returned, its scrim fades out over the screen that is
+    // live again (the card itself was cut on the commit frame)
+    if (!scrim_drawn && scrim.x > 0.004f) {
+        C2D_SceneBegin(target_bottom);
+        C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+        view_set(GUI_XF_IDENTITY);
+        fade_now = 0;
+        C2D_Fade(0);
+        gui_rect(0, 0, GUI_BOT_W, GUI_H, gui_rgba(0x05090D, (u8)(GUI_SCRIM_ALPHA * scrim.x)));
+    }
 #ifdef GUI_PERF
     perf_overlay();
 #endif
     C3D_FrameEnd(0);
+}
+
+// ---------------------------------------------------------------------------
+// Modals
+// ---------------------------------------------------------------------------
+
+void gui_scrim_open(void) { scrim_depth++; }
+
+void gui_scrim_close(void) {
+    if (scrim_depth > 0) scrim_depth--;
+}
+
+void gui_scrim_full(void) { gui_spring_set(&scrim, 1); }
+
+float gui_scrim_value(void) { return scrim.x; }
+
+void gui_dim_alpha(u8 alpha) {
+    gui_rect(0, 0, screen_w, GUI_H, gui_rgba(0x05090D, alpha));
+}
+
+void gui_scrim_draw(void) {
+    gui_dim_alpha((u8)(GUI_SCRIM_ALPHA * scrim.x));
+    if (screen_id == GUI_BOTTOM) scrim_drawn = true;
+}
+
+void gui_modal_open(GuiModal *m, float pivot_x, float pivot_y) {
+    memset(m, 0, sizeof(*m));
+    gui_spring_set(&m->t, 0);
+    m->open_ms = gui_clock_ms();
+    if (!m->open_ms) m->open_ms = 1;
+    m->px = pivot_x;
+    m->py = pivot_y;
+    m->frame = ticks - 1;
+    m->open = true;
+    gui_scrim_open();
+}
+
+void gui_modal_close(GuiModal *m) {
+    if (!m->open) return;
+    m->open = false;
+    gui_scrim_close();
+}
+
+void gui_modal_begin(GuiModal *m) {
+    gui_scrim_draw();
+    if (m->frame != ticks) {   // once a frame
+        m->frame = ticks;
+        gui_spring(&m->t, 1, GUI_RESP_MODAL, frame_dt);
+    }
+    m->xf_prev = view_xf;
+    m->fade_prev = fade_now;
+    if (gui_reduce_motion()) {
+        // No rise or scale: the card fades in over GUI_FADE_MS
+        float k = gui_effect_t(m->open_ms, gui_clock_ms(), GUI_FADE_MS);
+        m->fade_prev = gui_fade_push(1.0f - k);
+    } else if (m->t.x < 1) {
+        view_set(gui_xf_compose(view_xf, gui_modal_xf(m->t.x, m->px, m->py)));
+    }
+}
+
+void gui_modal_end(GuiModal *m) {
+    view_set(m->xf_prev);
+    gui_fade_pop(m->fade_prev);
 }
 
 float gui_w(void) { return screen_w; }
@@ -168,13 +278,15 @@ void gui_transition_begin(GuiTransition *t) {
         float k = t->from != 0 ? fabsf(t->off.x) / fabsf(t->from) : 0;
         fade = 0.6f * (k > 1 ? 1 : k);
     }
-    if (t->off.x != 0) C2D_ViewTranslate(t->off.x, 0);
+    transition_xf_prev = view_xf;
+    if (t->off.x != 0) view_set(gui_xf_compose(view_xf, gui_xf_pivot(1, 0, 0, t->off.x, 0)));
     // citro2d has no global alpha: tint toward the background instead
     transition_fade_prev = gui_fade_push(fade);
 }
 
 void gui_transition_end(void) {
-    C2D_ViewReset();
+    view_set(transition_xf_prev);
+    transition_xf_prev = GUI_XF_IDENTITY;
     gui_fade_pop(transition_fade_prev);
     transition_fade_prev = 0;
 }
@@ -268,6 +380,9 @@ void gui_icon_search(float cx, float cy, float s, u32 color) {
 // its far end. Coordinates are clamped to the screen.
 void gui_clip(float x, float y, float w, float h) {
     C2D_Flush();
+    // Where the rect is on screen under the current view transform
+    GuiRect r = gui_xf_rect(view_xf, gui_rect_make(x, y, w, h));
+    x = r.x, y = r.y, w = r.w, h = r.h;
     float W = screen_w;
     float left = GUI_H - (y + h), top = W - (x + w), right = GUI_H - y, bottom = W - x;
     if (left < 0) left = 0;
@@ -732,7 +847,8 @@ void gui_ring(float cx, float cy, float r, float thick, u32 color) {
 }
 
 void gui_dim(void) {
-    gui_rect(0, 0, screen_w, GUI_H, gui_rgba(0x05090D, 0xB4));
+    gui_dim_alpha(GUI_SCRIM_ALPHA);
+    if (screen_id == GUI_BOTTOM) scrim_drawn = true;
 }
 
 void gui_header_bar_ex(bool line) {

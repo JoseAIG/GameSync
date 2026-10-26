@@ -96,4 +96,32 @@ static inline bool gui_rect_contains(GuiRect r, float x, float y) {
     return r.w > 0 && r.h > 0 && x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h;
 }
 
+// A view transform with one scale for both axes: p' = s * p + (tx, ty).
+// citro2d's C2D_ViewTranslate/C2D_ViewScale build the same matrix on the
+// GPU; this copy is what clipping rects (scissor, in screen pixels) and
+// tests use.
+typedef struct {
+    float s, tx, ty;
+} GuiXf;
+
+#define GUI_XF_IDENTITY ((GuiXf){ 1.0f, 0.0f, 0.0f })
+
+// Scale by `s` around (px, py), then move by (dx, dy)
+GuiXf gui_xf_pivot(float s, float px, float py, float dx, float dy);
+// `outer` applied after `inner`
+GuiXf gui_xf_compose(GuiXf outer, GuiXf inner);
+GuiRect gui_xf_rect(GuiXf xf, GuiRect r);
+bool gui_xf_is_identity(GuiXf xf);
+
+// A modal card entering: `t` is its presentation value (0 = just opened,
+// 1 = at rest). It rises from GUI_MODAL_RISE_PX below and grows from
+// GUI_MODAL_SCALE0 around the pivot (the card's centre, or the row it was
+// opened from), so at t = 1 it is the identity.
+#define GUI_MODAL_RISE_PX 8.0f
+#define GUI_MODAL_SCALE0 0.96f
+GuiXf gui_modal_xf(float t, float pivot_x, float pivot_y);
+
+// The modal scrim's opacity (0..1 of its full 0xB4) on screen
+#define GUI_SCRIM_ALPHA 0xB4
+
 #endif // GUI_MOTION_H

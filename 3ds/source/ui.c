@@ -144,6 +144,25 @@ void ui_draw_backdrop_bottom(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Modal entry
+// ---------------------------------------------------------------------------
+
+static float modal_origin_y = -1;   // pivot of the next modal only, -1 = its centre
+
+void ui_set_modal_origin(float y) {
+    modal_origin_y = y;
+}
+
+// Open `m` for a card centred at `card_cy` on the bottom screen: it grows
+// out of the origin set for it, else out of its own centre. The origin is
+// used once.
+static void modal_open(GuiModal *m, float card_cy) {
+    float py = modal_origin_y >= 0 ? modal_origin_y : card_cy;
+    modal_origin_y = -1;
+    gui_modal_open(m, GUI_BOT_W / 2.0f, py);
+}
+
+// ---------------------------------------------------------------------------
 // Dialogs
 // ---------------------------------------------------------------------------
 
@@ -257,11 +276,11 @@ static GuiBtnStyle dialog_btn_style(const DialogGeom *g, int i) {
 
 // `pressed`: index a finger is on, or -1; `held`: keys held down
 static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines,
-                        const UiButton *buttons, const DialogGeom *g, int pressed, u32 held) {
+                        const UiButton *buttons, const DialogGeom *g, int pressed, u32 held, GuiModal *m) {
     float lh = gui_line_h(GUI_S_BODY);
     u32 hex = ui_tone_hex(tone);
 
-    gui_dim();
+    gui_modal_begin(m);
     gui_card_ex(DLG_X, g->y, DLG_W, g->h, title, hex, g->x_icon);
 
     float ty = g->y + 24 + 9;
@@ -281,6 +300,7 @@ static void draw_dialog(UiTone tone, const char *title, const DialogLines *lines
         bool down = pressed == i || (held & buttons[i].keys) != 0;
         gui_btn(g->draw[i], buttons[i].button, buttons[i].label, dialog_btn_style(g, i), hex, down);
     }
+    gui_modal_end(m);
 }
 
 static bool progress_cancelling;
@@ -309,6 +329,8 @@ u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButto
     // finger that opened it
     hidScanInput();
     ui_input_latch_touch();
+    GuiModal modal;
+    modal_open(&modal, g.y + g.h / 2);
     UiTap tap = UI_TAP_INIT;
     u32 armed = 0, result = 0;   // keys pressed since the dialog opened
     UiInput in;
@@ -340,9 +362,11 @@ u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButto
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_dialog(tone, title, &lines, buttons, &g, pressed, held);
+        draw_dialog(tone, title, &lines, buttons, &g, pressed, held, &modal);
         gui_end();
     }
+    // The card goes on this frame; the scrim fades out over what's next
+    gui_modal_close(&modal);
     dialog_pressed_keys = 0;
     ui_input_latch_touch();
     return result;
@@ -431,6 +455,9 @@ void ui_progress(const UiProgress *p) {
     ui_draw_backdrop_top();
     gui_screen(GUI_BOTTOM);
     ui_draw_backdrop_bottom();
+    // A bare frame: the card at rest over a full scrim (which then fades
+    // out over whatever is drawn next)
+    gui_scrim_full();
     gui_dim();
 
     u32 hex = ui_tone_hex(p->tone);
@@ -549,9 +576,9 @@ static void choice_geom(int count, ChoiceGeom *g) {
 
 static void draw_choice(UiTone tone, const char *title, const char *const *items, int count,
                         int selected, int scroll, UiListAnim *anim, const ChoiceGeom *g,
-                        int pressed, u32 held) {
+                        int pressed, u32 held, GuiModal *m) {
     u32 hex = ui_tone_hex(tone);
-    gui_dim();
+    gui_modal_begin(m);
     gui_card(DLG_X, g->y, DLG_W, g->h, title, hex);
     ChoiceView c = { items };
     // Clipped to the card's list area, so rows can glide and be dragged
@@ -560,6 +587,7 @@ static void draw_choice(UiTone tone, const char *title, const char *const *items
         gui_btn(g->draw[i], choice_buttons[i].button, choice_buttons[i].label,
                 i == 1 ? GUI_BTN_PRIMARY : GUI_BTN_TONAL, hex,
                 pressed == i || (held & choice_buttons[i].keys));
+    gui_modal_end(m);
 }
 
 int ui_choose_ex(UiTone tone, const char *title, const char *const *items, int count, int initial) {
@@ -575,6 +603,8 @@ int ui_choose_ex(UiTone tone, const char *title, const char *const *items, int c
     u32 armed = 0;
     hidScanInput();
     ui_input_latch_touch();
+    GuiModal modal;
+    modal_open(&modal, g.y + g.h / 2);
     UiInput in;
     while (ui_input_scan(&in)) {
         armed = (armed | in.down) & in.held;
@@ -599,9 +629,10 @@ int ui_choose_ex(UiTone tone, const char *title, const char *const *items, int c
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_choice(tone, title, items, count, selected, scroll, &anim, &g, pressed, in.held & armed);
+        draw_choice(tone, title, items, count, selected, scroll, &anim, &g, pressed, in.held & armed, &modal);
         gui_end();
     }
+    gui_modal_close(&modal);
     ui_input_latch_touch();
     return result;
 }

@@ -159,7 +159,37 @@ static void test_fade_compose(void) {
     CHECK(gui_fade_compose(-1, 0.5f) == 0.5f);
 }
 
+
+static void test_transforms(void) {
+    // At rest the modal transform is the identity
+    CHECK(gui_xf_is_identity(gui_modal_xf(1, 160, 120)));
+    CHECK(gui_xf_is_identity(gui_modal_xf(2, 160, 120)));
+    // Just opened: 0.96 around the pivot, 8 px lower
+    GuiXf m = gui_modal_xf(0, 160, 120);
+    CHECK(NEAR(m.s, GUI_MODAL_SCALE0, 1e-6f));
+    GuiRect pivot = gui_xf_rect(m, gui_rect_make(160, 120, 0, 0));
+    CHECK(NEAR(pivot.x, 160, 1e-4f) && NEAR(pivot.y, 120 + GUI_MODAL_RISE_PX, 1e-4f));
+    // A point away from the pivot moves toward it
+    GuiRect r = gui_xf_rect(m, gui_rect_make(10, 20, 300, 200));
+    CHECK(NEAR(r.x, 160 + 0.96f * (10 - 160), 1e-3f));
+    CHECK(NEAR(r.y, 120 + 0.96f * (20 - 120) + 8, 1e-3f));
+    CHECK(NEAR(r.w, 288, 1e-3f) && NEAR(r.h, 192, 1e-3f));
+    // Halfway: halfway scale and rise; NaN reads as just opened
+    GuiXf h = gui_modal_xf(0.5f, 0, 0);
+    CHECK(NEAR(h.s, 0.98f, 1e-6f) && NEAR(h.ty, 4, 1e-5f));
+    GuiXf n = gui_modal_xf(NAN, 0, 0);
+    CHECK(NEAR(n.s, GUI_MODAL_SCALE0, 1e-6f));
+    // Composition = applying one after the other
+    GuiXf a = gui_xf_pivot(1, 0, 0, 16, 0);   // a tab sliding in
+    GuiXf c = gui_xf_compose(a, m);
+    GuiRect p1 = gui_xf_rect(c, gui_rect_make(40, 50, 10, 10));
+    GuiRect p2 = gui_xf_rect(a, gui_xf_rect(m, gui_rect_make(40, 50, 10, 10)));
+    CHECK(NEAR(p1.x, p2.x, 1e-4f) && NEAR(p1.y, p2.y, 1e-4f) && NEAR(p1.w, p2.w, 1e-4f));
+    CHECK(gui_xf_is_identity(gui_xf_compose(GUI_XF_IDENTITY, GUI_XF_IDENTITY)));
+}
+
 int main(void) {
+    test_transforms();
     test_effects();
     test_fade_compose();
     test_critically_damped();

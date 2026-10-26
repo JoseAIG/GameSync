@@ -120,10 +120,18 @@ static void load_sd_certs(void) {
     closedir(dp);
 }
 
+// Roots in the 3DS system store that are still valid and in use
+// (Sectigo/ZeroSSL chain to USERTrust/COMODO; DigiCert High Assurance EV)
+static const SSLC_DefaultRootCert system_roots[] = {
+    SSLC_DefaultRootCert_COMODO,
+    SSLC_DefaultRootCert_USERTrust,
+    SSLC_DefaultRootCert_DigiCert_EV,
+};
+
 // Configure certificate verification for one request.
 // tls_verify=0 keeps the old behaviour (no verification at all). Otherwise
-// the server certificate must chain to the system trust store, one of the
-// built-in roots (root_certs.c) or a DER file in CERTS_DIR.
+// the server certificate must chain to one of the still-valid system roots
+// above, a built-in root (root_certs.c) or a DER file in CERTS_DIR.
 static void setup_tls(const AppConfig *config, httpcContext *context) {
     if (!config->tls_verify) {
         httpcSetSSLOpt(context, SSLCOPT_DisableVerify);
@@ -132,6 +140,11 @@ static void setup_tls(const AppConfig *config, httpcContext *context) {
 
     // Log each certificate the SSL module rejects, but only once per run
     static bool logged;
+    for (size_t i = 0; i < sizeof(system_roots) / sizeof(system_roots[0]); i++) {
+        Result res = httpcAddDefaultCert(context, system_roots[i]);
+        if (R_FAILED(res) && !logged)
+            log_line("certs: system root %d rejected: %08lX", (int)system_roots[i], res);
+    }
     for (int i = 0; i < root_cert_count; i++) {
         Result res = httpcAddTrustedRootCA(context, root_certs[i].der, root_certs[i].size);
         if (R_FAILED(res) && !logged)

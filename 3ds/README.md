@@ -74,7 +74,7 @@ The in-app config editor (L button) can also edit these values directly on the c
 
 `server_url` can be `http://<lan-ip>:8000` or an `https://` address, e.g. a server published through a Cloudflare Tunnel or a reverse proxy.
 
-With `tls_verify=1` the certificate must chain to a trusted root. The 3DS system trust store is very old, so the client also trusts these built-in roots, which cover Cloudflare's Universal SSL certificates and most public CAs (see `source/root_certs.c` for sources and SHA-256 fingerprints):
+With `tls_verify=1` the certificate must chain to a trusted root. The 3DS system trust store is very old, so the client trusts its still-valid roots (COMODO RSA, USERTrust RSA — used by Sectigo and ZeroSSL — and DigiCert High Assurance EV) plus these built-in RSA roots (see `source/root_certs.c` for sources and SHA-256 fingerprints):
 
 - ISRG Root X1 (Let's Encrypt)
 - GTS Root R1 (Google Trust Services)
@@ -82,7 +82,9 @@ With `tls_verify=1` the certificate must chain to a trusted root. The 3DS system
 
 To trust another CA, copy its root certificate in DER format as `sdmc:/3ds/3dssync/certs/<name>.der` (up to 8 files, 8 KB each). To convert a PEM file: `openssl x509 -in root.pem -outform DER -out root.der`.
 
-The 3DS SSL module is old: TLS 1.2 at most, a small set of cipher suites, and it may not handle ECDSA certificates. If HTTPS requests fail, the status line shows the httpc result code and `sdmc:/3ds/3dssync/network.log` records each failed request and any root certificate the SSL module rejected. For Cloudflare, keep the zone's minimum TLS version at 1.2 or lower.
+The 3DS SSL module is old: TLS 1.2 at most, a small set of cipher suites, and in practice only RSA certificates with RSA key exchange. If HTTPS requests fail, the status line shows the httpc result code from the failed step (the TLS handshake happens in the `connect` step; httpc reports no separate SSL error code) and `sdmc:/3ds/3dssync/network.log` records each failed request and any root certificate the SSL module rejected.
+
+**Cloudflare:** HTTPS endpoints proxied by Cloudflare (including Cloudflare Tunnel) on the free plan typically serve only an ECDSA certificate and accept only ECDHE-ECDSA cipher suites, which the 3DS cannot negotiate. Use the server's LAN address over `http://` from the 3DS, or an HTTPS endpoint with an RSA certificate (for example your own reverse proxy with a Let's Encrypt RSA certificate).
 
 ## Safety when writing saves
 

@@ -1,9 +1,11 @@
 // Root CA certificates trusted for HTTPS when tls_verify=1 (the default).
 //
-// These cover the CAs that issue Cloudflare's Universal SSL edge
-// certificates (Let's Encrypt, Google Trust Services, SSL.com), which the
-// 3DS system trust store does not include. More roots can be added at run
-// time as DER files in sdmc:/3ds/3dssync/certs/.
+// These are the RSA roots of the CAs behind most free HTTPS certificates
+// (Let's Encrypt, Google Trust Services, SSL.com), which the 3DS system
+// trust store does not include. Only RSA roots are embedded: the 3DS SSL
+// module can't negotiate the ECDSA cipher suites an ECDSA root would be
+// used with. More roots can be added at run time as DER files in
+// sdmc:/3ds/3dssync/certs/.
 //
 // Each certificate is the issuer's self-signed root, copied byte for byte
 // (DER) from the issuer's official repository. The SHA-256 fingerprint of

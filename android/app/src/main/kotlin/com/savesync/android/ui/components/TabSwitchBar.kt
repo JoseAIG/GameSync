@@ -482,6 +482,7 @@ fun GsCountBadge(count: Int) {
             style = MaterialTheme.typography.labelSmall,
             color = GsColors.Ink,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

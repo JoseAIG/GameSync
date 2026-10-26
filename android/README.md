@@ -58,11 +58,30 @@ Five top-level tabs — **Saves**, **Catalog**, **Installed**, **Downloads**,
 **Settings** — in the same dark GameSync palette and layout as the console
 clients: a header with the tab strip and a server status dot (green = the
 server answered, red = it did not), a sub-tab chip row (system filter, sync
-status, RetroAchievements), list rows with a teal selection bar and status
+status, RetroAchievements) at the top of each list, list rows with status
 pills, and a footer of controller button hints. The footer (and the L1 / R1 /
 SELECT glyphs) show whenever a gamepad is attached or the screen is in
 landscape; on a phone in portrait the app is driven by touch as before (tap a
 tab, tap a row, the toolbar icons).
+
+The header and footer stay in place while screens change; only the content
+moves. The teal pill behind the active tab slides to the next one (on a wrap
+from Settings to Saves it fades across instead), and the strip scrolls so the
+active tab is never cut off on a narrow phone. While downloads run or wait,
+the Downloads tab shows how many.
+
+The teal selection bar marks the row the controller acts on. It shows while
+you use a controller or keyboard, and always on a device with built-in
+controls or a gamepad attached; on a phone driven by touch there is no
+cursor, and a row lifts slightly while your finger is on it. On a phone
+without a gamepad, the first key you press after touching the screen only
+shows the cursor (it doesn't sync, download or open anything). The list
+scrolls only when the cursor comes near its top or bottom edge, and holding
+the D-pad glides instead of stepping. After flinging a list by touch, the
+next Up / Down picks up from a row that is on screen rather than scrolling
+back. Search opens by sliding down from the header. A busy spinner always
+takes the place of the button it belongs to, so nothing moves under your
+finger, and rows slide to their new place when the list changes.
 
 Messages appear in one place at the bottom of the screen, above the button
 hints. A new message replaces the one showing instead of waiting behind it,
@@ -73,8 +92,8 @@ download offers **Retry**; both are touch shortcuts for things the controller
 reaches through the tabs. Successes and errors also give a short vibration
 when the system's touch feedback is on.
 
-Moving between tabs cross-fades; the save detail and emulator screens slide
-in from the right and leave the way they came. With the system's *Remove
+Moving between tabs slides the content the way L1 / R1 point; the save detail
+and emulator screens slide in from the right and leave the way they came. With the system's *Remove
 animations* accessibility setting on, every slide becomes a short fade and
 list scrolling jumps instead of gliding. On Android 14 and later the system
 *Contrast* setting (medium or high) brightens secondary text and outlines the
@@ -142,6 +161,10 @@ On the detail screen D-pad moves between the actions, A runs one, B goes back.
 | B | Pause the running download |
 | X | Clear finished downloads |
 | Y | Cancel (running) or remove (finished) the selected download, after asking |
+
+A line above the list counts active and finished downloads; the header's
+*Clear finished* button is always there and greyed out while there is
+nothing to clear. Progress bars move smoothly between updates.
 
 ### Settings
 

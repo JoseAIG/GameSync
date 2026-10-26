@@ -70,3 +70,18 @@ float gui_rubberband(float overshoot, float dimension, float constant) {
     if (dimension <= 0) return 0;
     return (overshoot * dimension * constant) / (dimension + constant * fabsf(overshoot));
 }
+
+float gui_effect_t(unsigned long long since_ms, unsigned long long now_ms, unsigned duration_ms) {
+    if (!since_ms || duration_ms == 0) return 1.0f;
+    if (now_ms < since_ms) return 0.0f;
+    unsigned long long age = now_ms - since_ms;
+    if (age >= duration_ms) return 1.0f;
+    return (float)age / (float)duration_ms;
+}
+
+float gui_check_scale(float t) {
+    if (!(t > 0)) return 0.6f;
+    float wt = 2.0f * (float)M_PI / GUI_CHECK_RESPONSE * t;
+    float s = 1.0f - 0.4f * (1.0f + wt) * expf(-wt);
+    return s > 1.0f ? 1.0f : s;
+}

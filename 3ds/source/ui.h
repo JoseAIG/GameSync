@@ -255,6 +255,7 @@ typedef struct {
     int marked;
     const char *status;
     UiTone status_tone;
+    u32 status_serial;         // bumped with every new status: the toast enters again
     const SaveDetails *details;  // last compare of the selected title, or NULL
     u64 synced_ms;             // with details: gui_clock_ms() of a sync this session, 0 = none
     int title_count;           // all titles (X works when the view is empty)

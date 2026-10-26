@@ -119,7 +119,35 @@ static void test_dt_clamp(void) {
     CHECK(gui_dt_clamp(2.5f) == 1.0f / 20);
 }
 
+static void test_effects(void) {
+    // Linear in time, done at the duration, never before its cause
+    CHECK(gui_effect_t(1000, 1000, 300) == 0.0f);
+    CHECK(NEAR(gui_effect_t(1000, 1150, 300), 0.5f, 1e-6f));
+    CHECK(gui_effect_t(1000, 1300, 300) == 1.0f);
+    CHECK(gui_effect_t(1000, 99999, 300) == 1.0f);
+    CHECK(gui_effect_t(0, 1150, 300) == 1.0f);      // never fired
+    CHECK(gui_effect_t(2000, 1150, 300) == 0.0f);   // stamped after this frame began
+
+    // Check scale: 0.6 at the toggle, rising without overshoot to 1
+    CHECK(NEAR(gui_check_scale(0), 0.6f, 1e-6f));
+    CHECK(NEAR(gui_check_scale(-1), 0.6f, 1e-6f));
+    float prev = 0.6f;
+    bool monotonic = true;
+    for (int i = 1; i <= 60; i++) {
+        float s = gui_check_scale(i / 120.0f);
+        if (s < prev || s > 1.0f) monotonic = false;
+        prev = s;
+    }
+    CHECK(monotonic);
+    CHECK(gui_check_scale(0.15f) > 0.99f);
+    CHECK(gui_check_scale(5.0f) == 1.0f);
+    // The closed form: w = 2 pi / 0.15, at t = 1/w s = 1 - 0.8/e
+    float t1 = GUI_CHECK_RESPONSE / (2.0f * 3.14159265f);
+    CHECK(NEAR(gui_check_scale(t1), 1.0f - 0.8f / 2.7182818f, 1e-4f));
+}
+
 int main(void) {
+    test_effects();
     test_critically_damped();
     test_exact_in_dt();
     test_retarget_keeps_velocity();

@@ -32,6 +32,8 @@ typedef struct {
     bool marked;           // User-selected for batch operations
     u8 sync_state;         // TitleSyncState: what this session last learned
     char last_error[TITLE_ERROR_LEN]; // why the last transfer failed (TSTATE_FAILED), "" otherwise
+    u64 state_ms;          // gui_clock_ms() when sync_state was last set (0 = never): the row's ring
+    u64 mark_ms;           // gui_clock_ms() of the last mark toggle (0 = never): the check's pop-in
     char sav_path[MAX_PATH_LEN]; // NDS only: path to .sav file on SD card
 } TitleInfo;
 

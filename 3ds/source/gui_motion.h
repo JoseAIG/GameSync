@@ -56,6 +56,24 @@ float gui_dt_clamp(float seconds);
 // reaches `dimension`.
 float gui_rubberband(float overshoot, float dimension, float constant);
 
+// Timestamp-driven effects (no state: they are pure functions of the time
+// since their cause, so they can only fire on that cause)
+
+// How far an effect of `duration_ms` that started at `since_ms` has run at
+// `now_ms`: 0 at the start, 1 when done (and when `since_ms` is 0 = never,
+// or in the future)
+float gui_effect_t(unsigned long long since_ms, unsigned long long now_ms, unsigned duration_ms);
+
+// Scale of a mark's check popping in, `t` seconds after the toggle: the
+// analytic critically damped spring from 0.6 to 1 with response 0.15 s,
+// s(t) = 1 - 0.4 (1 + wt) e^(-wt), w = 2 pi / 0.15
+#define GUI_CHECK_RESPONSE 0.15f
+float gui_check_scale(float t);
+
+#define GUI_RING_MS 300           // state-change ring around a row's badge
+#define GUI_TOAST_FLASH_MS 400    // a new toast's background flash
+#define GUI_TOAST_STALE_MS 4000   // after this a toast reads as old news
+
 // Screen rectangle (also used as a touch target)
 typedef struct {
     float x, y, w, h;

@@ -17,6 +17,7 @@ static int selected = 0;
 static int scroll_offset = 0;
 static char status[MAX_URL_LEN + 64];
 static UiTone status_tone = UI_TONE_ACCENT;
+static u32 status_serial = 0;
 
 // View filtering: filtered[] maps visible indices -> titles[] indices
 static int view_mode = VIEW_ALL;
@@ -58,6 +59,22 @@ static void set_status(UiTone tone, const char *fmt, ...) {
     vsnprintf(status, sizeof(status), fmt, ap);
     va_end(ap);
     status_tone = tone;
+    status_serial++;   // the toast enters (and flashes) once per new message
+}
+
+// Every sync_state change goes through here: the stamp is what the row's
+// state ring animates from, so the ring only ever fires on its cause
+static void set_title_state(TitleInfo *t, u8 state) {
+    t->sync_state = state;
+    t->state_ms = gui_clock_ms();
+    if (!t->state_ms) t->state_ms = 1;
+}
+
+static void set_title_marked(TitleInfo *t, bool marked) {
+    if (t->marked == marked) return;
+    t->marked = marked;
+    t->mark_ms = gui_clock_ms();
+    if (!t->mark_ms) t->mark_ms = 1;
 }
 
 static int title_compare(const void *a, const void *b) {
@@ -137,7 +154,7 @@ static int count_marked(void) {
 // Clear all marks
 static void clear_marks(void) {
     for (int i = 0; i < title_count; i++)
-        titles[i].marked = false;
+        set_title_marked(&titles[i], false);
 }
 
 static void scan_titles(void) {
@@ -195,6 +212,7 @@ static void refresh_view(void) {
     view.marked = count_marked();
     view.status = status;
     view.status_tone = status_tone;
+    view.status_serial = status_serial;
     int idx = sel_title_idx();
     view.details = (idx >= 0 && idx == last_details_idx) ? &last_details : NULL;
     view.synced_ms = view.details ? synced_ms : 0;
@@ -365,7 +383,7 @@ static SyncFailText sync_fail_text(SyncResult r, bool upload) {
 
 // Remember why `t` failed (shown on the top screen for its row)
 static void set_title_failed(TitleInfo *t, const char *why) {
-    t->sync_state = TSTATE_FAILED;
+    set_title_state(t, TSTATE_FAILED);
     ui_utf8_copy(why && why[0] ? why : "Sync failed", t->last_error, sizeof(t->last_error));
 }
 
@@ -430,7 +448,7 @@ static void do_history(void) {
                 set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
                            had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");
                 titles[idx].in_conflict = false;
-                titles[idx].sync_state = TSTATE_DOWNLOADED;
+                set_title_state(&titles[idx], TSTATE_DOWNLOADED);
                 break;
             }
             set_status(UI_TONE_ERR, "Restore failed: %s", sync_result_str(res));
@@ -528,7 +546,7 @@ static void do_batch_upload(int marked) {
         if (res == SYNC_OK) {
             ok_count++;
             titles[i].in_conflict = false;
-            titles[i].sync_state = TSTATE_UPLOADED;
+            set_title_state(&titles[i], TSTATE_UPLOADED);
         } else {
             fail_count++;
             set_title_failed(&titles[i], sync_result_str(res));
@@ -568,13 +586,13 @@ static bool compare_title(int idx, const char *what) {
     }
     last_details_idx = idx;
     switch (sync_decide(&last_details)) {
-        case SYNC_ACTION_UPLOAD:   t->sync_state = TSTATE_NEEDS_UPLOAD; break;
-        case SYNC_ACTION_DOWNLOAD: t->sync_state = TSTATE_NEEDS_DOWNLOAD; break;
-        case SYNC_ACTION_CONFLICT: t->sync_state = TSTATE_CONFLICT; break;
+        case SYNC_ACTION_UPLOAD:   set_title_state(t, TSTATE_NEEDS_UPLOAD); break;
+        case SYNC_ACTION_DOWNLOAD: set_title_state(t, TSTATE_NEEDS_DOWNLOAD); break;
+        case SYNC_ACTION_CONFLICT: set_title_state(t, TSTATE_CONFLICT); break;
         // Couldn't ask the server: what we knew about this title still
         // stands (never TSTATE_FAILED: the save itself is fine)
         case SYNC_ACTION_SERVER_ERROR: break;
-        default:                   t->sync_state = TSTATE_SYNCED; break;
+        default:                   set_title_state(t, TSTATE_SYNCED); break;
     }
     return true;
 }
@@ -655,7 +673,7 @@ static void upload_title(TitleInfo *t) {
         if (res == SYNC_OK) {
             set_status(UI_TONE_OK, "Uploaded: %.40s", t->name);
             t->in_conflict = false;
-            t->sync_state = TSTATE_UPLOADED;
+            set_title_state(t, TSTATE_UPLOADED);
             details_after_sync(t, true);
             return;
         }
@@ -673,7 +691,7 @@ static void download_title(TitleInfo *t) {
         if (res == SYNC_OK) {
             set_status(UI_TONE_OK, "Downloaded: %.40s", t->name);
             t->in_conflict = false;
-            t->sync_state = TSTATE_DOWNLOADED;
+            set_title_state(t, TSTATE_DOWNLOADED);
             details_after_sync(t, false);
             return;
         }
@@ -685,7 +703,7 @@ static void download_title(TitleInfo *t) {
 }
 
 static void toggle_mark(int idx) {
-    titles[idx].marked = !titles[idx].marked;
+    set_title_marked(&titles[idx], !titles[idx].marked);
     int mc = count_marked();
     if (mc > 0)
         set_status(UI_TONE_ACCENT, "%d title%s marked: A uploads them", mc, mc == 1 ? "" : "s");
@@ -810,7 +828,7 @@ static void do_sync_all(void) {
         }
     }
     for (int i = 0; i < title_count && i < MAX_TITLES; i++) {
-        titles[i].sync_state = summary.title_state[i];
+        set_title_state(&titles[i], summary.title_state[i]);
         if (summary.title_state[i] == TSTATE_FAILED) set_title_failed(&titles[i], title_errors[i]);
     }
 
@@ -828,7 +846,7 @@ static void do_sync_all(void) {
         // Auto-mark conflicting titles for batch resolve
         for (int i = 0; i < title_count; i++)
             if (is_conflict(&titles[i]))
-                titles[i].marked = true;
+                set_title_marked(&titles[i], true);
 
         // The instruction first, so it can never be cut off by a long list
         char body[640];

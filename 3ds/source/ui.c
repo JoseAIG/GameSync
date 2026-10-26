@@ -780,13 +780,39 @@ static void kv(float x, float y, float label_w, float w, const char *label, cons
     gui_text_fit(x + label_w, y, GUI_S_SMALL, gui_rgb(color), GUI_LEFT, w - label_w, value);
 }
 
-static void draw_status_toast(const char *status, UiTone tone) {
+// The last action's result. A new message (serial changed) rises 6 px and
+// fades in, its background flashing in the tone and settling over 400 ms;
+// after 4 s the text dims and the tone bar fades to 40%, so old news stops
+// looking current. Reduced motion: the fade only.
+static void draw_status_toast(const char *status, UiTone tone, u32 serial) {
     if (!status || !status[0]) return;
-    float y = 190, h = 22;
+    static u32 last_serial, frame;
+    static bool seen;
+    static u64 enter_ms;
+    static GuiSpring rise;
+    u64 now = gui_now_ms();
+    if (!seen || serial != last_serial) {
+        seen = true;
+        last_serial = serial;
+        enter_ms = now ? now : 1;
+        gui_spring_set(&rise, 6);
+        frame = gui_ticks() - 1;
+    }
+    if (frame != gui_ticks()) {   // once a frame, also when drawn behind a dialog
+        frame = gui_ticks();
+        gui_spring(&rise, 0, GUI_RESP_MODAL, gui_dt());
+    }
+    float fade = gui_reduce_motion() ? 1 - gui_effect_t(enter_ms, now, GUI_FADE_MS) : rise.x / 6.0f;
+    float flash = 1 - gui_effect_t(enter_ms, now, GUI_TOAST_FLASH_MS);
+    bool stale = now > enter_ms && now - enter_ms >= GUI_TOAST_STALE_MS;
+
+    float y = 190 + rise.x, h = 22;
     u32 hex = ui_tone_hex(tone);
-    gui_rrect(8, y, GUI_TOP_W - 16, h, 6, gui_rgb(HEX_BG2));
-    gui_rrect(8, y, 4, h, 2, gui_rgb(hex));
-    gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
+    if (fade > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(fade * 255)));
+    gui_rrect(8, y, GUI_TOP_W - 16, h, 6, gui_mix(HEX_BG2, hex, 0.25f * flash));
+    gui_rrect(8, y, 4, h, 2, stale ? gui_mix(HEX_BG2, hex, 0.4f) : gui_rgb(hex));
+    gui_text_mid(20, y, h, GUI_S_SMALL, gui_rgb(stale ? HEX_DIM : HEX_TEXT), GUI_LEFT, GUI_TOP_W - 40, status);
+    if (fade > 0) C2D_Fade(0);
 }
 
 static void size_files(u32 size, int files, char *out, size_t out_size);
@@ -907,7 +933,7 @@ void ui_draw_saves_top(const SavesView *v) {
             gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
                      "L / R switch to the game catalog and the settings.");
         }
-        draw_status_toast(v->status, v->status_tone);
+        draw_status_toast(v->status, v->status_tone, v->status_serial);
         gui_footer(hints, nh);
         return;
     }
@@ -992,8 +1018,43 @@ void ui_draw_saves_top(const SavesView *v) {
                       "Compares first and asks before changing anything.");
     }
 
-    draw_status_toast(v->status, v->status_tone);
+    draw_status_toast(v->status, v->status_tone, v->status_serial);
     gui_footer(hints, nh);
+}
+
+// The row's state badge: a 12 px disc in the state's colour with an ink
+// glyph, so conflict (!) and failure (x) differ without colour too
+static void state_badge(float cx, float cy, TitleSyncState s, u32 hex) {
+    u32 ink = gui_rgb(HEX_INK);
+    gui_circle(cx, cy, 6, gui_rgb(hex));
+    switch (s) {
+        case TSTATE_SYNCED:
+        case TSTATE_UPLOADED:
+        case TSTATE_DOWNLOADED:
+            gui_icon_check(cx, cy, 7, ink);
+            break;
+        case TSTATE_NEEDS_UPLOAD:
+            gui_icon_up(cx, cy + 0.5f, 7, ink);
+            break;
+        case TSTATE_NEEDS_DOWNLOAD:
+            gui_icon_down(cx, cy - 0.5f, 7, ink);
+            break;
+        case TSTATE_CONFLICT:
+            gui_rect(cx - 0.9f, cy - 3.6f, 1.8f, 4.4f, ink);
+            gui_rect(cx - 0.9f, cy + 1.8f, 1.8f, 1.8f, ink);
+            break;
+        case TSTATE_FAILED:
+            gui_icon_x(cx, cy, 8, ink);
+            break;
+        case TSTATE_SKIPPED:
+            // A small game card with a clipped corner
+            gui_rect(cx - 2.5f, cy - 3.5f, 5, 7, ink);
+            C2D_DrawTriangle(cx + 0.6f, cy - 3.6f, gui_rgb(hex), cx + 2.6f, cy - 3.6f, gui_rgb(hex), cx + 2.6f,
+                             cy - 1.6f, gui_rgb(hex), 0.5f);
+            break;
+        case TSTATE_UNKNOWN:
+            break;
+    }
 }
 
 static void saves_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
@@ -1001,11 +1062,17 @@ static void saves_row(void *ctx, int index, float x, float y, float w, float h, 
     const SavesView *v = ctx;
     const TitleInfo *t = &v->titles[v->filtered[index]];
     float cy = y + h / 2;
+    u64 now = gui_now_ms();
 
-    // Mark box
+    // Mark box. A new check pops in (scale 0.6 -> 1, a critically damped
+    // spring in closed form, timed from the toggle)
     if (t->marked) {
-        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_mix(HEX_ACCENT, HEX_INK, hl));
-        gui_icon_check(x + 14.5f, cy, 8, gui_mix(HEX_INK, HEX_ACCENT, hl));
+        float sc = 1;
+        if (t->mark_ms && !gui_reduce_motion())
+            sc = gui_check_scale(now > t->mark_ms ? (float)(now - t->mark_ms) / 1000.0f : 0);
+        float bs = 11 * sc, bx = x + 14.5f;
+        gui_rrect(bx - bs / 2, cy - bs / 2, bs, bs, 3 * sc, gui_mix(HEX_ACCENT, HEX_INK, hl));
+        gui_icon_check(bx, cy, 8 * sc, gui_mix(HEX_INK, HEX_ACCENT, hl));
     } else {
         gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_mix(HEX_LINE, 0x1E8F86, hl));
         gui_rrect(x + 10.5f, cy - 4, 8, 8, 2, gui_mix(HEX_BG, HEX_ACCENT, hl));
@@ -1020,12 +1087,20 @@ static void saves_row(void *ctx, int index, float x, float y, float w, float h, 
     // Name
     bool conflict = t->in_conflict || t->sync_state == TSTATE_CONFLICT;
     gui_text_mid(x + 62, y, h, GUI_S_BODY, gui_mix(conflict ? HEX_ERR : HEX_TEXT, HEX_INK, hl), GUI_LEFT,
-                 w - 62 - 18, t->name);
+                 w - 62 - 24, t->name);
 
-    // State dot, with an ink ring that fades in under the bar
+    // State badge, with an ink ring that mixes in under the bar
     if (state_label(t, &hex)) {
-        if (hl > 0) gui_circle(x + w - 11, cy, 5, gui_rgba(HEX_INK, (u8)(hl * 255)));
-        gui_circle(x + w - 11, cy, 3.5f, gui_rgb(hex));
+        float bx = x + w - 13;
+        // For 300 ms after the state was set, one ring expands from the
+        // badge and fades (reduced motion: it only fades)
+        float k = gui_effect_t(t->state_ms, now, GUI_RING_MS);
+        if (k < 1) {
+            float r = gui_reduce_motion() ? 9 : 6 + 6 * k;
+            gui_ring(bx, cy, r, 1.5f, gui_rgba(hex, (u8)(0xC0 * (1 - k))));
+        }
+        if (hl > 0) gui_circle(bx, cy, 7, gui_rgba(HEX_INK, (u8)(hl * 255)));
+        state_badge(bx, cy, t->in_conflict ? TSTATE_CONFLICT : (TitleSyncState)t->sync_state, hex);
     }
 }
 

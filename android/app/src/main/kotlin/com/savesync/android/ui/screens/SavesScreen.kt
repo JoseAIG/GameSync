@@ -43,9 +43,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarDuration
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -53,6 +50,8 @@ import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -89,12 +88,25 @@ import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsFooterHints
 import com.savesync.android.ui.components.GsHint
+import com.savesync.android.ui.components.GsHitTarget
 import com.savesync.android.ui.components.GsListRow
 import com.savesync.android.ui.components.GsPill
 import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.theme.textVariantOf
+import com.savesync.android.ui.components.GsHaptic
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.LocalGsHaptics
+import com.savesync.android.ui.components.LocalGsNotifier
+import com.savesync.android.ui.components.isServerNotConfigured
+import com.savesync.android.ui.components.noticeKindForSaveMessage
+import com.savesync.android.ui.components.stripLeadingGlyph
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
@@ -123,7 +135,10 @@ fun SavesScreen(
     val availableStatusFilters by viewModel.availableStatusFilters.collectAsState()
     // Shared with SaveDetailScreen: the outcome of an A-button smart sync.
     val saveDetailState by viewModel.saveDetailState.collectAsState()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // App-wide notices (MainApp): they outlive this screen and replace,
+    // rather than queue behind, whatever is showing.
+    val notifier = LocalGsNotifier.current
+    val haptics = LocalGsHaptics.current
     // Title id of the save A just smart-synced, so a conflict it reports
     // can open that save's detail screen (where Force Upload / Download live).
     var pendingSyncTitle by remember { mutableStateOf<String?>(null) }
@@ -198,15 +213,22 @@ fun SavesScreen(
                 pendingSyncTitle = null
                 viewModel.resetDetailState()
                 if (conflictTitle != null && s.message.contains("Conflict")) {
+                    // Conflict found: reject haptic on the same frame as the
+                    // navigation that shows it.
+                    haptics?.perform(GsHaptic.Reject)
                     onNavigateToDetail(conflictTitle)
                 } else {
-                    snackbarHostState.showSnackbar(s.message)
+                    val kind = noticeKindForSaveMessage(s.message)
+                    notifier.show(
+                        GsNotice(kind, stripLeadingGlyph(s.message)),
+                        hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
+                    )
                 }
             }
             is SaveDetailState.Error -> {
                 pendingSyncTitle = null
                 viewModel.resetDetailState()
-                snackbarHostState.showSnackbar("Error: ${s.message}")
+                notifier.show(errorNotice(s.message) { onNavigateToTab(SETTINGS_TAB) })
             }
             else -> Unit
         }
@@ -217,17 +239,22 @@ fun SavesScreen(
         when (val state = syncState) {
             is SyncState.Success -> {
                 val r = state.result
-                val msg = "Sync done — ↑${r.uploaded} ↓${r.downloaded}" +
-                        (if (r.conflicts.isNotEmpty()) " ⚠${r.conflicts.size} conflicts" else "") +
-                        (if (r.errors.isNotEmpty()) " ✗${r.errors.size} errors\n${r.errors.first()}" else "")
-                snackbarHostState.showSnackbar(
-                    msg,
-                    duration = if (r.errors.isNotEmpty()) SnackbarDuration.Long else SnackbarDuration.Short
+                // Errors win (and keep the first error's text, as the fork's
+                // Long snackbar did); then conflicts; else a plain success.
+                val kind = when {
+                    r.errors.isNotEmpty() -> GsNoticeKind.Error
+                    r.conflicts.isNotEmpty() -> GsNoticeKind.Warning
+                    else -> GsNoticeKind.Success
+                }
+                notifier.show(
+                    GsNotice(kind, syncAllMessage(r.uploaded, r.downloaded, r.conflicts.size, r.errors)),
+                    // A conflict is a Warning that still rejects.
+                    hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
                 )
                 viewModel.resetSyncState()
             }
             is SyncState.Error -> {
-                snackbarHostState.showSnackbar("Error: ${state.message}")
+                notifier.show(errorNotice(state.message) { onNavigateToTab(SETTINGS_TAB) })
                 viewModel.resetSyncState()
             }
             else -> Unit
@@ -339,7 +366,6 @@ fun SavesScreen(
                 )
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         // ── Master gamepad handler ───────────────────────────────────────
         // D-pad up/down steps the list, left/right page-scrolls with hold
@@ -871,6 +897,30 @@ private fun formatTimestamp(millis: Long): String {
     val sdf = SimpleDateFormat("MMM d, HH:mm", Locale.getDefault())
     return sdf.format(Date(millis))
 }
+/** The Settings tab's index in the tab strip (MainActivity.TAB_ROUTES). */
+internal const val SETTINGS_TAB = 4
+
+/**
+ * An Error notice for a view-model error string.  "Server URL not
+ * configured" offers a Settings action, since that is where it is fixed.
+ */
+internal fun errorNotice(message: String, openSettings: () -> Unit): GsNotice =
+    if (isServerNotConfigured(message)) {
+        GsNotice(GsNoticeKind.Error, message, actionLabel = "Settings", onAction = openSettings)
+    } else {
+        GsNotice(GsNoticeKind.Error, message)
+    }
+
+/** "Sync done: 3 uploaded, 2 downloaded, 1 conflict" + the first error on its own line. */
+internal fun syncAllMessage(uploaded: Int, downloaded: Int, conflicts: Int, errors: List<String>): String =
+    buildString {
+        append("Sync done: $uploaded uploaded, $downloaded downloaded")
+        if (conflicts > 0) append(", $conflicts conflict" + if (conflicts == 1) "" else "s")
+        if (errors.isNotEmpty()) {
+            append(", ${errors.size} error" + if (errors.size == 1) "" else "s")
+            append("\n").append(errors.first())
+        }
+    }
 
 private fun buildWebLibraryUrl(serverUrl: String): String? {
     val trimmed = serverUrl.trim()

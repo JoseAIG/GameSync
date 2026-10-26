@@ -370,7 +370,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         object Idle : RomDownloadState()
         data class Downloading(val name: String) : RomDownloadState()
         data class Success(val file: java.io.File) : RomDownloadState()
-        data class Error(val message: String) : RomDownloadState()
+        /**
+         * [retry] re-issues the exact request that failed (null when retrying
+         * can't help, e.g. no server or ROM folder configured).
+         */
+        data class Error(val message: String, val retry: (() -> Unit)? = null) : RomDownloadState()
     }
 
     private val _romDownloadState = MutableStateFlow<RomDownloadState>(RomDownloadState.Idle)
@@ -2906,7 +2910,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _romDownloadState.value = RomDownloadState.Downloading(displayName)
             } catch (e: Exception) {
-                _romDownloadState.value = RomDownloadState.Error(e.message ?: "Download failed")
+                _romDownloadState.value = RomDownloadState.Error(
+                    e.message ?: "Download failed",
+                    retry = { downloadRom(romId, system, filename, extractFormat, bundleKind) },
+                )
             }
         }
     }

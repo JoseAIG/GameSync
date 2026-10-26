@@ -536,7 +536,8 @@ private fun MainApp() {
                         titleId = titleId,
                         viewModel = viewModel,
                         syncStateEntities = syncStateEntities,
-                        onNavigateBack = { navController.popBackStack() }
+                        onNavigateBack = { navController.popBackStack() },
+                        onNavigateToTab = onNavigateToTab,
                     )
                 }
             }

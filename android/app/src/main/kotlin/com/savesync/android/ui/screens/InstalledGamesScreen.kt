@@ -32,8 +32,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -74,6 +72,20 @@ import com.savesync.android.ui.components.GsListRow
 import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.theme.gsDim
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.components.GsHaptic
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.LocalGsNotifier
+import com.savesync.android.ui.components.noticeKindForSaveMessage
+import com.savesync.android.ui.components.stripLeadingGlyph
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.text.style.TextOverflow
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
@@ -105,7 +117,7 @@ fun InstalledGamesScreen(
     // save sync triggered from the per-rom dialog below.
     val saveDetailState by viewModel.saveDetailState.collectAsState()
 
-    val snackbarHostState = remember { SnackbarHostState() }
+    val notifier = LocalGsNotifier.current
     val scope = rememberCoroutineScope()
 
     var query by remember { mutableStateOf("") }
@@ -145,34 +157,36 @@ fun InstalledGamesScreen(
                 } else {
                     "Deleted ${s.rom.displayName} (${s.result.deletedCount} files)"
                 }
-                scope.launch { snackbarHostState.showSnackbar(msg) }
+                notifier.show(GsNotice(GsNoticeKind.Success, msg))
                 viewModel.resetDeleteInstalledState()
             }
             is MainViewModel.DeleteInstalledState.Error -> {
-                scope.launch {
-                    snackbarHostState.showSnackbar(
-                        "Delete had errors: ${s.result.errors.joinToString()}"
-                    )
-                }
+                notifier.show(
+                    GsNotice(GsNoticeKind.Error, "Delete had errors: ${s.result.errors.joinToString()}")
+                )
                 viewModel.resetDeleteInstalledState()
             }
             else -> Unit
         }
     }
 
-    // Surface the result of a sync triggered from this tab as a snackbar
+    // Surface the result of a sync triggered from this tab as a notice
     // and clear the shared SaveDetailState afterwards so navigating to
     // SaveDetailScreen later doesn't re-show a stale message.  We don't
     // observe the Working state here — the dialog already closed; a
-    // snackbar that says "Syncing…" then disappears would be noisy.
+    // notice that says "Syncing…" then disappears would be noisy.
     LaunchedEffect(saveDetailState) {
         when (val s = saveDetailState) {
             is SaveDetailState.Success -> {
-                scope.launch { snackbarHostState.showSnackbar(s.message) }
+                val kind = noticeKindForSaveMessage(s.message)
+                notifier.show(
+                    GsNotice(kind, stripLeadingGlyph(s.message)),
+                    hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
+                )
                 viewModel.resetDetailState()
             }
             is SaveDetailState.Error -> {
-                scope.launch { snackbarHostState.showSnackbar(s.message) }
+                notifier.show(errorNotice(s.message) { onNavigateToTab(SETTINGS_TAB) })
                 viewModel.resetDetailState()
             }
             else -> Unit
@@ -256,7 +270,6 @@ fun InstalledGamesScreen(
                     )
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier

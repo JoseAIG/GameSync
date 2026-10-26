@@ -45,8 +45,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -83,6 +81,12 @@ import com.savesync.android.ui.components.GsFooterHints
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.GsSubScreenBar
 import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.components.GsHaptic
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.LocalGsNotifier
+import com.savesync.android.ui.components.noticeKindForSaveMessage
+import com.savesync.android.ui.components.stripLeadingGlyph
 import com.savesync.android.ui.NormalizePickerState
 import com.savesync.android.ui.SaturnArchivePickerState
 import com.savesync.android.ui.SaveDetailState
@@ -98,12 +102,15 @@ fun SaveDetailScreen(
     titleId: String,
     viewModel: MainViewModel,
     syncStateEntities: List<SyncStateEntity>,
-    onNavigateBack: () -> Unit
+    onNavigateBack: () -> Unit,
+    onNavigateToTab: (Int) -> Unit = {},
 ) {
     val saves by viewModel.saves.collectAsState()
     val detailState by viewModel.saveDetailState.collectAsState()
     val serverMeta by viewModel.serverMeta.collectAsState()
-    val snackbarHostState = remember { SnackbarHostState() }
+    // App-wide notices: a message survives this screen leaving, so a result
+    // that navigates back does so at once instead of after the snackbar.
+    val notifier = LocalGsNotifier.current
     val normalizePickerState by viewModel.normalizePicker.collectAsState()
     val saturnArchivePickerState by viewModel.saturnArchivePicker.collectAsState()
     val saturnArchiveSelectionVersion by viewModel.saturnArchiveSelectionVersion.collectAsState()
@@ -127,12 +134,17 @@ fun SaveDetailScreen(
     LaunchedEffect(detailState) {
         when (val state = detailState) {
             is SaveDetailState.Success -> {
-                snackbarHostState.showSnackbar(state.message)
+                val kind = noticeKindForSaveMessage(state.message)
+                notifier.show(
+                    GsNotice(kind, stripLeadingGlyph(state.message)),
+                    // A conflict is a Warning that still rejects.
+                    hapticOverride = if (kind == GsNoticeKind.Warning) GsHaptic.Reject else null,
+                )
                 viewModel.resetDetailState()
                 if (state.navigateBack) onNavigateBack()
             }
             is SaveDetailState.Error -> {
-                snackbarHostState.showSnackbar("Error: ${state.message}")
+                notifier.show(errorNotice(state.message) { onNavigateToTab(SETTINGS_TAB) })
                 viewModel.resetDetailState()
             }
             else -> Unit
@@ -300,7 +312,6 @@ fun SaveDetailScreen(
                 )
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { paddingValues ->
         if (entry == null) {
             Box(

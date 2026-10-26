@@ -33,8 +33,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -87,6 +85,16 @@ import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.components.gsScrollToItem
+import com.savesync.android.ui.theme.gsDim
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.LocalGsNotifier
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.text.style.TextOverflow
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
@@ -122,7 +130,7 @@ fun RomCatalogScreen(
     val notice by viewModel.romCatalogNotice.collectAsState()
     val downloadState by viewModel.romDownloadState.collectAsState()
 
-    val snackbarHostState = remember { SnackbarHostState() }
+    val notifier = LocalGsNotifier.current
     val scope = rememberCoroutineScope()
 
     // Filter state uses rememberSaveable so the user's place in the catalog
@@ -207,33 +215,45 @@ fun RomCatalogScreen(
         if (searchVisible) runCatching { searchFocusRequester.requestFocus() }
     }
 
-    // Surface enqueue outcomes as snackbars.  The Downloads tab now owns
-    // progress + final-status display; these snackbars only confirm that
-    // the request was accepted (or rejected before it left the device).
+    // Surface enqueue outcomes as notices.  The Downloads tab owns
+    // progress + final-status display; these only confirm that the request
+    // was accepted (or rejected before it left the device).
     LaunchedEffect(downloadState) {
         when (val s = downloadState) {
             is MainViewModel.RomDownloadState.Downloading -> {
-                scope.launch {
-                    snackbarHostState.showSnackbar(
-                        "Queued ${s.name} — see Downloads tab for progress"
-                    )
-                    viewModel.resetRomDownloadState()
-                }
+                notifier.show(
+                    GsNotice(GsNoticeKind.Success, "Queued ${s.name} — see Downloads tab for progress")
+                )
+                viewModel.resetRomDownloadState()
             }
             is MainViewModel.RomDownloadState.Success -> {
                 // Legacy state — preserved for any caller that still uses
                 // the synchronous path (e.g. unit tests).  The DownloadManager
                 // never emits this directly.
-                scope.launch {
-                    snackbarHostState.showSnackbar("Downloaded ${s.file.name}")
-                    viewModel.resetRomDownloadState()
-                }
+                notifier.show(GsNotice(GsNoticeKind.Success, "Downloaded ${s.file.name}"))
+                viewModel.resetRomDownloadState()
             }
             is MainViewModel.RomDownloadState.Error -> {
-                scope.launch {
-                    snackbarHostState.showSnackbar("Download failed: ${s.message}")
-                    viewModel.resetRomDownloadState()
-                }
+                val retry = s.retry
+                notifier.show(
+                    when {
+                        retry != null -> GsNotice(
+                            GsNoticeKind.Error,
+                            "Download failed: ${s.message}",
+                            actionLabel = "Retry",
+                            onAction = retry,
+                        )
+                        // "Server URL / ROM directory not configured": fixed in Settings.
+                        s.message.contains("not configured", ignoreCase = true) -> GsNotice(
+                            GsNoticeKind.Error,
+                            s.message,
+                            actionLabel = "Settings",
+                            onAction = { onNavigateToTab(SETTINGS_TAB) },
+                        )
+                        else -> GsNotice(GsNoticeKind.Error, "Download failed: ${s.message}")
+                    }
+                )
+                viewModel.resetRomDownloadState()
             }
             else -> Unit
         }
@@ -251,10 +271,8 @@ fun RomCatalogScreen(
         } else {
             "Showing all games"
         }
-        scope.launch {
-            snackbarHostState.currentSnackbarData?.dismiss()
-            snackbarHostState.showSnackbar(message)
-        }
+        // A filter echo, not an outcome: no haptic.
+        notifier.show(GsNotice(GsNoticeKind.Info, message), haptic = false)
     }
 
     // Keep the cursor in range when filters/search change the list size.
@@ -377,7 +395,6 @@ fun RomCatalogScreen(
                     )
             )
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
     ) { padding ->
         Column(
             modifier = Modifier

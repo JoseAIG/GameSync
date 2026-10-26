@@ -37,4 +37,18 @@ void ui_format_when_at(const char *iso, int utc_offset_minutes, int64_t now_loca
 // XXXX" (its first 4 characters), or "Another device" without an id
 void ui_device_label_for(const char *console_id, const char *local_id, char *out, int out_size);
 
+// ---------------------------------------------------------------------------
+// Text entry
+// ---------------------------------------------------------------------------
+
+// Why `text` can't be accepted by a text field, or NULL when it can: empty
+// text needs `allow_empty`; a URL field takes only text starting with
+// "http://" or "https://" (empty is then judged by `allow_empty` alone).
+const char *ui_text_field_error(const char *text, bool url, bool allow_empty);
+
+// Copy UTF-8 `src` into `out` (out_size bytes with the NUL), cut at a
+// character boundary when it doesn't fit, so no half character is left.
+// Returns the bytes copied.
+int ui_utf8_copy(const char *src, char *out, int out_size);
+
 #endif // UI_FORMAT_H

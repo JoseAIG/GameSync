@@ -307,8 +307,25 @@ typedef bool (*SettingsActionFn)(SettingsResult action);
 // user leaves the tab.
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action);
 
-// Edit a text field: the system keyboard, or a D-pad editor if the keyboard
-// applet can't be started. Returns true if confirmed.
+// ---------------------------------------------------------------------------
+// Text entry
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    const char *title;      // what is being edited (D-pad editor header)
+    const char *hint;       // shown while the field is empty
+    const char *ok_label;   // the confirm button, NULL = "OK"
+    bool password;          // characters hidden a moment after typing
+    bool url;               // only "http://..." / "https://..." is accepted
+    bool allow_empty;       // an empty text can be confirmed
+} UiTextField;
+
+// Edit `buffer` (max_len bytes with the NUL): the system keyboard, or a
+// D-pad editor if the keyboard applet can't be started. Text the field
+// refuses (ui_text_field_error) keeps the keyboard open with the reason.
+// Returns true if confirmed; `buffer` is untouched otherwise.
+bool ui_edit_text_ex(const UiTextField *f, char *buffer, int max_len);
+// The same with OK, any text, empty allowed
 bool ui_edit_text(const char *title, const char *hint, char *buffer, int max_len);
 
 #endif // UI_H

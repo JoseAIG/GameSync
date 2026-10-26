@@ -1334,22 +1334,10 @@ static void move_to(Catalog *cat, int index, bool wrap) {
     ensure_loaded(cat);
 }
 
+// The system keyboard (or the D-pad editor when it can't start)
 static bool edit_search(char *search, size_t size) {
-    SwkbdState kb;
-    char text[64];
-    if (size > sizeof(text)) size = sizeof(text);
-    snprintf(text, sizeof(text), "%s", search);
-    swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, (int)size - 1);
-    swkbdSetHintText(&kb, "Search game names (empty = all)");
-    swkbdSetInitialText(&kb, text);
-    swkbdSetValidation(&kb, SWKBD_ANYTHING, 0, 0);
-    swkbdSetButton(&kb, SWKBD_BUTTON_LEFT, "Cancel", false);
-    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, "Search", true);
-    SwkbdButton button = swkbdInputText(&kb, text, sizeof(text));
-    if (button != SWKBD_BUTTON_RIGHT) return false;
-    text[size - 1] = '\0';  // swkbd was limited to size-1 already
-    memcpy(search, text, strlen(text) + 1);
-    return true;
+    UiTextField f = { "Search the catalog", "Search game names (empty = all)", "Search", false, false, true };
+    return ui_edit_text_ex(&f, search, (int)size);
 }
 
 static Catalog *get_catalog(const AppConfig *config) {

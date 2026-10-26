@@ -1507,27 +1507,34 @@ static void select_server(AppConfig *config) {
 static bool settings_activate(AppConfig *config, int selected, SettingsActionFn run_action) {
     SettingsResult action = SETTINGS_EXIT;
     switch (selected) {
-        case CFG_SERVER_URL:
-            if (ui_edit_text("Server URL", "http://192.168.1.100:8000", config->server_url, MAX_URL_LEN)) {
+        case CFG_SERVER_URL: {
+            UiTextField f = { "Server URL", "http://192.168.1.100:8000", "OK", false, true, false };
+            if (ui_edit_text_ex(&f, config->server_url, MAX_URL_LEN)) {
                 save_settings(config);
                 select_server(config);
             }
             break;
-        case CFG_SERVER_URL_ALT:
-            if (ui_edit_text("Alternate URL", "Second address of the server (optional)",
-                             config->server_url_alt, MAX_URL_LEN)) {
+        }
+        case CFG_SERVER_URL_ALT: {
+            // Empty turns the alternate address off
+            UiTextField f = { "Alternate URL", "Second address of the server (empty = off)", "OK", false, true, true };
+            if (ui_edit_text_ex(&f, config->server_url_alt, MAX_URL_LEN)) {
                 save_settings(config);
                 select_server(config);
             }
             break;
-        case CFG_API_KEY:
-            if (ui_edit_text("API key", "your-api-key", config->api_key, MAX_API_KEY_LEN))
-                save_settings(config);
+        }
+        case CFG_API_KEY: {
+            UiTextField f = { "API key", "The server's SYNC_API_KEY", "OK", true, false, false };
+            if (ui_edit_text_ex(&f, config->api_key, MAX_API_KEY_LEN)) save_settings(config);
             break;
-        case CFG_NDS_DIR:
-            if (ui_edit_text("NDS ROM folder", "sdmc:/roms/nds", config->nds_dir, MAX_PATH_LEN))
-                save_settings(config);
+        }
+        case CFG_NDS_DIR: {
+            // Empty = no DS ROM folder (the scan skips DS games)
+            UiTextField f = { "NDS ROM folder", "sdmc:/roms/nds", "OK", false, false, true };
+            if (ui_edit_text_ex(&f, config->nds_dir, MAX_PATH_LEN)) save_settings(config);
             break;
+        }
         case CFG_RESCAN: action = SETTINGS_RESCAN; break;
         case CFG_REFRESH_CATALOG: action = SETTINGS_REFRESH_CATALOG; break;
         default: action = SETTINGS_UPDATE; break;
@@ -1585,8 +1592,11 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
 // Text entry
 // ---------------------------------------------------------------------------
 
-// Characters of the D-pad editor
-static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789.:/-_ABCDEFGHIJKLMNOPQRSTUVWXYZ@?=&#%+!";
+// The longest field: a ROM path or a URL, whichever is longer
+#define UI_TEXT_MAX ((MAX_PATH_LEN > MAX_URL_LEN ? MAX_PATH_LEN : MAX_URL_LEN) + 1)
+
+// Characters of the D-pad editor (a space last, for searches)
+static const char charset[] = "abcdefghijklmnopqrstuvwxyz0123456789.:/-_ABCDEFGHIJKLMNOPQRSTUVWXYZ@?=&#%+! ";
 static const int charset_len = sizeof(charset) - 1;
 
 static int charset_index(char c) {
@@ -1599,7 +1609,25 @@ typedef struct {
     const char *title, *hint;
     const char *text;
     int cursor, len;
+    bool password;
 } EditView;
+
+#define BULLET "\xE2\x80\xA2"
+
+// `n` bytes of `s`, or that many bullets for a password
+static void edit_span(const EditView *e, const char *s, int n, char *out, size_t size) {
+    if (!e->password) {
+        snprintf(out, size, "%.*s", n, s);
+        return;
+    }
+    size_t pos = 0;
+    out[0] = '\0';
+    for (int i = 0; i < n && pos + 4 <= size; i++) {
+        memcpy(out + pos, BULLET, 3);
+        pos += 3;
+        out[pos] = '\0';
+    }
+}
 
 static void edit_top(void *ctx) {
     const EditView *e = ctx;
@@ -1607,14 +1635,15 @@ static void edit_top(void *ctx) {
     gui_panel(8, 40, GUI_TOP_W - 16, 90);
     gui_text(20, 48, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, e->hint);
 
-    // Text box with a window around the cursor
+    // Text box with a window around the cursor. A password shows bullets,
+    // except the character under the cursor (the one being chosen).
     float bx = 20, by = 72, bw = GUI_TOP_W - 40, bh = 30;
     gui_rrect(bx, by, bw, bh, 6, gui_rgb(HEX_BG));
     gui_rrect(bx, by + bh - 2, bw, 2, 1, gui_rgb(HEX_ACCENT));
     int start = 0;
-    char before[256];
+    char before[UI_TEXT_MAX * 3];
     for (;;) {
-        snprintf(before, sizeof(before), "%.*s", e->cursor - start, e->text + start);
+        edit_span(e, e->text + start, e->cursor - start, before, sizeof(before));
         if (gui_text_w(GUI_S_BODY, before) < bw - 30 || start >= e->cursor) break;
         start++;
     }
@@ -1627,9 +1656,11 @@ static void edit_top(void *ctx) {
     bool blink = (gui_now_ms() / 333) % 2 == 0;
     gui_rrect(x, by + 6, cw + 2, bh - 12, 2, gui_rgb(blink ? HEX_ACCENT : HEX_PANEL_HI));
     gui_text(x + 1, ty, GUI_S_BODY, gui_rgb(HEX_INK), GUI_LEFT, cur);
-    if (e->cursor < e->len)
-        gui_text_fit(x + cw + 3, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT,
-                     bx + bw - (x + cw + 3) - 6, e->text + e->cursor + 1);
+    if (e->cursor < e->len) {
+        char after[UI_TEXT_MAX * 3];
+        edit_span(e, e->text + e->cursor + 1, e->len - e->cursor - 1, after, sizeof(after));
+        gui_text_fit(x + cw + 3, ty, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, bx + bw - (x + cw + 3) - 6, after);
+    }
     gui_text(20, 140, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT,
              "The system keyboard is unavailable: edit with the D-pad.");
     gui_footer(NULL, 0);
@@ -1651,11 +1682,11 @@ static void edit_bottom(void *ctx) {
     }
 }
 
-static bool dpad_editor(const char *title, const char *hint, char *buffer, int max_len) {
-    char temp[256];
-    snprintf(temp, sizeof(temp), "%s", buffer);
+static bool dpad_editor(const UiTextField *f, char *buffer, int max_len) {
+    char temp[UI_TEXT_MAX];
     if (max_len > (int)sizeof(temp)) max_len = sizeof(temp);
-    EditView e = { title, hint, temp, (int)strlen(temp), (int)strlen(temp) };
+    ui_utf8_copy(buffer, temp, max_len);
+    EditView e = { f->title, f->hint ? f->hint : "", temp, (int)strlen(temp), (int)strlen(temp), f->password };
     UiBackdrop prev = ui_set_backdrop(edit_top, edit_bottom, &e);
     bool confirmed = false;
 
@@ -1686,8 +1717,15 @@ static bool dpad_editor(const char *title, const char *hint, char *buffer, int m
             e.len--;
         }
         if (down & KEY_A) {
-            confirmed = true;
-            break;
+            // The same check as the keyboard's: say why, and keep editing
+            const char *err = ui_text_field_error(temp, f->url, f->allow_empty);
+            if (!err) {
+                confirmed = true;
+                break;
+            }
+            ui_message(UI_TONE_WARN, f->title, err);
+            hidScanInput();
+            continue;
         }
         if (down & KEY_B) break;
 
@@ -1704,25 +1742,48 @@ static bool dpad_editor(const char *title, const char *hint, char *buffer, int m
     return confirmed;
 }
 
-bool ui_edit_text(const char *title, const char *hint, char *buffer, int max_len) {
-    char text[MAX_URL_LEN + 1];
-    if (max_len > (int)sizeof(text)) max_len = sizeof(text);
+// The keyboard applet calls this on OK: a URL field keeps the keyboard open
+// with the reason until the text starts with http:// or https://
+static SwkbdCallbackResult url_filter(void *user, const char **message, const char *text, size_t len) {
+    (void)len;
+    const UiTextField *f = user;
+    const char *err = ui_text_field_error(text, true, f->allow_empty);
+    if (!err) return SWKBD_CALLBACK_OK;
+    *message = err;
+    return SWKBD_CALLBACK_CONTINUE;
+}
+
+bool ui_edit_text_ex(const UiTextField *f, char *buffer, int max_len) {
+    char text[UI_TEXT_MAX * 4];   // UTF-8: up to 4 bytes a character
+    if (max_len > UI_TEXT_MAX) max_len = UI_TEXT_MAX;
+    if (max_len < 2) return false;
     SwkbdState kb;
     swkbdInit(&kb, SWKBD_TYPE_NORMAL, 2, max_len - 1);
-    swkbdSetHintText(&kb, hint);
+    swkbdSetHintText(&kb, f->hint ? f->hint : "");
     swkbdSetInitialText(&kb, buffer);
-    swkbdSetValidation(&kb, SWKBD_ANYTHING, 0, 0);
+    swkbdSetValidation(&kb, f->allow_empty ? SWKBD_ANYTHING : SWKBD_NOTEMPTY_NOTBLANK,
+                       f->url ? SWKBD_FILTER_CALLBACK : 0, 0);
+    if (f->url) swkbdSetFilterCallback(&kb, url_filter, (void *)f);
+    if (f->password) swkbdSetPasswordMode(&kb, SWKBD_PASSWORD_HIDE_DELAY);
     swkbdSetButton(&kb, SWKBD_BUTTON_LEFT, "Cancel", false);
-    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, "OK", true);
+    swkbdSetButton(&kb, SWKBD_BUTTON_RIGHT, f->ok_label ? f->ok_label : "OK", true);
     text[0] = '\0';
     SwkbdButton button = swkbdInputText(&kb, text, sizeof(text));
+    // Whatever the applet did, its last touch must not reach the screen
+    hidScanInput();
+    ui_input_latch_touch();
     if (button == SWKBD_BUTTON_RIGHT) {
-        snprintf(buffer, max_len, "%s", text);
+        ui_utf8_copy(text, buffer, max_len);
         return true;
     }
     if (button == SWKBD_BUTTON_LEFT) return false;
     // No keyboard result: HOME / power pressed, or the applet couldn't run
     SwkbdResult r = swkbdGetResult(&kb);
     if (r == SWKBD_HOMEPRESSED || r == SWKBD_RESETPRESSED || r == SWKBD_POWERPRESSED) return false;
-    return dpad_editor(title, hint, buffer, max_len);
+    return dpad_editor(f, buffer, max_len);
+}
+
+bool ui_edit_text(const char *title, const char *hint, char *buffer, int max_len) {
+    UiTextField f = { title, hint, "OK", false, false, true };
+    return ui_edit_text_ex(&f, buffer, max_len);
 }

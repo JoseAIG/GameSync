@@ -165,3 +165,25 @@ void ui_device_label_for(const char *console_id, const char *local_id, char *out
     else
         snprintf(out, out_size, "Another device");
 }
+
+const char *ui_text_field_error(const char *text, bool url, bool allow_empty) {
+    if (!text) text = "";
+    if (!text[0]) return allow_empty ? NULL : "Enter a value";
+    if (url && strncmp(text, "http://", 7) != 0 && strncmp(text, "https://", 8) != 0)
+        return "Start with http:// or https://";
+    return NULL;
+}
+
+int ui_utf8_copy(const char *src, char *out, int out_size) {
+    if (out_size <= 0) return 0;
+    if (!src) src = "";
+    int n = (int)strlen(src);
+    if (n > out_size - 1) {
+        n = out_size - 1;
+        // Back off continuation bytes (10xxxxxx) and the lead byte they follow
+        while (n > 0 && ((unsigned char)src[n] & 0xC0) == 0x80) n--;
+    }
+    memcpy(out, src, (size_t)n);
+    out[n] = '\0';
+    return n;
+}

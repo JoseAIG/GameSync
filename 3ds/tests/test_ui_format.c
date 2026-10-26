@@ -81,7 +81,38 @@ static void test_labels(void) {
     CHECK_STR(out, "2026-10-12 21:14");
 }
 
+static void test_text_entry(void) {
+    CHECK(ui_text_field_error("http://192.168.1.100:8000", true, false) == NULL);
+    CHECK(ui_text_field_error("https://example.invalid", true, false) == NULL);
+    CHECK_STR(ui_text_field_error("192.168.1.100:8000", true, false), "Start with http:// or https://");
+    CHECK_STR(ui_text_field_error("ftp://x", true, true), "Start with http:// or https://");
+    CHECK_STR(ui_text_field_error("http:/x", true, true), "Start with http:// or https://");
+    // Empty: only when allowed (an empty alternate URL turns it off)
+    CHECK(ui_text_field_error("", true, true) == NULL);
+    CHECK(ui_text_field_error("", true, false) != NULL);
+    CHECK(ui_text_field_error("", false, false) != NULL);
+    CHECK(ui_text_field_error(NULL, false, true) == NULL);
+    CHECK(ui_text_field_error("anything", false, false) == NULL);
+
+    char out[8];
+    CHECK(ui_utf8_copy("abc", out, sizeof(out)) == 3);
+    CHECK_STR(out, "abc");
+    CHECK(ui_utf8_copy("abcdefghij", out, sizeof(out)) == 7);
+    CHECK_STR(out, "abcdefg");
+    // "abcde" + U+00E9 (2 bytes) + "f": the cut would split the e-acute
+    CHECK(ui_utf8_copy("abcdef\xC3\xA9g", out, sizeof(out)) == 6);
+    CHECK_STR(out, "abcdef");
+    CHECK(ui_utf8_copy("abcde\xC3\xA9g", out, sizeof(out)) == 7);
+    CHECK_STR(out, "abcde\xC3\xA9");
+    // A 3-byte character cut after its first or second byte
+    CHECK(ui_utf8_copy("abcde\xE2\x80\xA6", out, sizeof(out)) == 5);
+    CHECK_STR(out, "abcde");
+    CHECK(ui_utf8_copy("abcdef\xE2\x80\xA6", out, sizeof(out)) == 6);
+    CHECK(ui_utf8_copy(NULL, out, sizeof(out)) == 0 && out[0] == '\0');
+}
+
 int main(void) {
+    test_text_entry();
     test_parse();
     test_when();
     test_labels();

@@ -145,6 +145,24 @@ el fork.
   emulador abierto.
 - [ ] **Respaldo periódico del servidor a otra máquina**: copiar `saves/` a un
   equipo personal cuando esté en la red de casa.
+- [ ] **3DS: rediseño de UX** (pedido 26-oct-2026). Hoy es una consola de texto en
+  las dos pantallas, sin táctil, con un editor de texto propio letra por letra
+  (`config_edit_field`). Por etapas:
+  1. **Teclado de serie** (`swkbd` de libctru: el teclado oficial, táctil, con
+     sugerencias) en todos los campos de texto: `server_url`, `server_url_alt`,
+     `api_key`, `nds_dir` y búsqueda. Alcanza para todo; no hace falta uno propio.
+  2. **Búsqueda/filtro** de juegos por nombre con ese teclado.
+  3. **Pantalla táctil:** tocar un juego, botones grandes de acción, desplazar
+     la lista arrastrando.
+  4. **Interfaz gráfica con `citro2d`** (devkitPro, licencia zlib) y la fuente
+     del sistema, siguiendo la skill `apple-design`:
+     - una acción principal clara ("Sincronizar"); huellas e IDs en "detalles";
+     - el conflicto como dos tarjetas lado a lado (fecha, tamaño, aparato);
+     - progreso visible y respuesta inmediata al tocar;
+     - movimiento suave en la lista.
+  - Mantener los atajos de botones actuales, para usar la app sin táctil.
+  - La UI vive en `3ds/source/ui.c` y `main.c`; separar primero la lógica de la
+    presentación facilita el cambio.
 
 ## Seguimiento de PRs al autor
 

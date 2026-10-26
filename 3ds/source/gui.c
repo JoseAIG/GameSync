@@ -20,13 +20,17 @@ static const char *ellipsis = "...";
 static u64 tick0, frame_tick, frame_ms;
 static float frame_dt = 1.0f / 60.0f;
 
-u32 gui_mix(u32 a, u32 b, float t) {
-    if (t < 0) t = 0;
+u32 gui_mix_hex(u32 a, u32 b, float t) {
+    if (!(t > 0)) t = 0;   // also NaN
     if (t > 1) t = 1;
-    int r = (int)(((a >> 16) & 0xFF) * (1 - t) + ((b >> 16) & 0xFF) * t);
-    int g = (int)(((a >> 8) & 0xFF) * (1 - t) + ((b >> 8) & 0xFF) * t);
-    int bl = (int)((a & 0xFF) * (1 - t) + (b & 0xFF) * t);
-    return gui_rgb(((u32)r << 16) | ((u32)g << 8) | (u32)bl);
+    int r = (int)(((a >> 16) & 0xFF) * (1 - t) + ((b >> 16) & 0xFF) * t + 0.5f);
+    int g = (int)(((a >> 8) & 0xFF) * (1 - t) + ((b >> 8) & 0xFF) * t + 0.5f);
+    int bl = (int)((a & 0xFF) * (1 - t) + (b & 0xFF) * t + 0.5f);
+    return ((u32)r << 16) | ((u32)g << 8) | (u32)bl;
+}
+
+u32 gui_mix(u32 a, u32 b, float t) {
+    return gui_rgb(gui_mix_hex(a, b, t));
 }
 
 // ---------------------------------------------------------------------------

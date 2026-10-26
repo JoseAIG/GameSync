@@ -57,6 +57,8 @@ static inline u32 gui_rgba(u32 hex, u8 a) {
 }
 // Opaque blend of two 0xRRGGBB colours, t = 0 -> a, 1 -> b
 u32 gui_mix(u32 a, u32 b, float t);
+// The same blend as 0xRRGGBB (to blend again)
+u32 gui_mix_hex(u32 a, u32 b, float t);
 
 typedef enum {
     GUI_LEFT = 0,

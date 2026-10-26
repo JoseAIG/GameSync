@@ -122,7 +122,14 @@ typedef struct {
     bool init;
 } UiListAnim;
 
-typedef void (*UiRowFn)(void *ctx, int index, float x, float y, float w, float h, bool selected);
+// Draws one row. `hl` is how much of the row the gliding highlight bar
+// covers (1 = fully under it, 0 = clear of it): pick every colour that
+// differs on the bar as gui_mix(normal, on_bar, hl), never by comparing the
+// index with the selection, or the new row's text turns dark on the
+// background for a frame or two while the bar is still on its way.
+// `pressed`: a finger is down on this row (always false for now).
+typedef void (*UiRowFn)(void *ctx, int index, float x, float y, float w, float h,
+                        float hl, bool pressed);
 
 // Draw rows [scroll, scroll+rows) of a list at (x, y). Rows sliding in/out
 // overflow by up to one row: draw the header/footer bars afterwards.

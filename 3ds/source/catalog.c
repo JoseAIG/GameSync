@@ -605,17 +605,18 @@ static void kv(float x, float y, float label_w, float w, const char *label, cons
 }
 
 // RA badge: gold pill with the count, outlined when matched by name only
-static float ra_badge(float x_right, float y, float h, const CatEntry *e, bool on_accent) {
+// `hl`: how much of it the list's highlight bar covers (0 = none)
+static float ra_badge(float x_right, float y, float h, const CatEntry *e, float hl) {
     char tag[16];
     ra_tag(e, tag, sizeof(tag));
     if (!tag[0]) return 0;
     float w = gui_pill_w(h, GUI_S_TINY, tag);
     if (e->ra_title_only)
-        gui_pill_outline(x_right - w, y, h, GUI_S_TINY, gui_rgb(on_accent ? HEX_INK : HEX_RA),
-                         gui_rgb(on_accent ? HEX_ACCENT : HEX_BG), tag);
+        gui_pill_outline(x_right - w, y, h, GUI_S_TINY, gui_mix(HEX_RA, HEX_INK, hl),
+                         gui_mix(HEX_BG, HEX_ACCENT, hl), tag);
     else
-        gui_pill(x_right - w, y, h, GUI_S_TINY, gui_rgb(on_accent ? HEX_INK : HEX_RA),
-                 gui_rgb(on_accent ? HEX_RA : HEX_INK), tag);
+        gui_pill(x_right - w, y, h, GUI_S_TINY, gui_mix(HEX_RA, HEX_INK, hl),
+                 gui_mix(HEX_INK, HEX_RA, hl), tag);
     return w;
 }
 
@@ -685,7 +686,7 @@ static void draw_top(void *ctx) {
         if (cat_entry_has_ra(e)) {
             char tag[16];
             ra_tag(e, tag, sizeof(tag));
-            pxx += ra_badge(pxx + gui_pill_w(15, GUI_S_TINY, tag), y, 15, e, false) + 5;
+            pxx += ra_badge(pxx + gui_pill_w(15, GUI_S_TINY, tag), y, 15, e, 0) + 5;
         }
         bool inst = is_installed(cat, e);
         if (inst) {
@@ -738,26 +739,27 @@ static void draw_top(void *ctx) {
     gui_footer(hints, nhints);
 }
 
-static void cat_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+static void cat_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     Catalog *cat = ctx;
     const CatEntry *e = entry_at(cat, index);
     float cy = y + h / 2;
     if (!e) {
-        gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_rgb(selected ? HEX_INK : HEX_MUTED), GUI_LEFT, 0,
+        gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_mix(HEX_MUTED, HEX_INK, hl), GUI_LEFT, 0,
                      "Loading...");
         return;
     }
     bool inst = is_installed(cat, e);
     if (inst) {
-        gui_circle(x + 14, cy, 6, gui_rgb(selected ? HEX_INK : HEX_OK));
-        gui_icon_check(x + 14, cy, 7, gui_rgb(selected ? HEX_ACCENT : HEX_INK));
+        gui_circle(x + 14, cy, 6, gui_mix(HEX_OK, HEX_INK, hl));
+        gui_icon_check(x + 14, cy, 7, gui_mix(HEX_INK, HEX_ACCENT, hl));
     } else {
-        gui_circle(x + 14, cy, 2, gui_rgb(selected ? HEX_INK : HEX_LINE));
+        gui_circle(x + 14, cy, 2, gui_mix(HEX_LINE, HEX_INK, hl));
     }
     float badge = 0;
-    if (cat_entry_has_ra(e)) badge = ra_badge(x + w - 8, cy - 6.5f, 13, e, selected) + 6;
-    u32 color = selected ? HEX_INK : (inst ? HEX_OK : HEX_TEXT);
-    gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_rgb(color), GUI_LEFT, w - 26 - 8 - badge, entry_name(e));
+    if (cat_entry_has_ra(e)) badge = ra_badge(x + w - 8, cy - 6.5f, 13, e, hl) + 6;
+    gui_text_mid(x + 26, y, h, GUI_S_BODY, gui_mix(inst ? HEX_OK : HEX_TEXT, HEX_INK, hl), GUI_LEFT,
+                 w - 26 - 8 - badge, entry_name(e));
 }
 
 static void draw_bottom(void *ctx) {

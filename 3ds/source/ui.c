@@ -313,8 +313,21 @@ void ui_busy(const char *title, const char *message) {
 #define CHOICE_ROWS 7
 #define CHOICE_ROW_H 22
 
+static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float row_h,
+                      int count, int selected, int scroll, UiRowFn row, void *ctx, bool contained);
+
+typedef struct {
+    const char *const *items;
+} ChoiceView;
+
+static void choice_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
+    const ChoiceView *c = ctx;
+    gui_text_mid(x + 13, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, w - 26, c->items[index]);
+}
+
 static void draw_choice(UiTone tone, const char *title, const char *const *items, int count,
-                        int selected, int scroll, float *list_y) {
+                        int selected, int scroll, UiListAnim *anim, float *list_y) {
     int rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
     float h = 24 + 6 + rows * CHOICE_ROW_H + 6 + 24;
     float y = (GUI_H - h) / 2;
@@ -323,16 +336,8 @@ static void draw_choice(UiTone tone, const char *title, const char *const *items
     gui_card(DLG_X, y, DLG_W, h, title, hex);
     float ly = y + 24 + 6;
     *list_y = ly;
-    for (int i = 0; i < rows; i++) {
-        int index = scroll + i;
-        float ry = ly + i * CHOICE_ROW_H;
-        bool on = (index == selected);
-        if (on) gui_rrect(DLG_X + 6, ry + 1, DLG_W - 12, CHOICE_ROW_H - 2, 5, gui_rgb(HEX_ACCENT));
-        gui_text_mid(DLG_X + 16, ry, CHOICE_ROW_H, GUI_S_BODY, gui_rgb(on ? HEX_INK : HEX_TEXT), GUI_LEFT,
-                     DLG_W - 32, items[index]);
-    }
-    if (count > rows)
-        gui_scrollbar(DLG_X + DLG_W - 5, ly + 2, rows * CHOICE_ROW_H - 4, scroll, rows, count, (float)scroll);
+    ChoiceView c = { items };
+    list_draw(anim, DLG_X + 3, ly, DLG_W - 6, rows, CHOICE_ROW_H, count, selected, scroll, choice_row, &c, true);
     static const UiButton b[] = { { KEY_B, "B", "Cancel" }, { KEY_A, "A", "Select" } };
     float by = y + h - 24;
     gui_rect(DLG_X + 8, by, DLG_W - 16, 1, gui_rgb(HEX_LINE));
@@ -348,6 +353,7 @@ int ui_choose(UiTone tone, const char *title, const char *const *items, int coun
     if (count <= 0) return -1;
     int selected = 0, scroll = 0;
     int rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
+    UiListAnim anim = { 0 };
     hidScanInput();
     while (aptMainLoop()) {
         float list_y = 0;
@@ -356,7 +362,7 @@ int ui_choose(UiTone tone, const char *title, const char *const *items, int coun
         ui_draw_backdrop_top();
         gui_screen(GUI_BOTTOM);
         ui_draw_backdrop_bottom();
-        draw_choice(tone, title, items, count, selected, scroll, &list_y);
+        draw_choice(tone, title, items, count, selected, scroll, &anim, &list_y);
         gui_end();
 
         hidScanInput();
@@ -404,8 +410,12 @@ UiNav ui_tab_nav(u32 down) {
 // List
 // ---------------------------------------------------------------------------
 
-void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
-             int count, int selected, int scroll, UiRowFn row, void *ctx) {
+// `contained`: the list sits inside a card (ui_choose), where nothing is
+// drawn over its edges afterwards. Until lists can clip, the content then
+// steps a row at a time like v055 (only the highlight glides) and only rows
+// inside the viewport are drawn.
+static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float row_h,
+                      int count, int selected, int scroll, UiRowFn row, void *ctx, bool contained) {
     if (!a->init || a->count != count) {
         gui_spring_set(&a->sel, (float)selected);
         gui_spring_set(&a->scroll, (float)scroll);
@@ -415,7 +425,7 @@ void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
     // Long jumps snap, short moves glide. The springs keep their velocity
     // across retargets, so a held D-pad glides continuously.
     if (fabsf(a->sel.x - selected) > rows) gui_spring_set(&a->sel, (float)selected);
-    if (fabsf(a->scroll.x - scroll) > rows) gui_spring_set(&a->scroll, (float)scroll);
+    if (fabsf(a->scroll.x - scroll) > rows || contained) gui_spring_set(&a->scroll, (float)scroll);
     float dt = gui_dt();
     gui_spring(&a->sel, (float)selected, GUI_RESP_SELECT, dt);
     gui_spring(&a->scroll, (float)scroll, GUI_RESP_SELECT, dt);
@@ -427,15 +437,24 @@ void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
         gui_rrect(x + 3, sy + 1, rw - 6, row_h - 2, 5, gui_rgb(HEX_ACCENT));
     }
     int first = (int)floorf(a->scroll.x);
-    for (int i = first; i <= first + rows && i < count; i++) {
+    int last = contained ? first + rows - 1 : first + rows;
+    for (int i = first; i <= last && i < count; i++) {
         if (i < 0) continue;
         float ry = y + (i - a->scroll.x) * row_h;
         if (ry < y - row_h || ry > y + rows * row_h) continue;
-        row(ctx, i, x, ry, rw, row_h, i == selected);
+        float hl = 1.0f - fabsf((float)i - a->sel.x);
+        if (hl < 0) hl = 0;
+        if (selected < 0) hl = 0;
+        row(ctx, i, x, ry, rw, row_h, hl, false);
     }
     // Mask the row sliding out at the bottom
-    gui_rect(x, y + rows * row_h, w, row_h, gui_rgb(HEX_BG));
+    if (!contained) gui_rect(x, y + rows * row_h, w, row_h, gui_rgb(HEX_BG));
     if (bar) gui_scrollbar(x + w - 6, y + 3, rows * row_h - 6, scroll, rows, count, a->scroll.x);
+}
+
+void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
+             int count, int selected, int scroll, UiRowFn row, void *ctx) {
+    list_draw(a, x, y, w, rows, row_h, count, selected, scroll, row, ctx, false);
 }
 
 int ui_list_touch(float y, int rows, float row_h, int count, int scroll) {
@@ -598,34 +617,35 @@ void ui_draw_saves_top(const SavesView *v) {
     gui_footer(hints, 3);
 }
 
-static void saves_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+static void saves_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     const SavesView *v = ctx;
     const TitleInfo *t = &v->titles[v->filtered[index]];
     float cy = y + h / 2;
 
     // Mark box
     if (t->marked) {
-        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_rgb(selected ? HEX_INK : HEX_ACCENT));
-        gui_icon_check(x + 14.5f, cy, 8, gui_rgb(selected ? HEX_ACCENT : HEX_INK));
+        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_mix(HEX_ACCENT, HEX_INK, hl));
+        gui_icon_check(x + 14.5f, cy, 8, gui_mix(HEX_INK, HEX_ACCENT, hl));
     } else {
-        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_rgb(selected ? 0x1E8F86 : HEX_LINE));
-        gui_rrect(x + 10.5f, cy - 4, 8, 8, 2, gui_rgb(selected ? HEX_ACCENT : HEX_BG));
+        gui_rrect(x + 9, cy - 5.5f, 11, 11, 3, gui_mix(HEX_LINE, 0x1E8F86, hl));
+        gui_rrect(x + 10.5f, cy - 4, 8, 8, 2, gui_mix(HEX_BG, HEX_ACCENT, hl));
     }
 
     // System tag, fixed width
     u32 hex;
     const char *tag = system_tag(t, &hex);
-    gui_rrect(x + 26, cy - 6.5f, 30, 13, 6.5f, selected ? gui_rgb(HEX_INK) : gui_mix(HEX_BG, hex, 0.25f));
+    gui_rrect(x + 26, cy - 6.5f, 30, 13, 6.5f, gui_mix(gui_mix_hex(HEX_BG, hex, 0.25f), HEX_INK, hl));
     gui_text_mid(x + 41, cy - 6.5f, 13, GUI_S_TINY, gui_rgb(hex), GUI_CENTER, 0, tag);
 
     // Name
     bool conflict = t->in_conflict || t->sync_state == TSTATE_CONFLICT;
-    u32 color = selected ? HEX_INK : (conflict ? HEX_ERR : HEX_TEXT);
-    gui_text_mid(x + 62, y, h, GUI_S_BODY, gui_rgb(color), GUI_LEFT, w - 62 - 18, t->name);
+    gui_text_mid(x + 62, y, h, GUI_S_BODY, gui_mix(conflict ? HEX_ERR : HEX_TEXT, HEX_INK, hl), GUI_LEFT,
+                 w - 62 - 18, t->name);
 
-    // State dot
+    // State dot, with an ink ring that fades in under the bar
     if (state_label(t, &hex)) {
-        if (selected) gui_circle(x + w - 11, cy, 5, gui_rgb(HEX_INK));
+        if (hl > 0) gui_circle(x + w - 11, cy, 5, gui_rgba(HEX_INK, (u8)(hl * 255)));
         gui_circle(x + w - 11, cy, 3.5f, gui_rgb(hex));
     }
 }
@@ -880,21 +900,23 @@ typedef struct {
     const TitleInfo *title;
     const HistoryVersion *versions;
     int count, selected, scroll;
+    UiListAnim anim;   // per visit: the bar never glides in from another game
 } HistoryView;
 
-static void history_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+static void history_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     const HistoryView *v = ctx;
     const HistoryVersion *hv = &v->versions[index];
     char date[32], size[24];
     format_date(hv->timestamp, date, sizeof(date));
     format_size(hv->size, size, sizeof(size));
-    u32 text = selected ? HEX_INK : HEX_TEXT, dim = selected ? HEX_INK : HEX_DIM;
-    gui_text_mid(x + 10, y, h, GUI_S_BODY, gui_rgb(text), GUI_LEFT, 0, date);
-    if (index == 0) gui_text_mid(x + 134, y, h, GUI_S_TINY, gui_rgb(selected ? HEX_INK : HEX_ACCENT2), GUI_LEFT, 0, "NEWEST");
-    gui_text_mid(x + w - 70, y, h, GUI_S_SMALL, gui_rgb(dim), GUI_RIGHT, 0, size);
+    u32 text = gui_mix(HEX_TEXT, HEX_INK, hl), dim = gui_mix(HEX_DIM, HEX_INK, hl);
+    gui_text_mid(x + 10, y, h, GUI_S_BODY, text, GUI_LEFT, 0, date);
+    if (index == 0) gui_text_mid(x + 134, y, h, GUI_S_TINY, gui_mix(HEX_ACCENT2, HEX_INK, hl), GUI_LEFT, 0, "NEWEST");
+    gui_text_mid(x + w - 70, y, h, GUI_S_SMALL, dim, GUI_RIGHT, 0, size);
     char files[16];
     snprintf(files, sizeof(files), "%d file%s", hv->file_count, hv->file_count == 1 ? "" : "s");
-    gui_text_mid(x + w - 10, y, h, GUI_S_SMALL, gui_rgb(dim), GUI_RIGHT, 0, files);
+    gui_text_mid(x + w - 10, y, h, GUI_S_SMALL, dim, GUI_RIGHT, 0, files);
 }
 
 static void history_top(void *ctx) {
@@ -921,8 +943,7 @@ static void history_top(void *ctx) {
 
 static void history_bottom(void *ctx) {
     HistoryView *v = ctx;
-    static UiListAnim anim;
-    ui_list(&anim, 0, GUI_HEADER_H, GUI_BOT_W, HIST_ROWS, HIST_ROW_H, v->count, v->selected,
+    ui_list(&v->anim, 0, GUI_HEADER_H, GUI_BOT_W, HIST_ROWS, HIST_ROW_H, v->count, v->selected,
             v->scroll, history_row, v);
     gui_header_bar();
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Saved versions");
@@ -938,7 +959,7 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
         ui_message(UI_TONE_INFO, "History", "No previous versions of this save on the server.");
         return NULL;
     }
-    HistoryView v = { title, versions, version_count, 0, 0 };
+    HistoryView v = { title, versions, version_count, 0, 0, { { 0, 0 }, { 0, 0 }, 0, false } };
     UiBackdrop prev = ui_set_backdrop(history_top, history_bottom, &v);
     char *result = NULL;
     hidScanInput();
@@ -1047,11 +1068,11 @@ static void config_top(void *ctx) {
     gui_footer(hints, 2);
 }
 
-static void config_row(void *ctx, int index, float x, float y, float w, float h, bool selected) {
+static void config_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
+    (void)pressed;
     const ConfigView *v = ctx;
-    u32 text = selected ? HEX_INK : HEX_TEXT;
     if (index == CFG_ACTIONS) gui_rect(x + 10, y, w - 20, 1, gui_rgb(HEX_LINE));
-    gui_text_mid(x + 12, y, h, GUI_S_BODY, gui_rgb(text), GUI_LEFT, 0, cfg_labels[index]);
+    gui_text_mid(x + 12, y, h, GUI_S_BODY, gui_mix(HEX_TEXT, HEX_INK, hl), GUI_LEFT, 0, cfg_labels[index]);
     char value[64] = "";
     if (index == CFG_SERVER_URL) snprintf(value, sizeof(value), "%.63s", v->cfg->server_url);
     else if (index == CFG_SERVER_URL_ALT)
@@ -1061,9 +1082,9 @@ static void config_row(void *ctx, int index, float x, float y, float w, float h,
         snprintf(value, sizeof(value), "%.63s", v->cfg->nds_dir[0] ? v->cfg->nds_dir : "(not set)");
     else if (index == CFG_UPDATE && !v->cfg->update_check) snprintf(value, sizeof(value), "Off");
     if (value[0])
-        gui_text_mid(x + w - 12, y, h, GUI_S_SMALL, gui_rgb(selected ? HEX_INK : HEX_DIM), GUI_RIGHT, 150, value);
+        gui_text_mid(x + w - 12, y, h, GUI_S_SMALL, gui_mix(HEX_DIM, HEX_INK, hl), GUI_RIGHT, 150, value);
     else
-        gui_text_mid(x + w - 14, y, h, GUI_S_BODY, gui_rgb(selected ? HEX_INK : HEX_MUTED), GUI_RIGHT, 0, ">");
+        gui_text_mid(x + w - 14, y, h, GUI_S_BODY, gui_mix(HEX_MUTED, HEX_INK, hl), GUI_RIGHT, 0, ">");
 }
 
 static void config_bottom(void *ctx) {

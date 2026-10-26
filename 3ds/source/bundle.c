@@ -47,8 +47,9 @@ static u64 read_u64_be(const u8 *buf) {
            ((u64)buf[6] << 8)  | ((u64)buf[7]);
 }
 
-// Parse file table and data from payload buffer
-// Returns file count on success, -1 on error, -2 if there are too many files
+// Parse file table and data from payload buffer, verifying each file's SHA-256
+// Returns file count on success, -1 on error, -2 if there are too many files,
+// -3 if a file's data does not match the hash in the file table
 static int parse_payload(const u8 *payload, u32 payload_size,
                          u32 file_count, ArchiveFile *files, int max_files) {
     if (file_count > (u32)max_files) return -2;
@@ -69,16 +70,29 @@ static int parse_payload(const u8 *payload, u32 payload_size,
         if (offset + 4 > payload_size) return -1;
         files[i].size = read_u32_le(payload + offset); offset += 4;
 
-        // Skip hash (we verify on server side)
+        // Hash is checked below, once the file data has been located
         if (offset + 32 > payload_size) return -1;
         offset += 32;
     }
+    u32 table_end = offset;
 
     // File data - point into the payload buffer
     for (u32 i = 0; i < file_count; i++) {
         if (files[i].size > payload_size - offset) return -1;
         files[i].data = (u8 *)(payload + offset);
         offset += files[i].size;
+    }
+
+    // Verify every file against its table hash before anything is written
+    offset = 0;
+    for (u32 i = 0; i < file_count && offset < table_end; i++) {
+        u16 path_len = read_u16_le(payload + offset);
+        offset += 2 + path_len + 4;
+
+        u8 hash[32];
+        sha256(files[i].data, files[i].size, hash);
+        if (memcmp(hash, payload + offset, 32) != 0) return -3;
+        offset += 32;
     }
 
     return (int)file_count;

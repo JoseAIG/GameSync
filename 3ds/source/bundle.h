@@ -22,7 +22,9 @@ u8 *bundle_create(u64 title_id, u32 timestamp,
 // that contains decompressed data - caller must free it.
 // If bundle is uncompressed, *out_decompressed is NULL and file data
 // points into bundle_data.
-// Returns -1 on error, -2 if the bundle has more than max_files files.
+// Every file is checked against the SHA-256 in the bundle's file table.
+// Returns -1 on error, -2 if the bundle has more than max_files files,
+// -3 if a file fails its SHA-256 check.
 int bundle_parse(const u8 *bundle_data, u32 bundle_size,
                  u64 *out_title_id, u32 *out_timestamp,
                  ArchiveFile *files, int max_files,

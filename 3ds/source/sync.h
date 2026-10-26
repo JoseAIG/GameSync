@@ -13,6 +13,10 @@ typedef enum {
     SYNC_ERR_BUNDLE,
     SYNC_ERR_TOO_LARGE,
     SYNC_ERR_TOO_MANY_FILES,
+    SYNC_ERR_INTEGRITY,      // Downloaded file failed its SHA-256 check
+    SYNC_ERR_BACKUP,         // Current save couldn't be backed up; nothing written
+    SYNC_ERR_RESTORED,       // Write failed; the previous save was put back
+    SYNC_ERR_RESTORE_FAILED, // Write failed and so did restoring the previous save
 } SyncResult;
 
 // Sync action decided by smart sync

@@ -269,7 +269,8 @@ bool archive_write(u64 title_id, FS_MediaType media_type,
     // Clear existing save data
     clear_dir(archive, "/");
 
-    // Write each file
+    // Write each file. On failure return without committing, so nothing
+    // half-written is made permanent (the caller restores the old save).
     for (int i = 0; i < file_count; i++) {
         char full_path[MAX_PATH_LEN];
         snprintf(full_path, sizeof(full_path), "/%s", files[i].path);
@@ -277,7 +278,11 @@ bool archive_write(u64 title_id, FS_MediaType media_type,
         ensure_parent_dirs(archive, full_path);
 
         // Create and write file
-        FSUSER_CreateFile(archive, fsMakePath(PATH_ASCII, full_path), 0, files[i].size);
+        res = FSUSER_CreateFile(archive, fsMakePath(PATH_ASCII, full_path), 0, files[i].size);
+        if (R_FAILED(res)) {
+            FSUSER_CloseArchive(archive);
+            return false;
+        }
 
         Handle file_handle;
         res = FSUSER_OpenFile(&file_handle, archive,
@@ -287,9 +292,10 @@ bool archive_write(u64 title_id, FS_MediaType media_type,
             return false;
         }
 
-        u32 bytes_written;
-        res = FSFILE_Write(file_handle, &bytes_written, 0,
-            files[i].data, files[i].size, FS_WRITE_FLUSH);
+        u32 bytes_written = 0;
+        if (files[i].size > 0)
+            res = FSFILE_Write(file_handle, &bytes_written, 0,
+                files[i].data, files[i].size, FS_WRITE_FLUSH);
         FSFILE_Close(file_handle);
 
         if (R_FAILED(res) || bytes_written != files[i].size) {
@@ -299,10 +305,10 @@ bool archive_write(u64 title_id, FS_MediaType media_type,
     }
 
     // CRITICAL: commit save data or changes are lost
-    FSUSER_ControlArchive(archive, ARCHIVE_ACTION_COMMIT_SAVE_DATA, NULL, 0, NULL, 0);
+    res = FSUSER_ControlArchive(archive, ARCHIVE_ACTION_COMMIT_SAVE_DATA, NULL, 0, NULL, 0);
 
     FSUSER_CloseArchive(archive);
-    return true;
+    return R_SUCCEEDED(res);
 }
 
 void archive_free_files(ArchiveFile *files, int count) {

@@ -66,6 +66,14 @@ The in-app config editor (L button) can also edit these values directly on the c
 | Key | Default | Meaning |
 |---|---|---|
 | `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. |
+| `local_backups` | `3` | Before a download or history restore overwrites a save, the current save is copied to `sdmc:/3ds/3dssync/backups/<TITLEID>/<YYYYMMDD-HHMMSS>/`. This many copies are kept per title (oldest deleted first); `0` disables the copies. |
+
+## Safety when writing saves
+
+- Every file of a downloaded bundle is checked against its SHA-256 before anything is written; a mismatch aborts the download.
+- The current save is backed up to the SD card first (see `local_backups`). If it cannot be read or backed up completely, nothing is written.
+- If writing or committing the new save fails, the previous save is written back. To recover by hand, copy the files from the backup folder into the save with a save manager such as Checkpoint.
+- A save with more than 64 files is refused instead of being uploaded incompletely.
 
 ## Controls
 

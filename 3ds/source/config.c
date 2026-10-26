@@ -72,6 +72,7 @@ static void skip_bom(char *str) {
 bool config_load(AppConfig *config, char *error_out, int error_size) {
     memset(config, 0, sizeof(AppConfig));
     config->utc_offset_minutes = 0;
+    config->local_backups = 3;
 
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) {
@@ -116,6 +117,12 @@ bool config_load(AppConfig *config, char *error_out, int error_size) {
             if (offset < -14 * 60) offset = -14 * 60;
             if (offset > 14 * 60) offset = 14 * 60;
             config->utc_offset_minutes = offset;
+        } else if (strcmp(key, "local_backups") == 0) {
+            // Copies of a save kept on the SD card before it is overwritten
+            int keep = atoi(val);
+            if (keep < 0) keep = 0;
+            if (keep > 50) keep = 50;
+            config->local_backups = keep;
         }
     }
 
@@ -258,6 +265,7 @@ bool config_save(const AppConfig *config) {
     if (config->nds_dir[0])
         fprintf(f, "nds_dir=%s\n", config->nds_dir);
     fprintf(f, "utc_offset_minutes=%d\n", config->utc_offset_minutes);
+    fprintf(f, "local_backups=%d\n", config->local_backups);
 
     fclose(f);
     return true;

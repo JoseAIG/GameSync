@@ -1,5 +1,6 @@
 #include "sync.h"
 #include "archive.h"
+#include "backup.h"
 #include "bundle.h"
 #include "config.h"
 #include "nds.h"
@@ -42,6 +43,10 @@ const char *sync_result_str(SyncResult result) {
         case SYNC_ERR_BUNDLE:   return "Bundle format error";
         case SYNC_ERR_TOO_LARGE: return "Save too large (over 448 KB compressed)";
         case SYNC_ERR_TOO_MANY_FILES: return "Save has too many files (max " STR(MAX_SAVE_FILES) ")";
+        case SYNC_ERR_INTEGRITY: return "SHA-256 mismatch in download";
+        case SYNC_ERR_BACKUP:   return "Backup failed, save untouched";
+        case SYNC_ERR_RESTORED: return "Write failed, old save restored";
+        case SYNC_ERR_RESTORE_FAILED: return "Write and restore failed!";
         default:                return "Unknown error";
     }
 }
@@ -252,6 +257,79 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
     return server_error(status);
 }
 
+// Map a bundle_parse error code to a SyncResult
+static SyncResult bundle_error(int code) {
+    if (code == -2) return SYNC_ERR_TOO_MANY_FILES;
+    if (code == -3) return SYNC_ERR_INTEGRITY;
+    return SYNC_ERR_BUNDLE;
+}
+
+// Read the current save of any kind of title (3DS archive, NDS .sav, NDS cart)
+static int read_title_save(const TitleInfo *title, ArchiveFile *files) {
+    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
+        return nds_cart_read_save(files, MAX_SAVE_FILES);
+    if (title->is_nds)
+        return nds_read_save(title->sav_path, files, MAX_SAVE_FILES);
+    return archive_read(title->title_id, title->media_type, files, MAX_SAVE_FILES);
+}
+
+static bool write_title_save(const TitleInfo *title, const ArchiveFile *files,
+                             int file_count) {
+    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
+        return nds_cart_write_save(files, file_count);
+    if (title->is_nds)
+        return nds_write_save(title->sav_path, files, file_count);
+    return archive_write(title->title_id, title->media_type, files, file_count);
+}
+
+// Replace a title's save with `files`. The current save is kept in memory to
+// restore it if the write fails, and copied to the SD card first
+// (config->local_backups copies are kept) so it can be recovered by hand.
+static SyncResult write_save_safely(const AppConfig *config, const TitleInfo *title,
+                                    const ArchiveFile *files, int file_count,
+                                    SyncProgressCb progress) {
+    char msg[128];
+    ArchiveFile *old_files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
+    if (!old_files) return SYNC_ERR_BACKUP;
+
+    int old_count = read_title_save(title, old_files);
+    if (old_count == ARCHIVE_ERR_TOO_MANY_FILES || old_count == ARCHIVE_ERR_READ) {
+        // A save exists but can't be copied completely: don't overwrite it
+        free(old_files);
+        return SYNC_ERR_BACKUP;
+    }
+    if (old_count < 0) old_count = 0;  // No current save, nothing to lose
+
+    if (old_count > 0 && config->local_backups > 0) {
+        snprintf(msg, sizeof(msg), "Backing up: %s", title->title_id_hex);
+        if (progress) progress(msg);
+        if (!backup_save(title->title_id_hex, old_files, old_count,
+                         config->local_backups, NULL, 0)) {
+            archive_free_files(old_files, old_count);
+            free(old_files);
+            return SYNC_ERR_BACKUP;
+        }
+    }
+
+    snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
+    if (progress) progress(msg);
+
+    SyncResult result = SYNC_OK;
+    if (!write_title_save(title, files, file_count)) {
+        result = SYNC_ERR_ARCHIVE;
+        if (old_count > 0) {
+            snprintf(msg, sizeof(msg), "Write failed, restoring: %s", title->title_id_hex);
+            if (progress) progress(msg);
+            result = write_title_save(title, old_files, old_count)
+                   ? SYNC_ERR_RESTORED : SYNC_ERR_RESTORE_FAILED;
+        }
+    }
+
+    archive_free_files(old_files, old_count);
+    free(old_files);
+    return result;
+}
+
 static SyncResult download_title(const AppConfig *config, const TitleInfo *title,
                                  SyncProgressCb progress) {
     char msg[128];
@@ -278,36 +356,26 @@ static SyncResult download_title(const AppConfig *config, const TitleInfo *title
         free(files);
         if (decompressed) free(decompressed);
         free(resp);
-        return file_count == -2 ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_BUNDLE;
+        return bundle_error(file_count);
     }
 
     // Compute hash of downloaded save (before write, while data is valid)
     char new_hash[65];
     bundle_compute_save_hash(files, file_count, new_hash);
 
-    snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
-    if (progress) progress(msg);
-
-    // Write save data
-    bool ok;
-    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
-        ok = nds_cart_write_save(files, file_count);
-    else if (title->is_nds)
-        ok = nds_write_save(title->sav_path, files, file_count);
-    else
-        ok = archive_write(title->title_id, title->media_type, files, file_count);
+    // Write save data (backs up and restores the current save on failure)
+    SyncResult result = write_save_safely(config, title, files, file_count, progress);
     free(files);
     // Free decompressed buffer if we had a compressed bundle
     // (file data pointers point into decompressed, not resp)
     if (decompressed) free(decompressed);
     free(resp);
 
-    if (ok) {
+    if (result == SYNC_OK) {
         // Download and write succeeded - save this hash as last synced state
         save_last_synced_hash(title->title_id_hex, new_hash);
-        return SYNC_OK;
     }
-    return SYNC_ERR_ARCHIVE;
+    return result;
 }
 
 SyncResult sync_title(const AppConfig *config, const TitleInfo *title,
@@ -901,30 +969,21 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
         free(files);
         if (decompressed) free(decompressed);
         free(resp);
-        return file_count == -2 ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_BUNDLE;
+        return bundle_error(file_count);
     }
 
     // Compute hash of the restored version while the file data is still valid
     char hash[65];
     bundle_compute_save_hash(files, file_count, hash);
 
-    snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
-    if (progress) progress(msg);
-
-    // Write save data
-    bool ok;
-    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
-        ok = nds_cart_write_save(files, file_count);
-    else if (title->is_nds)
-        ok = nds_write_save(title->sav_path, files, file_count);
-    else
-        ok = archive_write(title->title_id, title->media_type, files, file_count);
+    // Write save data (backs up and restores the current save on failure)
+    SyncResult result = write_save_safely(config, title, files, file_count, progress);
 
     free(files);
     if (decompressed) free(decompressed);
     free(resp);
 
-    if (!ok) return SYNC_ERR_ARCHIVE;
+    if (result != SYNC_OK) return result;
 
     // Update last synced hash with the downloaded version
     save_last_synced_hash(title->title_id_hex, hash);

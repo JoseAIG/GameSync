@@ -2,6 +2,7 @@ package com.savesync.android.workers
 
 import android.app.NotificationManager
 import android.content.Context
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
@@ -11,6 +12,7 @@ import com.savesync.android.api.ApiClient
 import com.savesync.android.emulators.EmulatorRegistry
 import com.savesync.android.emulators.EmudeckPaths
 import com.savesync.android.storage.SettingsStore
+import com.savesync.android.sync.HeldBackUploadStore
 import com.savesync.android.sync.SyncEngine
 import kotlinx.coroutines.flow.first
 
@@ -58,7 +60,14 @@ class SyncWorker(
             // Run sync
             val db = SaveSyncApp.instance.database
             val engine = SyncEngine(api, db, consoleId, settings.saturnSyncFormat)
+            // sync() = execute(plan(saves), emptySet()): uploads that look
+            // like a rollback are never made in the background.  They are
+            // logged by the engine and reported the next time the app opens.
             val result = engine.sync(saves)
+            if (result.skippedSuspects.isNotEmpty()) {
+                Log.w(TAG, "Held back ${result.skippedSuspects.size} suspect upload(s)")
+                HeldBackUploadStore.app.record(result.skippedSuspects)
+            }
 
             // Post notification
             val summary = buildString {
@@ -68,6 +77,9 @@ class SyncWorker(
                 }
                 if (result.errors.isNotEmpty()) {
                     append(", Errors: ${result.errors.size}")
+                }
+                if (result.skippedSuspects.isNotEmpty()) {
+                    append(", Held back: ${result.skippedSuspects.size}")
                 }
             }
             postNotification("Sync complete", summary)
@@ -96,6 +108,7 @@ class SyncWorker(
 
     companion object {
         const val WORK_NAME = "SaveSyncWorker"
+        private const val TAG = "SyncWorker"
         private const val NOTIFICATION_ID = 1001
     }
 }

@@ -230,6 +230,7 @@ internal fun isServerNotConfigured(message: String): Boolean =
 internal fun noticeKindForSaveMessage(message: String): GsNoticeKind = when {
     message.contains("Error", ignoreCase = true) -> GsNoticeKind.Error
     message.contains("Conflict", ignoreCase = true) -> GsNoticeKind.Warning
+    message.contains("Not uploaded", ignoreCase = true) -> GsNoticeKind.Warning
     else -> GsNoticeKind.Success
 }
 

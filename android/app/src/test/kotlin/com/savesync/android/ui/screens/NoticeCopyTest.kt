@@ -71,6 +71,32 @@ class NoticeCopyTest {
     }
 
     @Test
+    fun `held-back uploads make the sync-all notice a Warning that says so`() {
+        val r = com.savesync.android.sync.SyncResult(
+            1, 0, emptyList(), emptyList(),
+            skippedSuspects = listOf("Zelda"),
+            changedSincePreview = listOf("Mario"),
+        )
+        val n = syncAllNotice(r, emptyList(), {}, {})
+        assertEquals(GsNoticeKind.Warning, n.kind)
+        assertEquals(
+            "Sync done: 1 uploaded, 0 downloaded, 1 held back (smaller than the server copy), " +
+                "1 changed since the check — sync again",
+            n.message,
+        )
+    }
+
+    @Test
+    fun `a smart sync that held an upload back is a Warning`() {
+        assertEquals(
+            GsNoticeKind.Warning,
+            com.savesync.android.ui.components.noticeKindForSaveMessage(
+                "Not uploaded: this save is much smaller than the server's copy.",
+            ),
+        )
+    }
+
+    @Test
     fun `missing-folder banner copy`() {
         assertEquals(
             "Azahar folder not found — 3DS saves are hidden. Tap to fix.",

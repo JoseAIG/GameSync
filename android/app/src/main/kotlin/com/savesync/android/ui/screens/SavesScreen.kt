@@ -1217,7 +1217,11 @@ internal fun syncAllNotice(
     onReview: () -> Unit,
     onFix: () -> Unit,
 ): GsNotice {
-    val base = syncAllMessage(result.uploaded, result.downloaded, result.conflicts.size, result.errors)
+    val base = syncAllMessage(
+        result.uploaded, result.downloaded, result.conflicts.size, result.errors,
+        heldBack = result.skippedSuspects.size,
+        changed = result.changedSincePreview.size,
+    )
     if (result.errors.isNotEmpty()) return GsNotice(GsNoticeKind.Error, base)
     val message = overrideWarnings.firstOrNull()?.let { "$base\n$it" } ?: base
     return when {
@@ -1225,15 +1229,31 @@ internal fun syncAllNotice(
             GsNotice(GsNoticeKind.Warning, message, actionLabel = "Review", onAction = onReview)
         overrideWarnings.isNotEmpty() ->
             GsNotice(GsNoticeKind.Warning, message, actionLabel = "Fix", onAction = onFix)
+        // Something the user may want done wasn't: say so, as a warning.
+        result.skippedSuspects.isNotEmpty() || result.changedSincePreview.isNotEmpty() ->
+            GsNotice(GsNoticeKind.Warning, message)
         else -> GsNotice(GsNoticeKind.Success, base)
     }
 }
 
-/** "Sync done: 3 uploaded, 2 downloaded, 1 conflict" + the first error on its own line. */
-internal fun syncAllMessage(uploaded: Int, downloaded: Int, conflicts: Int, errors: List<String>): String =
+/**
+ * "Sync done: 3 uploaded, 2 downloaded, 1 conflict" + the first error on its
+ * own line.  [heldBack]: uploads skipped as suspected rollbacks; [changed]:
+ * saves skipped because they changed after the preview.
+ */
+internal fun syncAllMessage(
+    uploaded: Int,
+    downloaded: Int,
+    conflicts: Int,
+    errors: List<String>,
+    heldBack: Int = 0,
+    changed: Int = 0,
+): String =
     buildString {
         append("Sync done: $uploaded uploaded, $downloaded downloaded")
         if (conflicts > 0) append(", $conflicts conflict" + if (conflicts == 1) "" else "s")
+        if (heldBack > 0) append(", $heldBack held back (smaller than the server copy)")
+        if (changed > 0) append(", $changed changed since the check — sync again")
         if (errors.isNotEmpty()) {
             append(", ${errors.size} error" + if (errors.size == 1) "" else "s")
             append("\n").append(errors.first())

@@ -2938,8 +2938,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     if (result.conflicts.isNotEmpty()) append("⚠ Conflict detected — use Upload or Download to force. ")
                     if (result.errors.isNotEmpty()) append("✗ Error: ${result.errors.first()}. ")
+                    // Rollback protection: a much smaller save (or one with
+                    // fewer files) is never uploaded without being asked.
+                    if (result.skippedSuspects.isNotEmpty()) {
+                        append("Not uploaded: this save is much smaller than the server's copy. ")
+                        append("Use Force Upload if it is the one you want. ")
+                    }
                     if (result.uploaded == 0 && result.downloaded == 0
-                        && result.conflicts.isEmpty() && result.errors.isEmpty()) {
+                        && result.conflicts.isEmpty() && result.errors.isEmpty()
+                        && result.skippedSuspects.isEmpty()) {
                         append("Already in sync with server.")
                     }
                 }

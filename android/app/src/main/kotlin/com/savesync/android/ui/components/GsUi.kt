@@ -75,7 +75,9 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.max
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.runtime.State
 import androidx.compose.ui.graphics.graphicsLayer
@@ -269,6 +271,33 @@ fun GsHitTarget(
         contentAlignment = Alignment.Center,
     ) {
         visual(Modifier.indication(source, rememberRipple()))
+    }
+}
+
+/**
+ * A fixed 48dp header slot that shows a 20dp spinner while [busy], else
+ * [content] (normally an IconButton), cross-fading between the two.  Every
+ * header busy indicator lives in one, so nothing shifts under the finger.
+ */
+@Composable
+fun GsActionSlot(busy: Boolean, content: @Composable () -> Unit) {
+    Crossfade(
+        targetState = busy,
+        animationSpec = GsMotion.fade(),
+        modifier = Modifier.size(48.dp),
+        label = "actionSlot",
+    ) { showBusy ->
+        Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+            if (showBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = GsColors.Accent,
+                )
+            } else {
+                content()
+            }
+        }
     }
 }
 

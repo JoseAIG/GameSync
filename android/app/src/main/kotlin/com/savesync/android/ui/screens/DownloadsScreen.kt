@@ -28,6 +28,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -203,10 +204,17 @@ fun DownloadsScreen(
     val chromeSpec = remember(finishedCount, activeCount, primaryLabel, selectedStatus, selectedTerminal) {
         GsChromeSpec(
             actions = {
-                if (finishedCount > 0) {
-                    TextButton(onClick = { viewModel.clearFinishedDownloads() }) {
-                        Text("Clear finished", color = GsColors.Accent)
-                    }
+                // Always present, so the header never shifts; disabled with
+                // nothing to clear (the component draws the disabled state).
+                TextButton(
+                    onClick = { viewModel.clearFinishedDownloads() },
+                    enabled = finishedCount > 0,
+                    colors = ButtonDefaults.textButtonColors(
+                        contentColor = GsColors.Accent,
+                        disabledContentColor = GsColors.Muted,
+                    ),
+                ) {
+                    Text("Clear finished")
                 }
             },
             hints = buildList {

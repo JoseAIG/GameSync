@@ -85,6 +85,7 @@ import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
+import com.savesync.android.ui.components.GsActionSlot
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsSubTabRow
@@ -306,16 +307,9 @@ fun SavesScreen(
                         modifier = Modifier.padding(end = 4.dp)
                     )
                 }
-                // Sync all (X button); spins for a single A sync too
-                if (busy) {
-                    Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp,
-                            color = GsColors.Accent
-                        )
-                    }
-                } else {
+                // Sync all (X button); spins for a single A sync too, in
+                // the same fixed slot so nothing shifts under the finger.
+                GsActionSlot(busy = busy) {
                     IconButton(onClick = { showSyncConfirmDialog = true }) {
                         Icon(Icons.Default.Sync, contentDescription = "Sync all (X)", tint = GsColors.Text)
                     }

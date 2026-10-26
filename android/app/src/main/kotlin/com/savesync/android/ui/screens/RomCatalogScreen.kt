@@ -77,6 +77,7 @@ import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsDialog
 import com.savesync.android.ui.components.GsDialogChoice
+import com.savesync.android.ui.components.GsActionSlot
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsSubTabRow
@@ -347,13 +348,9 @@ fun RomCatalogScreen(
     val chromeSpec = remember(showSpinner, raOnly, clearSearchHint) {
         GsChromeSpec(
             actions = {
-                if (showSpinner) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                        color = GsColors.Accent,
-                    )
-                }
+                // A refresh behind a cached list spins here; the slot is
+                // always reserved so the search button never moves.
+                GsActionSlot(busy = showSpinner) {}
                 IconButton(onClick = {
                     searchVisible = !searchVisible
                     if (!searchVisible) query = ""

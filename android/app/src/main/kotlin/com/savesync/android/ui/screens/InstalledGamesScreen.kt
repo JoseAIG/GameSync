@@ -65,6 +65,7 @@ import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsDialog
 import com.savesync.android.ui.components.GsDialogChoice
+import com.savesync.android.ui.components.GsActionSlot
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsSubTabRow
@@ -233,21 +234,17 @@ fun InstalledGamesScreen(
     val chromeSpec = remember(loading, clearSearchHint) {
         GsChromeSpec(
             actions = {
-                if (loading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(18.dp),
-                        strokeWidth = 2.dp,
-                        color = GsColors.Accent,
-                    )
-                }
                 IconButton(onClick = {
                     searchVisible = !searchVisible
                     if (!searchVisible) query = ""
                 }) {
                     Icon(Icons.Filled.Search, contentDescription = "Search (Y)", tint = GsColors.Text)
                 }
-                IconButton(onClick = { viewModel.scanInstalledRoms(force = true) }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "Rescan (X)", tint = GsColors.Text)
+                // Rescan spins in its own slot while a scan runs.
+                GsActionSlot(busy = loading) {
+                    IconButton(onClick = { viewModel.scanInstalledRoms(force = true) }) {
+                        Icon(Icons.Filled.Refresh, contentDescription = "Rescan (X)", tint = GsColors.Text)
+                    }
                 }
             },
             hints = listOf(

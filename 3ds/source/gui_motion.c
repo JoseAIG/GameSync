@@ -64,8 +64,8 @@ void gui_spring_bouncy(GuiSpring *s, float target, float response, float damping
     if (gui_spring_resting(s, target)) gui_spring_set(s, target);
 }
 
-// (o * d * c) / (d + c * |o|): follows 1:1 near the bound (slope c), then
-// ever less, approaching d * c
+// (o * d * c) / (d + c * |o|): slope c near the bound, then ever less,
+// approaching d
 float gui_rubberband(float overshoot, float dimension, float constant) {
     if (dimension <= 0) return 0;
     return (overshoot * dimension * constant) / (dimension + constant * fabsf(overshoot));

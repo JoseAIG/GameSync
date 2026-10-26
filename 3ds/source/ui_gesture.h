@@ -90,4 +90,134 @@ typedef struct {
 // = the index to draw pressed or -1. A rect with no area never arms.
 int ui_tap_buttons(UiTap *t, const UiInput *in, const GuiRect *r, int n, int *pressed_out);
 
+// ---------------------------------------------------------------------------
+// List controller: keys, taps, drag, momentum and rubber band
+// ---------------------------------------------------------------------------
+//
+// The selection and the scroll stay plain ints owned by the caller (they
+// are what hit-testing of data windows and v055's key logic work on); the
+// springs below are what is drawn, in rows. Per frame the caller:
+//
+//   ev = ui_list_input(&anim, &geom, count, &selected, &scroll, &in, in.rep & UI_LIST_KEYS);
+//   if (ev.kind != UI_LIST_REATTACHED) { its v055 key handling (ui_list_keys, update_scroll) }
+//   ... acts on ev (UI_LIST_TAP / UI_LIST_TAP_SELECTED) ...
+//   ui_list_draw(&anim, &geom, count, selected, scroll, row_fn, ctx);   // steps the motion
+//
+// Touch: a touch-down presses the row under it; past 8 px of vertical
+// travel it becomes a drag that tracks the finger 1:1 (with a rubber band
+// past the ends) and the tap is cancelled. On release the scroll coasts
+// from the release velocity and lands exactly on the row the momentum
+// projects to (Apple's scroll deceleration, rate 0.998), or bounces softly
+// off an end the projection crossed. A touch while it coasts stops it.
+// A drag leaves the selection where it was, possibly off screen
+// ("detached"): the next UP/DOWN/page key then selects the nearest visible
+// row instead of moving (UI_LIST_REATTACHED), and ui_list_reveal() brings
+// the selection back into view when A/Y act on it.
+
+#define UI_LIST_KEYS (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT)
+#define UI_LIST_DRAG_PX 8.0f         // drag / tap disambiguation
+#define UI_LIST_SAMPLES 6
+#define UI_LIST_VELOCITY_MS 60       // release velocity from the last 60 ms
+#define UI_LIST_RUBBER 0.55f
+#define UI_DECEL_RATE 0.998f         // per ms, Apple's normal scroll deceleration
+
+typedef struct {
+    float x, y, w;        // top-left of the list, width
+    int rows;             // visible rows (a page)
+    float row_h;
+    bool clip;            // inside a card: clip the rows to the list rect
+    bool edges;           // under a header / above an action bar: scroll-edge shadows
+} UiListGeom;
+
+typedef enum {
+    UI_LIST_NONE = 0,
+    UI_LIST_TAP,            // a row was tapped (and is now selected)
+    UI_LIST_TAP_SELECTED,   // the row that was already selected was tapped
+    UI_LIST_REATTACHED,     // a move key selected the nearest visible row: skip the move
+} UiListEventKind;
+
+typedef struct {
+    UiListEventKind kind;
+    int index;   // the row tapped
+    float px;    // screen x of the tap (e.g. to test a mark box)
+} UiListEvent;
+
+typedef enum {
+    UI_COAST_NONE = 0,
+    UI_COAST_EXP,      // decelerating onto a whole row inside the list
+    UI_COAST_SETTLE,   // spring onto the nearest row (tiny flick / stopped)
+    UI_COAST_DECAY,    // decelerating toward an end the projection crossed
+    UI_COAST_BOUNCE,   // past that end: damping 0.8 spring back
+    UI_COAST_RETURN,   // released while pulled past an end: damping 1 back
+} UiCoastMode;
+
+typedef struct {
+    GuiSpring sel;            // highlight position, rows
+    GuiSpring scroll;         // viewport top, rows; past an end it is the raw
+                              // finger position, drawn through the rubber band
+    int count;
+    bool init;
+    // Gesture
+    bool tracking, dragging, coasting, detached;
+    float grab_y, grab_scroll;
+    struct { float y; u64 ms; } samples[UI_LIST_SAMPLES];
+    int nsamples;
+    float coast_target, coast_lambda;
+    bool coast_to_edge;
+    int pressed_row;          // valid while tracking && !dragging, -1 none
+    GuiSpring nudge;          // px added to the highlight: the end-of-list nudge
+    u64 wrap_ms;              // last wrap (rows cross-fade), 0 = none
+    u64 flash_ms;             // last wrap or clamp (scrollbar flash), 0 = none
+    bool snap;                // a wrap: jump to the new selection on the next step
+    u8 coast_mode;            // UiCoastMode
+    bool no_tap;              // this touch stopped a coast: no tap on release
+    bool froze;               // this touch stopped a coast at a fractional row
+    int sel_at_down;
+    bool wb_pending;          // a coast ended: *scroll = wb at the next input
+    int wb;
+    bool range_on;            // optional landing range (catalog live window)
+    int range_lo, range_hi;
+    float release_v;          // |velocity| at release, rows/s
+    u32 coast_overspeed;      // frames a coast ran faster than its release (should stay 0)
+    int rows;                 // geometry of the last input / draw
+    float row_h;
+    u32 frame;                // last stepped frame (ui.c)
+} UiListAnim;
+
+// Report an edge the caller's key handler hit (only it knows a key was
+// pressed): a wrap jumps and cross-fades the rows in; a press that can't
+// move further nudges the highlight 6 px that way. Both flash the thumb.
+typedef enum {
+    UI_EDGE_WRAP = 0,
+    UI_EDGE_CLAMP_TOP,
+    UI_EDGE_CLAMP_BOTTOM,
+} UiListEdge;
+void ui_list_edge(UiListAnim *a, UiListEdge edge);
+
+// v055's list keys on `*selected`: UP / DOWN move one row and wrap, LEFT /
+// RIGHT move `page` rows and clamp, reporting edges to ui_list_edge().
+void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected);
+
+UiListEvent ui_list_input(UiListAnim *a, const UiListGeom *g, int count, int *selected, int *scroll,
+                          const UiInput *in, u32 keys_moved);
+// Advance the motion by dt seconds (ui_list_draw does this once a frame)
+void ui_list_step(UiListAnim *a, int rows, float row_h, int count, int selected, int scroll, float dt);
+
+// The viewport top as drawn (rows, through the rubber band past the ends)
+float ui_list_view(const UiListAnim *a);
+// floor(view), clamped to >= 0: the first row on screen, for data windows
+int ui_list_first_visible(const UiListAnim *a);
+// No finger on it and no coast running
+bool ui_list_settled(const UiListAnim *a);
+// Row drawn pressed (a finger is on it, not dragging), or -1
+int ui_list_pressed_row(const UiListAnim *a);
+// Start over (new data): the next input/draw takes the caller's ints as is
+void ui_list_reset(UiListAnim *a);
+// A/Y act on the selection: stop any coast, write the viewport back and
+// scroll `*scroll` (GUI_RESP_SELECT, or a snap past a page) to show it
+void ui_list_reveal(UiListAnim *a, int count, int selected, int *scroll);
+// Limit where a coast may land (rows [lo, hi]); for a partly loaded list
+void ui_list_set_range(UiListAnim *a, int lo, int hi);
+void ui_list_clear_range(UiListAnim *a);
+
 #endif // UI_GESTURE_H

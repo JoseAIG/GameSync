@@ -96,6 +96,12 @@ void gui_exit(void);
 // draws right away (progress updates in the middle of a transfer). Also
 // samples the monotonic clock: see gui_now_ms() / gui_dt().
 void gui_begin(bool vsync);
+
+#ifdef GUI_PERF
+// Frames in which a list coast ran faster than its release velocity
+// (drawn in red by the overlay; must stay 0)
+extern u32 gui_perf_coast_overspeed;
+#endif
 // Select and clear a screen (GUI_TOP / GUI_BOTTOM), draws the background
 void gui_screen(int screen);
 void gui_end(void);
@@ -206,6 +212,9 @@ typedef enum {
     GUI_BTN_DISABLED,
 } GuiBtnStyle;
 void gui_btn(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex, bool pressed);
+// The same; `on` = a TONAL toggle that is on: fill tinted toward the tone
+void gui_btn_ex(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex,
+                bool pressed, bool on);
 // Width of the glyph + label inside a button (without padding)
 float gui_btn_content_w(const char *glyph, const char *label);
 

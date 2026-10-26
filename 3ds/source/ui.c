@@ -460,8 +460,6 @@ void ui_busy(const char *title, const char *message) {
 #define CHOICE_ROWS 7
 #define CHOICE_ROW_H 22
 
-static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float row_h,
-                      int count, int selected, int scroll, UiRowFn row, void *ctx, bool contained);
 
 typedef struct {
     const char *const *items;
@@ -477,7 +475,8 @@ static const UiButton choice_buttons[2] = { { KEY_B, "B", "Cancel" }, { KEY_A, "
 
 typedef struct {
     int rows;
-    float y, h, list_y;
+    float y, h;
+    UiListGeom list;
     GuiRect draw[2], touch[2];
 } ChoiceGeom;
 
@@ -485,7 +484,8 @@ static void choice_geom(int count, ChoiceGeom *g) {
     g->rows = count < CHOICE_ROWS ? count : CHOICE_ROWS;
     g->h = 24 + 4 + g->rows * CHOICE_ROW_H + 2 + DLG_BTN_AREA;
     g->y = (GUI_H - g->h) / 2;
-    g->list_y = g->y + 24 + 4;
+    UiListGeom list = { DLG_X + 3, g->y + 24 + 4, DLG_W - 6, g->rows, CHOICE_ROW_H, true, false };
+    g->list = list;
     card_buttons(g->y, g->h, 2, g->draw, g->touch);
 }
 
@@ -496,7 +496,8 @@ static void draw_choice(UiTone tone, const char *title, const char *const *items
     gui_dim();
     gui_card(DLG_X, g->y, DLG_W, g->h, title, hex);
     ChoiceView c = { items };
-    list_draw(anim, DLG_X + 3, g->list_y, DLG_W - 6, g->rows, CHOICE_ROW_H, count, selected, scroll, choice_row, &c, true);
+    // Clipped to the card's list area, so rows can glide and be dragged
+    ui_list_draw(anim, &g->list, count, selected, scroll, choice_row, &c);
     for (int i = 0; i < 2; i++)
         gui_btn(g->draw[i], choice_buttons[i].button, choice_buttons[i].label,
                 i == 1 ? GUI_BTN_PRIMARY : GUI_BTN_TONAL, hex,
@@ -516,13 +517,16 @@ int ui_choose(UiTone tone, const char *title, const char *const *items, int coun
     UiInput in;
     while (ui_input_scan(&in)) {
         armed = (armed | in.down) & in.held;
-        ui_list_keys(&anim, in.rep, count, g.rows, &selected);
-        if (selected < scroll) scroll = selected;
-        if (selected >= scroll + g.rows) scroll = selected - g.rows + 1;
-        if (in.t_down) {
-            // A tap picks the row right away
-            int i = ui_list_touch(in.ty, g.list_y, g.rows, CHOICE_ROW_H, count, scroll);
-            if (i >= 0) { result = i; break; }
+        UiListEvent ev = ui_list_input(&anim, &g.list, count, &selected, &scroll, &in, in.rep & UI_LIST_KEYS);
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
+            ui_list_keys(&anim, in.rep, count, g.rows, &selected);
+            if (selected < scroll) scroll = selected;
+            if (selected >= scroll + g.rows) scroll = selected - g.rows + 1;
+        }
+        // Any tap on a row picks it, on release
+        if (ev.kind == UI_LIST_TAP || ev.kind == UI_LIST_TAP_SELECTED) {
+            result = ev.index;
+            break;
         }
         int pressed = -1;
         int hit = ui_tap_buttons(&tap, &in, g.touch, 2, &pressed);
@@ -567,24 +571,6 @@ UiNav ui_tab_nav(u32 down) {
 // List
 // ---------------------------------------------------------------------------
 
-// `contained`: the list sits inside a card (ui_choose), where nothing is
-// drawn over its edges afterwards. Until lists can clip, the content then
-// steps a row at a time like v055 (only the highlight glides) and only rows
-// inside the viewport are drawn.
-void ui_list_edge(UiListAnim *a, UiListEdge edge) {
-    u64 now = gui_clock_ms();
-    if (now == 0) now = 1;   // 0 means "never"
-    a->flash_ms = now;
-    if (edge == UI_EDGE_WRAP) {
-        a->wrap_ms = now;
-        a->snap = true;
-    } else if (!gui_reduce_motion()) {
-        // The sign follows the press: up for LEFT / UP, down for RIGHT / DOWN
-        a->nudge.x = edge == UI_EDGE_CLAMP_TOP ? -6.0f : 6.0f;
-        a->nudge.v = 0;
-    }
-}
-
 // 1 at `since_ms`, falling to 0 over GUI_FADE_MS (0 when `since_ms` is 0)
 static float edge_fade(u64 since_ms) {
     u64 now = gui_now_ms();
@@ -592,90 +578,108 @@ static float edge_fade(u64 since_ms) {
     return 1.0f - (float)(now - since_ms) / GUI_FADE_MS;
 }
 
-static void list_draw(UiListAnim *a, float x, float y, float w, int rows, float row_h,
-                      int count, int selected, int scroll, UiRowFn row, void *ctx, bool contained) {
-    if (!a->init || a->count != count) {
-        gui_spring_set(&a->sel, (float)selected);
-        gui_spring_set(&a->scroll, (float)scroll);
-        a->count = count;
-        a->init = true;
+bool ui_list_at_top(const UiListAnim *a) {
+    return !a->init || ui_list_view(a) <= 0.01f;
+}
+
+void ui_list_draw(UiListAnim *a, const UiListGeom *g, int count, int selected, int scroll,
+                  UiRowFn row, void *ctx) {
+    // Once a frame, also when drawn behind a dialog or a progress card
+    if (!a->init || a->frame != gui_ticks()) {
+        a->frame = gui_ticks();
+        ui_list_step(a, g->rows, g->row_h, count, selected, scroll, gui_dt());
     }
-    // A wrap jumps (gliding across the whole list would sweep every row)
-    if (a->snap) {
-        gui_spring_set(&a->sel, (float)selected);
-        gui_spring_set(&a->scroll, (float)scroll);
-        a->snap = false;
-    }
-    // Long jumps snap, short moves glide. The springs keep their velocity
-    // across retargets, so a held D-pad glides continuously.
-    if (fabsf(a->sel.x - selected) > rows) gui_spring_set(&a->sel, (float)selected);
-    if (fabsf(a->scroll.x - scroll) > rows || contained) gui_spring_set(&a->scroll, (float)scroll);
-    float dt = gui_dt();
-    gui_spring(&a->sel, (float)selected, GUI_RESP_SELECT, dt);
-    gui_spring(&a->scroll, (float)scroll, GUI_RESP_SELECT, dt);
-    gui_spring(&a->nudge, 0, GUI_RESP_NUDGE, dt);
+#ifdef GUI_PERF
+    // A coast running faster than its release velocity must never happen:
+    // the overlay shows the count in red if it does
+    if (a->coast_overspeed > gui_perf_coast_overspeed) gui_perf_coast_overspeed = a->coast_overspeed;
+#endif
+    float view = ui_list_view(a);
+    float list_h = g->rows * g->row_h;
+    if (g->clip) gui_clip(g->x, g->y, g->w, list_h);
 
     // After a wrap the rows fade in from 30% (toward the background)
     float wrap = edge_fade(a->wrap_ms);
     if (wrap > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(0.7f * wrap * 255)));
 
-    bool bar = count > rows;
-    float rw = bar ? w - 7 : w;
+    bool bar = count > g->rows;
+    float rw = bar ? g->w - 7 : g->w;
+    int pressed = ui_list_pressed_row(a);
+    bool pressed_on_bar = pressed >= 0 && fabsf((float)pressed - a->sel.x) < 0.5f && selected >= 0;
+    // The row under a finger: a soft fill (on the bar the bar darkens instead)
+    if (pressed >= 0 && !pressed_on_bar)
+        gui_rrect(g->x + 3, g->y + (pressed - view) * g->row_h + 1, rw - 6, g->row_h - 2, 5,
+                  gui_mix(HEX_BG, HEX_ACCENT, 0.25f));
     if (count > 0 && selected >= 0) {
-        float sy = y + (a->sel.x - a->scroll.x) * row_h + a->nudge.x;
-        gui_rrect(x + 3, sy + 1, rw - 6, row_h - 2, 5, gui_rgb(HEX_ACCENT));
+        float sy = g->y + (a->sel.x - view) * g->row_h + a->nudge.x;
+        gui_rrect(g->x + 3, sy + 1, rw - 6, g->row_h - 2, 5,
+                  pressed_on_bar ? gui_mix(HEX_ACCENT, 0x000000, 0.20f) : gui_rgb(HEX_ACCENT));
     }
-    int first = (int)floorf(a->scroll.x);
-    int last = contained ? first + rows - 1 : first + rows;
-    for (int i = first; i <= last && i < count; i++) {
+    int first = (int)floorf(view);
+    for (int i = first; i <= first + g->rows + 1 && i < count; i++) {
         if (i < 0) continue;
-        float ry = y + (i - a->scroll.x) * row_h;
-        if (ry < y - row_h || ry > y + rows * row_h) continue;
+        float ry = g->y + (i - view) * g->row_h;
         float hl = 1.0f - fabsf((float)i - a->sel.x);
-        if (hl < 0) hl = 0;
-        if (selected < 0) hl = 0;
-        row(ctx, i, x, ry, rw, row_h, hl, false);
+        if (hl < 0 || selected < 0) hl = 0;
+        row(ctx, i, g->x, ry, rw, g->row_h, hl, i == pressed);
     }
     if (wrap > 0) C2D_Fade(0);
-    // Mask the row sliding out at the bottom
-    if (!contained) gui_rect(x, y + rows * row_h, w, row_h, gui_rgb(HEX_BG));
+    if (g->clip) gui_clip_off();
+
+    // Content under the header / the action bar: a soft shadow instead of
+    // a hard line (the header draws its line only while the list is at
+    // the top, see ui_list_at_top)
+    if (g->edges)
+        gui_scroll_edges(g->x, g->w, g->y, g->y + list_h, view > 0.01f, view + g->rows < count - 0.01f);
+
     // The thumb flashes bright at an edge and settles back to dim
     if (bar)
-        gui_scrollbar_ex(x + w - 6, y + 3, rows * row_h - 6, rows, count, a->scroll.x,
+        gui_scrollbar_ex(g->x + g->w - 6, g->y + 3, list_h - 6, g->rows, count, view,
                          gui_mix_hex(HEX_DIM, HEX_TEXT, edge_fade(a->flash_ms)));
 }
 
-void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
-             int count, int selected, int scroll, UiRowFn row, void *ctx) {
-    list_draw(a, x, y, w, rows, row_h, count, selected, scroll, row, ctx, false);
+// ---------------------------------------------------------------------------
+// Action bar
+// ---------------------------------------------------------------------------
+
+float ui_bar_layout(const UiBarItem *items, int n, GuiRect *draw, GuiRect *touch) {
+    if (n > UI_BAR_MAX) n = UI_BAR_MAX;
+    const float margin = 8, gap = GUI_BTN_GAP, by = GUI_BAR_Y + (GUI_BAR_H - GUI_BTN_H) / 2;
+    float inner = GUI_BOT_W - 2 * margin;
+    float w0 = items[0].width > 0 ? items[0].width : gui_btn_content_w(items[0].glyph, items[0].label) + 24;
+    if (items[0].width <= 0 && w0 < 120) w0 = 120;
+    float rest = n > 1 ? (inner - w0 - gap * (n - 1)) / (n - 1) : 0;
+    if (n > 1 && rest < GUI_BTN_MIN_W) rest = GUI_BTN_MIN_W;
+    float x = margin;
+    for (int i = 0; i < n; i++) {
+        float w = i == 0 ? w0 : (items[i].width > 0 ? items[i].width : rest);
+        draw[i] = gui_rect_make(x, by, w, GUI_BTN_H);
+        float tx0 = i == 0 ? 0 : x - gap / 2, tx1 = i == n - 1 ? GUI_BOT_W : x + w + gap / 2;
+        touch[i] = gui_rect_make(tx0, GUI_BAR_Y, tx1 - tx0, GUI_BAR_H);
+        x += w + gap;
+    }
+    return x - gap;
 }
 
-void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected) {
-    if (count <= 0) return;
-    int s = *selected;
-    if (rep & KEY_UP) {
-        if (s == 0) ui_list_edge(a, count > 1 ? UI_EDGE_WRAP : UI_EDGE_CLAMP_TOP);
-        s = (s - 1 + count) % count;
-    }
-    if (rep & KEY_DOWN) {
-        if (s == count - 1) ui_list_edge(a, count > 1 ? UI_EDGE_WRAP : UI_EDGE_CLAMP_BOTTOM);
-        s = (s + 1) % count;
-    }
-    if (rep & KEY_LEFT) {
-        if (s == 0) ui_list_edge(a, UI_EDGE_CLAMP_TOP);
-        s = s - page < 0 ? 0 : s - page;
-    }
-    if (rep & KEY_RIGHT) {
-        if (s == count - 1) ui_list_edge(a, UI_EDGE_CLAMP_BOTTOM);
-        s = s + page >= count ? count - 1 : s + page;
-    }
-    *selected = s;
+int ui_bar_input(UiBar *bar, const UiInput *in, const UiBarItem *items, int n) {
+    GuiRect draw[UI_BAR_MAX], touch[UI_BAR_MAX];
+    if (n > UI_BAR_MAX) n = UI_BAR_MAX;
+    ui_bar_layout(items, n, draw, touch);
+    for (int i = 0; i < n; i++)
+        if (items[i].style == GUI_BTN_DISABLED) touch[i].w = 0;
+    return ui_tap_buttons(&bar->tap, in, touch, n, &bar->pressed);
 }
 
-int ui_list_touch(float ty, float y, int rows, float row_h, int count, int scroll) {
-    if (ty < y || ty >= y + rows * row_h) return -1;
-    int i = scroll + (int)((ty - y) / row_h);
-    return (i >= 0 && i < count) ? i : -1;
+void ui_bar_draw(const UiBar *bar, const UiBarItem *items, int n, u32 held) {
+    GuiRect draw[UI_BAR_MAX], touch[UI_BAR_MAX];
+    if (n > UI_BAR_MAX) n = UI_BAR_MAX;
+    gui_rect(0, GUI_BAR_Y, GUI_BOT_W, GUI_BAR_H, gui_rgb(HEX_BG2));
+    if (n <= 0) return;
+    ui_bar_layout(items, n, draw, touch);
+    for (int i = 0; i < n; i++) {
+        bool pressed = (bar && bar->pressed == i) || (items[i].keys & held);
+        gui_btn_ex(draw[i], items[i].glyph, items[i].label, items[i].style, items[i].tone, pressed, items[i].on);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -863,33 +867,83 @@ static void saves_row(void *ctx, int index, float x, float y, float w, float h, 
     }
 }
 
+// Right side of the Saves header: "N saves", and left of it the
+// "B N marked x" chip when something is marked (its draw rect)
+#define CHIP_H 18
+
+static void saves_header_layout(const SavesView *v, char *count, size_t count_size, char *marked,
+                                size_t marked_size, GuiRect *chip) {
+    snprintf(count, count_size, "%d save%s", v->count, v->count == 1 ? "" : "s");
+    *chip = gui_rect_make(0, 0, 0, 0);
+    marked[0] = '\0';
+    if (v->marked <= 0) return;
+    snprintf(marked, marked_size, "%d marked", v->marked);
+    float w = 5 + gui_button_w("B") + 4 + gui_text_w(GUI_S_TINY, marked) + 5 + 8 + 6;
+    float right = GUI_BOT_W - 8 - gui_text_w(GUI_S_SMALL, count) - 6;
+    *chip = gui_rect_make(right - w, (GUI_HEADER_H - CHIP_H) / 2.0f, w, CHIP_H);
+}
+
+GuiRect ui_saves_marked_chip(const SavesView *v) {
+    char count[32], marked[24];
+    GuiRect chip;
+    saves_header_layout(v, count, sizeof(count), marked, sizeof(marked), &chip);
+    if (chip.w <= 0) return chip;
+    // The whole header height, and a little to the sides
+    return gui_rect_make(chip.x - 4, 0, chip.w + 8, GUI_HEADER_H);
+}
+
+static bool title_in_conflict(const TitleInfo *t) {
+    return t->in_conflict || t->sync_state == TSTATE_CONFLICT;
+}
+
+int ui_saves_bar(const SavesView *v, UiBarItem *items) {
+    static char upload[32];   // the items point into it until the next call
+    bool any = v->count > 0 && v->selected >= 0 && v->selected < v->count;
+    const char *a = "Sync";
+    if (v->marked > 0) {
+        snprintf(upload, sizeof(upload), "Upload %d marked", v->marked);
+        a = upload;
+    } else if (any && title_in_conflict(&v->titles[v->filtered[v->selected]])) {
+        a = "Resolve";
+    }
+    items[SAVES_BAR_A] = (UiBarItem){ "A", a, any ? GUI_BTN_PRIMARY : GUI_BTN_DISABLED, 0, KEY_A, 0, false };
+    items[SAVES_BAR_X] = (UiBarItem){ "X", "Sync all", v->title_count > 0 ? GUI_BTN_TONAL : GUI_BTN_DISABLED,
+                                      0, KEY_X, 0, false };
+    items[SAVES_BAR_Y] = (UiBarItem){ "Y", "Details", any ? GUI_BTN_TONAL : GUI_BTN_DISABLED, 0, KEY_Y, 0, false };
+    return SAVES_BAR_COUNT;
+}
+
 void ui_draw_saves_bottom(const SavesView *v) {
+    UiListGeom g = SAVES_GEOM;
     if (v->count > 0) {
-        ui_list(v->anim, 0, SAVES_LIST_Y, GUI_BOT_W, SAVES_ROWS, SAVES_ROW_H,
-                v->count, v->selected, v->scroll, saves_row, (void *)v);
+        ui_list_draw(v->anim, &g, v->count, v->selected, v->scroll, saves_row, (void *)v);
     } else {
         gui_text(GUI_BOT_W / 2.0f, 104, GUI_S_BODY, gui_rgb(HEX_DIM), GUI_CENTER, "No saves to show");
     }
 
-    gui_header_bar();
+    gui_header_bar_ex(v->count == 0 || ui_list_at_top(v->anim));
     static const char *const tabs[] = { "All", "3DS", "NDS" };
     float tx = 6 + gui_button(6, GUI_HEADER_H / 2.0f, "SELECT") + 4;
     gui_tabs(tx, 4, 18, tabs, 3, v->view_mode);
-    char count[32];
-    snprintf(count, sizeof(count), "%d save%s", v->count, v->count == 1 ? "" : "s");
-    float right = GUI_BOT_W - 8;
-    right -= gui_text_mid(right, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, count) + 6;
-    if (v->marked > 0) {
-        char marked[24];
-        snprintf(marked, sizeof(marked), "%d marked", v->marked);
-        float w = gui_pill_w(15, GUI_S_TINY, marked);
-        gui_pill(right - w, 5.5f, 15, GUI_S_TINY, gui_rgb(HEX_ACCENT), gui_rgb(HEX_INK), marked);
+    char count[32], marked[24];
+    GuiRect chip;
+    saves_header_layout(v, count, sizeof(count), marked, sizeof(marked), &chip);
+    gui_text_mid(GUI_BOT_W - 8, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, count);
+    if (chip.w > 0) {
+        // "B 3 marked x": a tap on it (or B) unmarks everything
+        bool down = v->chip_pressed || (v->held & KEY_B);
+        GuiRect r = down ? gui_rect_grow(chip, -1) : chip;
+        gui_rrect(r.x, r.y, r.w, r.h, r.h / 2,
+                  down ? gui_mix(HEX_ACCENT, 0x000000, 0.20f) : gui_rgb(HEX_ACCENT));
+        float x = chip.x + 5, cy = chip.y + CHIP_H / 2.0f;
+        x += gui_button(x, cy, "B") + 4;
+        x += gui_text_mid(x, chip.y, CHIP_H, GUI_S_TINY, gui_rgb(HEX_INK), GUI_LEFT, 0, marked) + 5;
+        gui_icon_x(x + 4, cy, 8, gui_rgb(HEX_INK));
     }
 
-    static const GuiHint hints[] = {
-        { "A", "Sync" }, { "X", "Sync all" }, { "Y", "Details" }, { "B", "Unmark all" },
-    };
-    gui_footer(hints, v->marked > 0 ? 4 : 3);
+    UiBarItem items[SAVES_BAR_COUNT];
+    int n = ui_saves_bar(v, items);
+    ui_bar_draw(v->bar, items, n, v->held);
 }
 
 // ---------------------------------------------------------------------------
@@ -1111,14 +1165,22 @@ SyncAction ui_confirm_smart_sync(const TitleInfo *title, const SaveDetails *deta
 // History
 // ---------------------------------------------------------------------------
 
-#define HIST_ROWS 9
-#define HIST_ROW_H 21
+#define HIST_ROWS GUI_LIST_ROWS
+#define HIST_ROW_H GUI_ROW_H
+
+static const UiListGeom hist_geom = { 0, GUI_LIST_Y, GUI_BOT_W, HIST_ROWS, HIST_ROW_H, false, true };
+static const UiBarItem hist_bar_items[] = {
+    { "A", "Restore", GUI_BTN_PRIMARY, 0, KEY_A, 0, false },
+    { "B", "Back", GUI_BTN_TONAL, 0, KEY_B, 0, false },
+};
 
 typedef struct {
     const TitleInfo *title;
     const HistoryVersion *versions;
     int count, selected, scroll;
     UiListAnim anim;   // per visit: the bar never glides in from another game
+    UiBar bar;
+    u32 held;          // keys held (0 behind a dialog)
 } HistoryView;
 
 static void history_row(void *ctx, int index, float x, float y, float w, float h, float hl, bool pressed) {
@@ -1160,15 +1222,13 @@ static void history_top(void *ctx) {
 
 static void history_bottom(void *ctx) {
     HistoryView *v = ctx;
-    ui_list(&v->anim, 0, GUI_HEADER_H, GUI_BOT_W, HIST_ROWS, HIST_ROW_H, v->count, v->selected,
-            v->scroll, history_row, v);
-    gui_header_bar();
+    ui_list_draw(&v->anim, &hist_geom, v->count, v->selected, v->scroll, history_row, v);
+    gui_header_bar_ex(ui_list_at_top(&v->anim));
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Saved versions");
     char n[16];
     snprintf(n, sizeof(n), "%d", v->count);
     gui_text_mid(GUI_BOT_W - 10, 0, GUI_HEADER_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_RIGHT, 0, n);
-    static const GuiHint hints[] = { { "A", "Restore" }, { "B", "Back" }, { "UD", "Move" } };
-    gui_footer(hints, 3);
+    ui_bar_draw(&v->bar, hist_bar_items, 2, v->held);
 }
 
 char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int version_count) {
@@ -1176,7 +1236,12 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
         ui_message(UI_TONE_INFO, "History", "No previous versions of this save on the server.");
         return NULL;
     }
-    HistoryView v = { title, versions, version_count, 0, 0, { { 0, 0 }, { 0, 0 }, 0, false } };
+    HistoryView v;
+    memset(&v, 0, sizeof(v));
+    v.title = title;
+    v.versions = versions;
+    v.count = version_count;
+    v.bar = (UiBar)UI_BAR_INIT;
     UiBackdrop prev = ui_set_backdrop(history_top, history_bottom, &v);
     char *result = NULL;
     hidScanInput();
@@ -1184,15 +1249,19 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
     UiInput in;
     while (ui_input_scan(&in)) {
         u32 down = in.down;
-        ui_list_keys(&v.anim, in.rep, v.count, HIST_ROWS, &v.selected);
-        if (in.t_down) {
-            int i = ui_list_touch(in.ty, GUI_HEADER_H, HIST_ROWS, HIST_ROW_H, v.count, v.scroll);
-            if (i >= 0) v.selected = i;
+        UiListEvent ev = ui_list_input(&v.anim, &hist_geom, v.count, &v.selected, &v.scroll, &in,
+                                       in.rep & UI_LIST_KEYS);
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
+            ui_list_keys(&v.anim, in.rep, v.count, HIST_ROWS, &v.selected);
+            if (v.selected < v.scroll) v.scroll = v.selected;
+            if (v.selected >= v.scroll + HIST_ROWS) v.scroll = v.selected - HIST_ROWS + 1;
         }
-        if (v.selected < v.scroll) v.scroll = v.selected;
-        if (v.selected >= v.scroll + HIST_ROWS) v.scroll = v.selected - HIST_ROWS + 1;
-        if (down & KEY_B) break;
-        if (down & KEY_A) {
+        int hit = ui_bar_input(&v.bar, &in, hist_bar_items, 2);
+        if (hit == 1 || (down & KEY_B)) break;
+        // A, the Restore button, or a tap on the selected row: the caller
+        // asks before anything is written
+        if (hit == 0 || ev.kind == UI_LIST_TAP_SELECTED || (down & KEY_A)) {
+            ui_list_reveal(&v.anim, v.count, v.selected, &v.scroll);
             result = (char *)malloc(32);
             if (result) {
                 strncpy(result, versions[v.selected].timestamp, 31);
@@ -1201,12 +1270,14 @@ char *ui_show_history(const TitleInfo *title, HistoryVersion *versions, int vers
             break;
         }
 
+        v.held = in.held;
         gui_begin(true);
         gui_screen(GUI_TOP);
         history_top(&v);
         gui_screen(GUI_BOTTOM);
         history_bottom(&v);
         gui_end();
+        v.held = 0;
     }
     ui_restore_backdrop(prev);
     return result;
@@ -1283,8 +1354,10 @@ bool ui_confirm_restore(const TitleInfo *title, const SaveDetails *details,
 // ---------------------------------------------------------------------------
 
 #define CFG_ITEMS 7
-#define CFG_ROW_H 23
+#define CFG_ROW_H GUI_ROW_H
 #define CFG_ACTIONS 4   // first entry that is an action, not a value
+
+static const UiListGeom cfg_geom = { 0, GUI_LIST_Y, GUI_BOT_W, GUI_LIST_ROWS, CFG_ROW_H, false, true };
 
 enum {
     CFG_SERVER_URL = 0, CFG_SERVER_URL_ALT, CFG_API_KEY, CFG_NDS_DIR,
@@ -1309,7 +1382,18 @@ static const char *const cfg_help[CFG_ITEMS] = {
 typedef struct {
     const AppConfig *cfg;
     int selected;
+    UiBar bar;
+    u32 held;   // keys held (0 behind a dialog)
 } ConfigView;
+
+// What A does on a row, for the action bar
+static const char *cfg_verb(int index) {
+    return index < CFG_ACTIONS ? "Edit" : "Run";
+}
+
+static void cfg_bar_item(int index, UiBarItem *item) {
+    *item = (UiBarItem){ "A", cfg_verb(index), GUI_BTN_PRIMARY, 0, KEY_A, 140, false };
+}
 
 static void mask_key(const char *key, char *out, size_t size) {
     size_t len = strlen(key);
@@ -1373,12 +1457,17 @@ static UiListAnim config_anim;
 
 static void config_bottom(void *ctx) {
     ConfigView *v = ctx;
-    ui_list(&config_anim, 0, GUI_HEADER_H + 4, GUI_BOT_W, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, v->selected, 0,
-            config_row, v);
-    gui_header_bar();
+    ui_list_draw(&config_anim, &cfg_geom, CFG_ITEMS, v->selected, 0, config_row, v);
+    gui_header_bar_ex(ui_list_at_top(&config_anim));
     gui_text_mid(10, 0, GUI_HEADER_H, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_LEFT, 0, "Settings");
-    static const GuiHint hints[] = { { "A", "Select" }, { "LR", "First / last" } };
-    gui_footer(hints, 2);
+    UiBarItem item;
+    cfg_bar_item(v->selected, &item);
+    float right = ui_bar_layout(&item, 1, &(GuiRect){ 0, 0, 0, 0 }, &(GuiRect){ 0, 0, 0, 0 });
+    ui_bar_draw(&v->bar, &item, 1, v->held);
+    // The rest of the bar: what LEFT / RIGHT do here
+    float x = right + 14, cy = GUI_BAR_Y + GUI_BAR_H / 2.0f;
+    x += gui_button(x, cy, "LR") + 4;
+    gui_text_mid(x, GUI_BAR_Y, GUI_BAR_H, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, 0, "First / last");
 }
 
 static void save_settings(const AppConfig *config) {
@@ -1395,83 +1484,78 @@ static void select_server(AppConfig *config) {
     network_select_server(config);
 }
 
+// A on a row (or a tap on the selected row). True if the app must close.
+static bool settings_activate(AppConfig *config, int selected, SettingsActionFn run_action) {
+    SettingsResult action = SETTINGS_EXIT;
+    switch (selected) {
+        case CFG_SERVER_URL:
+            if (ui_edit_text("Server URL", "http://192.168.1.100:8000", config->server_url, MAX_URL_LEN)) {
+                save_settings(config);
+                select_server(config);
+            }
+            break;
+        case CFG_SERVER_URL_ALT:
+            if (ui_edit_text("Alternate URL", "Second address of the server (optional)",
+                             config->server_url_alt, MAX_URL_LEN)) {
+                save_settings(config);
+                select_server(config);
+            }
+            break;
+        case CFG_API_KEY:
+            if (ui_edit_text("API key", "your-api-key", config->api_key, MAX_API_KEY_LEN))
+                save_settings(config);
+            break;
+        case CFG_NDS_DIR:
+            if (ui_edit_text("NDS ROM folder", "sdmc:/roms/nds", config->nds_dir, MAX_PATH_LEN))
+                save_settings(config);
+            break;
+        case CFG_RESCAN: action = SETTINGS_RESCAN; break;
+        case CFG_REFRESH_CATALOG: action = SETTINGS_REFRESH_CATALOG; break;
+        default: action = SETTINGS_UPDATE; break;
+    }
+    return action != SETTINGS_EXIT && run_action && run_action(action);
+}
+
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
     static int selected = 0;   // kept while the user visits other tabs
-    ConfigView v = { config, selected };
+    ConfigView v = { config, selected, UI_BAR_INIT, 0 };
     UiBackdrop prev = ui_set_backdrop(config_top, config_bottom, &v);
     SettingsResult result = SETTINGS_EXIT;  // the app is closing
+    int scroll = 0;   // the whole list fits: only ever dragged and rubber-banded
 
     hidScanInput();
     UiInput in;
-    for (bool first = true; ui_input_scan(&in); first = false) {
-        if (!first) {
-            gui_begin(true);
-            gui_screen(GUI_TOP);
-            config_top(&v);
-            gui_screen(GUI_BOTTOM);
-            config_bottom(&v);
-            gui_end();
-        }
-        u32 down = in.down, rep = in.rep;
-        if (rep & KEY_UP) {
-            if (v.selected == 0) ui_list_edge(&config_anim, UI_EDGE_WRAP);
-            v.selected = (v.selected - 1 + CFG_ITEMS) % CFG_ITEMS;
-        }
-        if (rep & KEY_DOWN) {
-            if (v.selected == CFG_ITEMS - 1) ui_list_edge(&config_anim, UI_EDGE_WRAP);
-            v.selected = (v.selected + 1) % CFG_ITEMS;
-        }
-        // Page up / down: the whole list fits on one page, so first / last
-        if (rep & KEY_LEFT) {
-            if (v.selected == 0) ui_list_edge(&config_anim, UI_EDGE_CLAMP_TOP);
-            v.selected = 0;
-        }
-        if (rep & KEY_RIGHT) {
-            if (v.selected == CFG_ITEMS - 1) ui_list_edge(&config_anim, UI_EDGE_CLAMP_BOTTOM);
-            v.selected = CFG_ITEMS - 1;
-        }
-        if (in.t_down) {
-            int i = ui_list_touch(in.ty, GUI_HEADER_H + 4, CFG_ITEMS, CFG_ROW_H, CFG_ITEMS, 0);
-            if (i >= 0) v.selected = i;
-        }
-
+    while (ui_input_scan(&in)) {
+        u32 down = in.down;
         UiNav nav = ui_tab_nav(down);
         if (nav == UI_NAV_PREV) { result = SETTINGS_NAV_PREV; break; }
         if (nav == UI_NAV_NEXT) { result = SETTINGS_NAV_NEXT; break; }
         if (nav == UI_NAV_EXIT) { result = SETTINGS_EXIT; break; }
-        if (!(down & KEY_A)) continue;
 
-        SettingsResult action = SETTINGS_EXIT;
-        switch (v.selected) {
-            case CFG_SERVER_URL:
-                if (ui_edit_text("Server URL", "http://192.168.1.100:8000", config->server_url, MAX_URL_LEN)) {
-                    save_settings(config);
-                    select_server(config);
-                }
+        // UP / DOWN wrap; LEFT / RIGHT are first / last (absolute moves, so
+        // they never need reattaching)
+        UiListEvent ev = ui_list_input(&config_anim, &cfg_geom, CFG_ITEMS, &v.selected, &scroll, &in,
+                                       in.rep & (KEY_UP | KEY_DOWN));
+        if (ev.kind != UI_LIST_REATTACHED) ui_list_keys(&config_anim, in.rep, CFG_ITEMS, CFG_ITEMS, &v.selected);
+
+        UiBarItem item;
+        cfg_bar_item(v.selected, &item);
+        int hit = ui_bar_input(&v.bar, &in, &item, 1);
+        if (hit == 0 || ev.kind == UI_LIST_TAP_SELECTED || (down & KEY_A)) {
+            if (settings_activate(config, v.selected, run_action)) {
+                result = SETTINGS_EXIT;
                 break;
-            case CFG_SERVER_URL_ALT:
-                if (ui_edit_text("Alternate URL", "Second address of the server (optional)",
-                                 config->server_url_alt, MAX_URL_LEN)) {
-                    save_settings(config);
-                    select_server(config);
-                }
-                break;
-            case CFG_API_KEY:
-                if (ui_edit_text("API key", "your-api-key", config->api_key, MAX_API_KEY_LEN))
-                    save_settings(config);
-                break;
-            case CFG_NDS_DIR:
-                if (ui_edit_text("NDS ROM folder", "sdmc:/roms/nds", config->nds_dir, MAX_PATH_LEN))
-                    save_settings(config);
-                break;
-            case CFG_RESCAN: action = SETTINGS_RESCAN; break;
-            case CFG_REFRESH_CATALOG: action = SETTINGS_REFRESH_CATALOG; break;
-            default: action = SETTINGS_UPDATE; break;
+            }
         }
-        if (action != SETTINGS_EXIT && run_action && run_action(action)) {
-            result = SETTINGS_EXIT;
-            break;
-        }
+
+        v.held = in.held;
+        gui_begin(true);
+        gui_screen(GUI_TOP);
+        config_top(&v);
+        gui_screen(GUI_BOTTOM);
+        config_bottom(&v);
+        gui_end();
+        v.held = 0;
     }
     selected = v.selected;
     ui_restore_backdrop(prev);

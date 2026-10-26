@@ -92,16 +92,21 @@ void gui_screen(int screen) {
 }
 
 #ifdef GUI_PERF
+u32 gui_perf_coast_overspeed;
+
 // Top-right corner of the top screen: the previous frame's citro3d time
 // (command building + GPU drawing), red past the 12 ms budget
 static void perf_overlay(void) {
     float ms = C3D_GetProcessingTime() + C3D_GetDrawingTime();
-    char buf[24];
-    snprintf(buf, sizeof(buf), "%.1f ms", ms);
+    char buf[48];
+    if (gui_perf_coast_overspeed)
+        snprintf(buf, sizeof(buf), "%.1f ms  coast>v %lu", ms, (unsigned long)gui_perf_coast_overspeed);
+    else
+        snprintf(buf, sizeof(buf), "%.1f ms", ms);
     C2D_SceneBegin(target_top);
     float w = gui_text_w(GUI_S_SMALL, buf) + 8;
     gui_rect(GUI_TOP_W - w - 2, 2, w, 14, gui_rgba(0x000000, 0xC0));
-    gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(ms > 12.0f ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
+    gui_text(GUI_TOP_W - 6, 1, GUI_S_SMALL, gui_rgb(ms > 12.0f || gui_perf_coast_overspeed ? HEX_ERR : HEX_OK), GUI_RIGHT, buf);
 }
 #endif
 
@@ -504,6 +509,11 @@ float gui_btn_content_w(const char *glyph, const char *label) {
 }
 
 void gui_btn(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex, bool pressed) {
+    gui_btn_ex(r, glyph, label, style, tone_hex, pressed, false);
+}
+
+void gui_btn_ex(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style, u32 tone_hex,
+                bool pressed, bool on) {
     if (r.w <= 0 || r.h <= 0) return;
     if (style == GUI_BTN_DISABLED) pressed = false;
     if (!tone_hex) tone_hex = HEX_ACCENT;
@@ -518,7 +528,7 @@ void gui_btn(GuiRect r, const char *glyph, const char *label, GuiBtnStyle style,
         case GUI_BTN_TONAL:
             gui_rrect(r.x, r.y, r.w, r.h, GUI_BTN_R, gui_rgb(HEX_LINE));
             gui_rrect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, GUI_BTN_R - 1,
-                      pressed ? gui_mix(HEX_PANEL_HI, tone_hex, 0.35f) : gui_rgb(HEX_PANEL_HI));
+                      gui_mix(HEX_PANEL_HI, tone_hex, on ? (pressed ? 0.55f : 0.35f) : (pressed ? 0.35f : 0)));
             text = HEX_TEXT;
             break;
         default:

@@ -51,8 +51,9 @@ bool gui_reduce_motion(void);
 float gui_dt_clamp(float seconds);
 
 // Rubber band: how far content follows a drag `overshoot` past a bound,
-// for a viewport of `dimension` (same units). Resists more the further it
-// goes and never reaches `dimension * constant`. Apple uses constant 0.55.
+// for a viewport of `dimension` (same units). Follows at `constant` (Apple
+// uses 0.55) near the bound, resists more the further it goes and never
+// reaches `dimension`.
 float gui_rubberband(float overshoot, float dimension, float constant);
 
 // Screen rectangle (also used as a touch target)

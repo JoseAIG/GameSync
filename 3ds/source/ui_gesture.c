@@ -141,3 +141,398 @@ int ui_tap_buttons(UiTap *t, const UiInput *in, const GuiRect *r, int n, int *pr
     if (pressed_out) *pressed_out = pressed;
     return committed;
 }
+
+// ---------------------------------------------------------------------------
+// List controller
+// ---------------------------------------------------------------------------
+//
+// Momentum projection and the rubber band follow Apple's "Designing Fluid
+// Interfaces" (WWDC 2018): project(v) = (v / 1000) * d / (1 - d) with
+// d = 0.998 per ms (v * 0.499 in v's own units), and
+// rubberband(o, dim, 0.55). Written from the talk; no code copied.
+
+// Distance a flick travels per unit of release velocity (s): 0.499
+static float project_factor(void) {
+    return UI_DECEL_RATE / (1.0f - UI_DECEL_RATE) / 1000.0f;
+}
+
+// The same deceleration as a decay rate (1/s): -ln(0.998) * 1000 = 2.002
+static float decay_rate(void) {
+    static float k;
+    if (k == 0) k = -1000.0f * logf(UI_DECEL_RATE);
+    return k;
+}
+
+static float list_max(int count, int rows) {
+    return count > rows ? (float)(count - rows) : 0.0f;
+}
+
+static float clampf(float v, float lo, float hi) {
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static void sync_count(UiListAnim *a, int count, int selected, int scroll) {
+    if (a->init && a->count == count) return;
+    gui_spring_set(&a->sel, (float)selected);
+    gui_spring_set(&a->scroll, (float)scroll);
+    a->count = count;
+    a->init = true;
+    a->tracking = a->dragging = a->coasting = a->detached = false;
+    a->coast_mode = UI_COAST_NONE;
+    a->wb_pending = false;
+    a->nsamples = 0;
+    a->pressed_row = -1;
+}
+
+void ui_list_reset(UiListAnim *a) {
+    a->init = false;
+    a->tracking = a->dragging = a->coasting = a->detached = false;
+    a->coast_mode = UI_COAST_NONE;
+    a->wb_pending = false;
+    a->snap = false;
+    a->pressed_row = -1;
+    gui_spring_set(&a->nudge, 0);
+}
+
+void ui_list_edge(UiListAnim *a, UiListEdge edge) {
+    u64 now = ui_gesture_now();
+    if (now == 0) now = 1;   // 0 means "never"
+    a->flash_ms = now;
+    if (edge == UI_EDGE_WRAP) {
+        a->wrap_ms = now;
+        a->snap = true;
+    } else if (!gui_reduce_motion()) {
+        // The sign follows the press: up for LEFT / UP, down for RIGHT / DOWN
+        a->nudge.x = edge == UI_EDGE_CLAMP_TOP ? -6.0f : 6.0f;
+        a->nudge.v = 0;
+    }
+}
+
+void ui_list_keys(UiListAnim *a, u32 rep, int count, int page, int *selected) {
+    if (count <= 0) return;
+    int s = *selected;
+    if (rep & KEY_UP) {
+        if (s == 0) ui_list_edge(a, count > 1 ? UI_EDGE_WRAP : UI_EDGE_CLAMP_TOP);
+        s = (s - 1 + count) % count;
+    }
+    if (rep & KEY_DOWN) {
+        if (s == count - 1) ui_list_edge(a, count > 1 ? UI_EDGE_WRAP : UI_EDGE_CLAMP_BOTTOM);
+        s = (s + 1) % count;
+    }
+    if (rep & KEY_LEFT) {
+        if (s == 0) ui_list_edge(a, UI_EDGE_CLAMP_TOP);
+        s = s - page < 0 ? 0 : s - page;
+    }
+    if (rep & KEY_RIGHT) {
+        if (s == count - 1) ui_list_edge(a, UI_EDGE_CLAMP_BOTTOM);
+        s = s + page >= count ? count - 1 : s + page;
+    }
+    *selected = s;
+}
+
+float ui_list_view(const UiListAnim *a) {
+    float x = a->scroll.x, row_h = a->row_h > 0 ? a->row_h : 1;
+    float max = list_max(a->count, a->rows);
+    float dim = (float)a->rows * row_h;
+    if (x < 0) return -gui_rubberband(-x * row_h, dim, UI_LIST_RUBBER) / row_h;
+    if (x > max) return max + gui_rubberband((x - max) * row_h, dim, UI_LIST_RUBBER) / row_h;
+    return x;
+}
+
+int ui_list_first_visible(const UiListAnim *a) {
+    int f = (int)floorf(ui_list_view(a));
+    return f < 0 ? 0 : f;
+}
+
+bool ui_list_settled(const UiListAnim *a) {
+    return !a->tracking && !a->coasting;
+}
+
+int ui_list_pressed_row(const UiListAnim *a) {
+    return (a->tracking && !a->dragging) ? a->pressed_row : -1;
+}
+
+void ui_list_set_range(UiListAnim *a, int lo, int hi) {
+    a->range_on = true;
+    a->range_lo = lo;
+    a->range_hi = hi < lo ? lo : hi;
+}
+
+void ui_list_clear_range(UiListAnim *a) {
+    a->range_on = false;
+}
+
+// Viewport top as a whole row inside the list
+static int resting_top(const UiListAnim *a) {
+    return (int)lroundf(clampf(ui_list_view(a), 0, list_max(a->count, a->rows)));
+}
+
+static void stop_coast(UiListAnim *a) {
+    a->coasting = false;
+    a->coast_mode = UI_COAST_NONE;
+    a->coast_to_edge = false;
+}
+
+void ui_list_reveal(UiListAnim *a, int count, int selected, int *scroll) {
+    if (a->wb_pending) {
+        *scroll = a->wb;
+        a->wb_pending = false;
+    }
+    if (a->coasting) {
+        *scroll = resting_top(a);
+        stop_coast(a);
+    }
+    a->detached = false;
+    int rows = a->rows;
+    if (rows <= 0 || count <= 0) return;
+    if (selected < *scroll) *scroll = selected;
+    if (selected >= *scroll + rows) *scroll = selected - rows + 1;
+    if (*scroll < 0) *scroll = 0;
+}
+
+static void add_sample(UiListAnim *a, float y, u64 ms) {
+    if (a->nsamples == UI_LIST_SAMPLES) {
+        memmove(&a->samples[0], &a->samples[1], sizeof(a->samples[0]) * (UI_LIST_SAMPLES - 1));
+        a->nsamples--;
+    }
+    a->samples[a->nsamples].y = y;
+    a->samples[a->nsamples].ms = ms;
+    a->nsamples++;
+}
+
+// End-to-start slope of the samples of the last 60 ms, in rows/s, signed
+// like the content's motion (a finger moving up scrolls forward)
+static float release_velocity(const UiListAnim *a, u64 now) {
+    int first = -1;
+    for (int i = 0; i < a->nsamples; i++) {
+        if (now >= a->samples[i].ms && now - a->samples[i].ms <= UI_LIST_VELOCITY_MS) {
+            first = i;
+            break;
+        }
+    }
+    int last = a->nsamples - 1;
+    if (first < 0 || last - first < 1) return 0;
+    float dt = (float)(a->samples[last].ms - a->samples[first].ms) / 1000.0f;
+    if (dt <= 0) return 0;
+    float dy = a->samples[last].y - a->samples[first].y;
+    return -(dy / dt) / a->row_h;
+}
+
+// The finger let go of a list it moved (or a coast it stopped): pick where
+// it lands and how it gets there
+static void release(UiListAnim *a, float v) {
+    float max = list_max(a->count, a->rows);
+    float x = a->scroll.x;
+    a->release_v = fabsf(v);
+    a->coasting = true;
+    a->coast_to_edge = false;
+    if (x < 0 || x > max) {
+        // Pulled past an end: no momentum earned, straight back (damping 1)
+        a->coast_mode = UI_COAST_RETURN;
+        a->coast_target = x < 0 ? 0 : max;
+        a->scroll.v = v;
+        return;
+    }
+    float lo = 0, hi = max;
+    if (a->range_on) {
+        lo = clampf((float)a->range_lo, 0, max);
+        hi = clampf((float)a->range_hi, lo, max);
+    }
+    float proj = x + v * project_factor();
+    bool edge_reachable = (proj < 0 && lo <= 0) || (proj > max && hi >= max);
+    if (edge_reachable) {
+        // The flick carries past an end: decelerate to it, then bounce
+        a->coast_mode = UI_COAST_DECAY;
+        a->coast_to_edge = true;
+        a->coast_target = proj < 0 ? 0 : max;
+        a->scroll.v = v;
+        return;
+    }
+    float target = clampf(roundf(proj), lo, hi);
+    float d = target - x;
+    float lambda = d != 0 ? v / d : 0;
+    a->coast_target = target;
+    a->scroll.v = v;
+    if (fabsf(v) < 1.0f || lambda < 1.0f || lambda > 6.0f) {
+        // Tiny flick, or the rounding landed behind the finger: settle
+        a->coast_mode = UI_COAST_SETTLE;
+    } else {
+        // Deceleration adjusted to land on the row, from the release speed
+        a->coast_mode = UI_COAST_EXP;
+        a->coast_lambda = lambda;
+    }
+}
+
+static void finish_coast(UiListAnim *a, float target) {
+    gui_spring_set(&a->scroll, target);
+    stop_coast(a);
+    a->wb_pending = true;
+    a->wb = (int)lroundf(target);
+}
+
+static void coast_step(UiListAnim *a, float dt) {
+    float max = list_max(a->count, a->rows);
+    float t = a->coast_target;
+    switch ((UiCoastMode)a->coast_mode) {
+        case UI_COAST_EXP: {
+            // x(t) = target - (target - x0) e^(-lambda t): v starts at the
+            // release velocity and only ever slows
+            float x = t - (t - a->scroll.x) * expf(-a->coast_lambda * dt);
+            a->scroll.x = x;
+            a->scroll.v = a->coast_lambda * (t - x);
+            if (fabsf(t - x) < 0.02f) finish_coast(a, t);
+            break;
+        }
+        case UI_COAST_SETTLE:
+            gui_spring_always(&a->scroll, t, GUI_RESP_SETTLE, dt);
+            if (a->scroll.x == t && a->scroll.v == 0) finish_coast(a, t);
+            break;
+        case UI_COAST_DECAY:
+            a->scroll.x += a->scroll.v * dt;
+            a->scroll.v *= expf(-decay_rate() * dt);
+            if (a->scroll.x < 0 || a->scroll.x > max) {
+                // Crossed the end: the rest of the momentum goes into the
+                // bounce (damping 0.8; 1 under reduced motion)
+                a->coast_mode = UI_COAST_BOUNCE;
+                a->coast_target = a->scroll.x < 0 ? 0 : max;
+            } else if (fabsf(a->scroll.v) < 0.5f) {
+                // Ran out of speed just short of it
+                a->coast_mode = UI_COAST_SETTLE;
+                a->coast_target = clampf(roundf(a->scroll.x), 0, max);
+            }
+            break;
+        case UI_COAST_BOUNCE:
+            gui_spring_bouncy(&a->scroll, t, GUI_RESP_EDGE, 0.8f, dt);
+            if (a->scroll.x == t && a->scroll.v == 0) finish_coast(a, t);
+            break;
+        case UI_COAST_RETURN:
+            gui_spring_always(&a->scroll, t, GUI_RESP_EDGE, dt);
+            if (a->scroll.x == t && a->scroll.v == 0) finish_coast(a, t);
+            break;
+        default:
+            stop_coast(a);
+            break;
+    }
+    if ((a->coast_mode == UI_COAST_EXP || a->coast_mode == UI_COAST_DECAY) &&
+        fabsf(a->scroll.v) > a->release_v + 1e-3f)
+        a->coast_overspeed++;
+}
+
+void ui_list_step(UiListAnim *a, int rows, float row_h, int count, int selected, int scroll, float dt) {
+    a->rows = rows;
+    a->row_h = row_h;
+    sync_count(a, count, selected, scroll);
+    float target = a->wb_pending ? (float)a->wb : (float)scroll;
+    // A wrap jumps (gliding across the whole list would sweep every row)
+    if (a->snap) {
+        gui_spring_set(&a->sel, (float)selected);
+        if (!a->tracking && !a->coasting) gui_spring_set(&a->scroll, target);
+        a->snap = false;
+    }
+    // Long jumps snap, short moves glide; the springs keep their velocity
+    // across retargets, so a held D-pad glides continuously
+    if (fabsf(a->sel.x - selected) > rows) gui_spring_set(&a->sel, (float)selected);
+    gui_spring(&a->sel, (float)selected, GUI_RESP_SELECT, dt);
+    gui_spring(&a->nudge, 0, GUI_RESP_NUDGE, dt);
+
+    if (a->tracking) return;   // the finger owns the viewport (dragging or holding it)
+    if (a->coasting) {
+        coast_step(a, dt);
+        return;
+    }
+    // Following the keys
+    if (fabsf(a->scroll.x - target) > rows) gui_spring_set(&a->scroll, target);
+    gui_spring(&a->scroll, target, GUI_RESP_SELECT, dt);
+}
+
+UiListEvent ui_list_input(UiListAnim *a, const UiListGeom *g, int count, int *selected, int *scroll,
+                          const UiInput *in, u32 keys_moved) {
+    UiListEvent ev = { UI_LIST_NONE, -1, 0 };
+    a->rows = g->rows;
+    a->row_h = g->row_h;
+    sync_count(a, count, *selected, *scroll);
+    if (a->wb_pending) {
+        *scroll = a->wb;
+        a->wb_pending = false;
+    }
+
+    // A move key: the keys take the viewport back
+    if (keys_moved && !a->tracking && count > 0) {
+        if (a->coasting) {
+            *scroll = resting_top(a);
+            stop_coast(a);
+        }
+        if (a->detached) {
+            a->detached = false;
+            int first = *scroll, last = *scroll + g->rows - 1;
+            if (last > count - 1) last = count - 1;
+            if (*selected < first || *selected > last) {
+                // Off screen: the nearest visible row instead of the move
+                *selected = *selected < first ? first : last;
+                ev.kind = UI_LIST_REATTACHED;
+                return ev;
+            }
+        }
+    }
+
+    GuiRect rect = gui_rect_make(g->x, g->y, g->w, g->rows * g->row_h);
+    if (in->t_down && count > 0 && gui_rect_contains(rect, in->tx, in->ty)) {
+        a->tracking = true;
+        a->dragging = false;
+        a->no_tap = a->froze = false;
+        if (a->coasting) {
+            // A touch stops the momentum where it is; a fast one isn't a tap
+            a->no_tap = fabsf(a->scroll.v) > 2.0f;
+            a->froze = true;
+            stop_coast(a);
+        }
+        a->scroll.v = 0;   // hold the content under the finger
+        a->grab_y = in->ty;
+        a->grab_scroll = a->scroll.x;
+        a->nsamples = 0;
+        add_sample(a, in->ty, in->t_ms);
+        int row = (int)floorf(ui_list_view(a) + (in->ty - g->y) / g->row_h);
+        a->pressed_row = (!a->no_tap && row >= 0 && row < count) ? row : -1;
+        a->sel_at_down = *selected;
+    }
+    if (!a->tracking) return ev;
+
+    if (in->t_held) {
+        if (!a->dragging && fabsf(in->ty - in->ty0) > UI_LIST_DRAG_PX) {
+            // A drag: the tap is off for good. Re-anchor here, so the
+            // content starts from where it is rather than jumping 8 px.
+            a->dragging = true;
+            a->detached = true;
+            a->pressed_row = -1;
+            a->grab_y = in->ty;
+            a->grab_scroll = a->scroll.x;
+        }
+        if (a->dragging) {
+            // 1:1, keeping the grab offset; past an end ui_list_view()
+            // shows it through the rubber band
+            float pos_px = a->grab_scroll * g->row_h - (in->ty - a->grab_y);
+            a->scroll.x = pos_px / g->row_h;
+            a->scroll.v = 0;
+        }
+        add_sample(a, in->ty, in->t_ms);
+        return ev;
+    }
+
+    // Released (t_up), or the touch was dropped by a latch
+    a->tracking = false;
+    float v = (in->t_up && a->dragging) ? release_velocity(a, in->t_ms) : 0;
+    if (in->t_up && !a->dragging && !a->no_tap && a->pressed_row >= 0 && in->moved < UI_LIST_DRAG_PX &&
+        gui_rect_contains(rect, in->tx, in->ty)) {
+        int row = (int)floorf(ui_list_view(a) + (in->ty - g->y) / g->row_h);
+        if (row == a->pressed_row) {
+            ev.kind = row == a->sel_at_down ? UI_LIST_TAP_SELECTED : UI_LIST_TAP;
+            ev.index = row;
+            ev.px = in->tx;
+            *selected = row;
+        }
+    }
+    if (a->dragging || a->froze) release(a, v);
+    a->dragging = a->froze = false;
+    a->pressed_row = -1;
+    return ev;
+}

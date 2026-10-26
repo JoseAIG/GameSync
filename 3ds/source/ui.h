@@ -152,53 +152,62 @@ UiNav ui_tab_nav(u32 down);
 // Scrolling list with an animated selection bar
 // ---------------------------------------------------------------------------
 
-// Presentation state of a list. The selection and scroll the caller owns
-// stay plain ints; these springs are what's drawn, in rows.
-typedef struct {
-    GuiSpring sel;      // highlight position
-    GuiSpring scroll;   // viewport top
-    int count;
-    bool init;
-    // Edge feedback (ui_list_edge)
-    GuiSpring nudge;    // px added to the highlight: the "nothing more here" nudge
-    u64 wrap_ms;        // gui_clock_ms() of the last wrap (rows cross-fade), 0 = none
-    u64 flash_ms;       // of the last wrap or clamp (scrollbar thumb flash), 0 = none
-    bool snap;          // a wrap: jump to the new selection on the next draw
-} UiListAnim;
-
-// The caller's key handler reports the edges it hits (only it knows a key
-// was pressed): a wrap (UP on the first row, DOWN on the last) jumps there
-// and cross-fades the rows in; a press that can't move further (LEFT on the
-// first row, RIGHT on the last, or UP/DOWN in a one-row list) nudges the
-// highlight 6 px that way and springs back. Both flash the scrollbar thumb.
-typedef enum {
-    UI_EDGE_WRAP = 0,
-    UI_EDGE_CLAMP_TOP,
-    UI_EDGE_CLAMP_BOTTOM,
-} UiListEdge;
-void ui_list_edge(UiListAnim *anim, UiListEdge edge);
-
-// v055's list keys on `*selected`: UP / DOWN move one row and wrap, LEFT /
-// RIGHT move a page and clamp. `rep` = hidKeysDownRepeat(). Reports the
-// edges it hits to ui_list_edge().
-void ui_list_keys(UiListAnim *anim, u32 rep, int count, int page, int *selected);
+// The list controller (UiListAnim, ui_list_input, ui_list_keys,
+// ui_list_edge, ui_list_reveal...) lives in ui_gesture.h.
 
 // Draws one row. `hl` is how much of the row the gliding highlight bar
 // covers (1 = fully under it, 0 = clear of it): pick every colour that
 // differs on the bar as gui_mix(normal, on_bar, hl), never by comparing the
 // index with the selection, or the new row's text turns dark on the
 // background for a frame or two while the bar is still on its way.
-// `pressed`: a finger is down on this row (always false for now).
+// `pressed`: a finger is down on this row (the list already drew the
+// pressed fill behind it).
 typedef void (*UiRowFn)(void *ctx, int index, float x, float y, float w, float h,
                         float hl, bool pressed);
 
-// Draw rows [scroll, scroll+rows) of a list at (x, y). Rows sliding in/out
-// overflow by up to one row: draw the header/footer bars afterwards.
-void ui_list(UiListAnim *anim, float x, float y, float w, int rows, float row_h,
-             int count, int selected, int scroll, UiRowFn row, void *ctx);
+// Step the list's motion (once a frame) and draw rows floor(view) to
+// view + rows + 1, the highlight bar, the pressed row and the scrollbar.
+// `scroll` is the caller's int scroll (the target while the keys drive the
+// viewport). No mask: an opaque header / action bar drawn afterwards hides
+// the rows sliding under them; geom->clip clips to the list rect instead.
+void ui_list_draw(UiListAnim *a, const UiListGeom *g, int count, int selected, int scroll,
+                  UiRowFn row, void *ctx);
+// The list's viewport is at the top (the header keeps its divider line)
+bool ui_list_at_top(const UiListAnim *a);
 
-// Row of a list at (_, y) under a touch at height `ty`, or -1
-int ui_list_touch(float ty, float y, int rows, float row_h, int count, int scroll);
+// ---------------------------------------------------------------------------
+// Action bar (bottom of the list screens, y 202-240)
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    const char *glyph;     // key glyph, NULL for a touch-only button
+    const char *label;
+    GuiBtnStyle style;
+    u32 tone;              // 0 = HEX_ACCENT
+    u32 keys;              // the key that does the same (drawn pressed while held)
+    float width;           // 0 = the width rule (see ui_bar_layout)
+    bool on;               // a toggle that is on: fill tinted with the tone
+} UiBarItem;
+
+#define UI_BAR_MAX 4
+
+typedef struct {
+    UiTap tap;
+    int pressed;           // item a finger is on, -1
+} UiBar;
+
+#define UI_BAR_INIT { UI_TAP_INIT, -1 }
+
+// Left to right from x 8, 8 px apart, at y 206 (30 px). The first item is
+// max(120, glyph + label + 24) wide (or its `width`); the rest split what
+// is left, at least 64 each. The touch rects span the bar's full height
+// and half of each gap. Returns the right edge of the last button.
+float ui_bar_layout(const UiBarItem *items, int n, GuiRect *draw, GuiRect *touch);
+// Touch: the item committed this frame (touch-up on it) or -1. DISABLED
+// items never commit.
+int ui_bar_input(UiBar *bar, const UiInput *in, const UiBarItem *items, int n);
+// `held`: keys held now (pass 0 when drawn behind a dialog)
+void ui_bar_draw(const UiBar *bar, const UiBarItem *items, int n, u32 held);
 
 // ---------------------------------------------------------------------------
 // Save list (main screen)
@@ -208,10 +217,16 @@ int ui_list_touch(float ty, float y, int rows, float row_h, int count, int scrol
 #define VIEW_3DS  1
 #define VIEW_NDS  2
 
-#define SAVES_ROWS 9
-#define SAVES_ROW_H 21
-#define SAVES_LIST_Y GUI_HEADER_H
+#define SAVES_ROWS GUI_LIST_ROWS
+#define SAVES_ROW_H GUI_ROW_H
+#define SAVES_LIST_Y GUI_LIST_Y
 #define SAVES_MARK_W 26   // a tap left of this on a row toggles its mark
+
+// The save list's geometry (ui_list_input / ui_list_draw)
+#define SAVES_GEOM { 0, SAVES_LIST_Y, GUI_BOT_W, SAVES_ROWS, SAVES_ROW_H, false, true }
+
+// Action bar items of the Saves screen, in this order
+enum { SAVES_BAR_A = 0, SAVES_BAR_X, SAVES_BAR_Y, SAVES_BAR_COUNT };
 
 typedef struct {
     const TitleInfo *titles;   // all titles
@@ -224,10 +239,21 @@ typedef struct {
     const char *status;
     UiTone status_tone;
     const SaveDetails *details;  // last compare of the selected title, or NULL
+    int title_count;           // all titles (X works when the view is empty)
+    // Live input state for drawing (zero when drawn behind a dialog)
+    const UiBar *bar;
+    u32 held;
+    bool chip_pressed;         // finger on the "N marked" chip
 } SavesView;
 
 void ui_draw_saves_top(const SavesView *v);
 void ui_draw_saves_bottom(const SavesView *v);
+// The Saves action bar: A Sync / Resolve / Upload N marked, X Sync all,
+// Y Details (SAVES_BAR_*). Returns the count.
+int ui_saves_bar(const SavesView *v, UiBarItem *items);
+// Touch target of the header's "N marked" chip (B = unmark all); w = 0
+// when nothing is marked
+GuiRect ui_saves_marked_chip(const SavesView *v);
 
 // ---------------------------------------------------------------------------
 // Save dialogs

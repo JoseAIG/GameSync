@@ -29,6 +29,10 @@ static int last_details_idx = -1;
 
 static SavesView view;
 static UiListAnim saves_anim;   // the save list's presentation state
+static UiBar saves_bar = UI_BAR_INIT;
+static UiTap saves_chip_tap = UI_TAP_INIT;
+static bool saves_chip_pressed;
+static u32 saves_held;          // keys held, while the Saves loop itself draws
 
 #define LIST_VISIBLE SAVES_ROWS
 
@@ -67,9 +71,10 @@ static void rebuild_filter(void) {
         if (include)
             filtered[filtered_count++] = i;
     }
-    // Reset selection
+    // Reset selection (and whatever the list was doing with the old rows)
     selected = 0;
     scroll_offset = 0;
+    ui_list_reset(&saves_anim);
 }
 
 // Get the actual title index for the current selection
@@ -133,6 +138,10 @@ static void refresh_view(void) {
     view.status_tone = status_tone;
     int idx = sel_title_idx();
     view.details = (idx >= 0 && idx == last_details_idx) ? &last_details : NULL;
+    view.title_count = title_count;
+    view.bar = &saves_bar;
+    view.held = saves_held;
+    view.chip_pressed = saves_chip_pressed;
 }
 
 static void saves_top(void *ctx) {
@@ -658,6 +667,54 @@ static bool do_update(void) {
 
 static bool saves_need_rescan = false;
 
+// What each Saves key does; a tap on its button calls the same function
+
+// A: Smart Sync the selected save, or upload every marked one
+static void saves_do_a(void) {
+    if (filtered_count <= 0) return;
+    ui_list_reveal(&saves_anim, filtered_count, selected, &scroll_offset);
+    int marked = count_marked();
+    if (marked > 0)
+        do_batch_upload(marked);
+    else
+        do_smart_sync();
+}
+
+// X: Sync All
+static void saves_do_x(void) {
+    if (title_count <= 0) return;
+    int keep = selected, keep_scroll = scroll_offset;
+    do_sync_all();
+    // The list itself didn't change: stay where we were
+    if (keep < filtered_count) {
+        selected = keep;
+        scroll_offset = keep_scroll;
+    }
+}
+
+// Y: details and actions for the selected save
+static void saves_do_y(void) {
+    if (filtered_count <= 0) return;
+    ui_list_reveal(&saves_anim, filtered_count, selected, &scroll_offset);
+    do_save_menu();
+}
+
+// B: cancel the batch selection
+static void saves_do_b(void) {
+    if (count_marked() <= 0) return;
+    clear_marks();
+    set_status(UI_TONE_ACCENT, "Marks cleared");
+}
+
+// SELECT (next view) or a tap on a segment: show All / 3DS / NDS
+static void saves_set_view(int mode) {
+    view_mode = mode;
+    rebuild_filter();
+    const char *names[] = {"All", "3DS", "NDS"};
+    set_status(UI_TONE_ACCENT, "View: %s (%d title%s)", names[view_mode], filtered_count,
+               filtered_count == 1 ? "" : "s");
+}
+
 // Saves tab: runs until the user switches tab or exits
 static UiNav saves_tab(void) {
     ui_set_backdrop(saves_top, saves_bottom, NULL);
@@ -671,69 +728,50 @@ static UiNav saves_tab(void) {
     UiInput in;
     while (ui_input_scan(&in)) {
         u32 kDown = in.down;
-        u32 kRep = in.rep;
 
         UiNav nav = ui_tab_nav(kDown);
         if (nav != UI_NAV_STAY) return nav;
 
-        // UP / DOWN one row (wrapping), LEFT / RIGHT a page (clamped)
-        if (kRep & (KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT) && filtered_count > 0) {
-            ui_list_keys(&saves_anim, kRep, filtered_count, LIST_VISIBLE, &selected);
+        // The list: taps, drags and flicks; UP / DOWN one row (wrapping),
+        // LEFT / RIGHT a page (clamped)
+        UiListGeom geom = SAVES_GEOM;
+        UiListEvent ev = ui_list_input(&saves_anim, &geom, filtered_count, &selected, &scroll_offset, &in,
+                                       in.rep & UI_LIST_KEYS);
+        if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS) && filtered_count > 0) {
+            ui_list_keys(&saves_anim, in.rep, filtered_count, LIST_VISIBLE, &selected);
             update_scroll();
         }
+        // A tap selects the row; on its mark box it also toggles the mark
+        // (on release, so a drag never toggles anything). A tap on the
+        // selected row does nothing more: Smart Sync talks to the server,
+        // and the A button is its touch path.
+        if ((ev.kind == UI_LIST_TAP || ev.kind == UI_LIST_TAP_SELECTED) && ev.px < SAVES_MARK_W)
+            toggle_mark(filtered[ev.index]);
 
-        // Tap a row to select it; a tap on its mark box toggles the mark
-        if (in.t_down && filtered_count > 0) {
-            int i = ui_list_touch(in.ty, SAVES_LIST_Y, SAVES_ROWS, SAVES_ROW_H, filtered_count, scroll_offset);
-            if (i >= 0) {
-                selected = i;
-                if (in.tx < SAVES_MARK_W) toggle_mark(filtered[i]);
-            }
-        }
+        refresh_view();
+        GuiRect chip = ui_saves_marked_chip(&view);
+        int pressed_chip = -1;
+        bool chip_hit = ui_tap_buttons(&saves_chip_tap, &in, &chip, 1, &pressed_chip) == 0;
+        saves_chip_pressed = pressed_chip == 0;
+        UiBarItem items[SAVES_BAR_COUNT];
+        int nitems = ui_saves_bar(&view, items);
+        int hit = ui_bar_input(&saves_bar, &in, items, nitems);
 
-        // SELECT: cycle the view (All -> 3DS -> NDS -> All)
-        if (kDown & KEY_SELECT) {
-            view_mode = (view_mode + 1) % 3;
-            rebuild_filter();
-            const char *names[] = {"All", "3DS", "NDS"};
-            set_status(UI_TONE_ACCENT, "View: %s (%d title%s)", names[view_mode], filtered_count,
-                       filtered_count == 1 ? "" : "s");
-        }
+        if (kDown & KEY_SELECT) saves_set_view((view_mode + 1) % 3);
+        if (hit == SAVES_BAR_Y || (kDown & KEY_Y)) saves_do_y();
+        if (hit == SAVES_BAR_A || (kDown & KEY_A)) saves_do_a();
+        if (hit == SAVES_BAR_X || (kDown & KEY_X)) saves_do_x();
+        if (chip_hit || (kDown & KEY_B)) saves_do_b();
 
-        // Y: details and actions for the selected save
-        if (kDown & KEY_Y && filtered_count > 0)
-            do_save_menu();
-
-        if (kDown & KEY_A && filtered_count > 0) {
-            int marked = count_marked();
-            if (marked > 0)
-                do_batch_upload(marked);
-            else
-                do_smart_sync();
-        }
-
-        if (kDown & KEY_X && title_count > 0) {
-            int keep = selected, keep_scroll = scroll_offset;
-            do_sync_all();
-            // The list itself didn't change: stay where we were
-            if (keep < filtered_count) {
-                selected = keep;
-                scroll_offset = keep_scroll;
-            }
-        }
-
-        // B: cancel the batch selection
-        if (kDown & KEY_B && count_marked() > 0) {
-            clear_marks();
-            set_status(UI_TONE_ACCENT, "Marks cleared");
-        }
-
+        saves_held = in.held;
         gui_begin(true);
         gui_screen(GUI_TOP);
         saves_top(NULL);
         gui_screen(GUI_BOTTOM);
         saves_bottom(NULL);
         gui_end();
+        saves_held = 0;
+        saves_chip_pressed = false;
     }
     return UI_NAV_EXIT;
 }

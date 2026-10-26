@@ -304,18 +304,97 @@ static void wait_for_start(UiTone tone, const char *title, const char *body) {
 // ---------------------------------------------------------------------------
 
 static bool compare_title(int idx, const char *what);
+static bool compare_ready(int idx, const char *what);
+
+// What a failed upload / download means for the save, by SyncResult. No
+// default: a code added to sync.h later must get its own (true) safety
+// statement, and -Wswitch says so.
+typedef struct {
+    const char *safety, *next;
+    bool retry;
+} SyncFailText;
+
+static SyncFailText sync_fail_text(SyncResult r, bool upload) {
+    SyncFailText f = { "Nothing was changed on the console or the server.", "Try again.", true };
+    bool backup = config.local_backups > 0;
+    switch (r) {
+        case SYNC_OK:
+            break;
+        case SYNC_ERR_NETWORK:
+            f.next = "Check WiFi, or Settings > Server URL.";
+            break;
+        case SYNC_ERR_SERVER:
+            f.next = "Check the server, then try again.";
+            break;
+        case SYNC_ERR_BUNDLE:
+            break;
+        case SYNC_ERR_TOO_LARGE:
+        case SYNC_ERR_TOO_MANY_FILES:
+            f.next = "This save is too big for GameSync to sync.";
+            f.retry = false;
+            break;
+        case SYNC_ERR_INTEGRITY:
+            f.safety = "The download was damaged, so nothing was written. Your save is unchanged.";
+            break;
+        case SYNC_ERR_BACKUP:
+            f.safety = "Your current save couldn't be backed up, so nothing was written.";
+            f.next = "Free some SD space, or turn Local backups off.";
+            break;
+        case SYNC_ERR_RESTORED:
+            f.safety = "Writing failed; your previous save was put back.";
+            break;
+        case SYNC_ERR_RESTORE_FAILED:
+            // A previous save existed (it was being put back); with backups
+            // on it was copied to the SD before anything was written
+            f.safety = backup ? "Writing failed and the previous save couldn't be put back. "
+                                "A copy is in the local backup."
+                              : "Writing failed and the previous save couldn't be put back. The save may be damaged.";
+            f.next = backup ? "Copy it back from " BACKUP_DIR " with a save manager such as Checkpoint."
+                            : "Check the save with a save manager such as Checkpoint.";
+            f.retry = false;
+            break;
+        case SYNC_ERR_ARCHIVE:
+            // The fork only returns a plain ARCHIVE error on a download when
+            // there was no previous save to protect
+            f.safety = upload ? "Couldn't read this console's save. Nothing was changed."
+                              : "Couldn't write the save. There was no previous save on this console.";
+            break;
+    }
+    return f;
+}
+
+// Remember why `t` failed (shown on the top screen for its row)
+static void set_title_failed(TitleInfo *t, const char *why) {
+    t->sync_state = TSTATE_FAILED;
+    ui_utf8_copy(why && why[0] ? why : "Sync failed", t->last_error, sizeof(t->last_error));
+}
+
+// The card for a failed transfer of `t`; true = try again
+static bool transfer_failed_card(const TitleInfo *t, SyncResult res, bool upload, const char *verb) {
+    char title[96];
+    snprintf(title, sizeof(title), "Couldn't %s %.60s", verb, t->name);
+    SyncFailText f = sync_fail_text(res, upload);
+    return ui_error_card(title, sync_result_str(res), f.safety, f.next, f.retry);
+}
 
 static void do_history(void) {
     int idx = sel_title_idx();
     if (idx < 0) return;
-    ui_busy("History", "Loading saved versions...");
-
     HistoryVersion versions[MAX_HISTORY_VERSIONS];
-    int count = sync_get_history(&config, titles[idx].title_id_hex, versions, MAX_HISTORY_VERSIONS);
+    int count;
+    for (;;) {
+        ui_busy("History", "Loading saved versions...");
+        count = sync_get_history(&config, titles[idx].title_id_hex, versions, MAX_HISTORY_VERSIONS);
+        if (count >= 0) break;
+        if (!ui_error_card("Couldn't load History",
+                           network_last_error()[0] ? network_last_error() : "The server didn't send the list.",
+                           "Nothing was changed.", "Check WiFi, or Settings > Server URL.", true)) {
+            set_status(UI_TONE_ERR, "History not loaded, nothing changed");
+            return;
+        }
+    }
 
-    if (count < 0) {
-        set_status(UI_TONE_ERR, "Failed to load history");
-    } else if (count == 0) {
+    if (count == 0) {
         set_status(UI_TONE_INFO, "No history available for %.40s", titles[idx].name);
     } else {
         char *selected_ts = ui_show_history(&titles[idx], versions, count);
@@ -327,8 +406,13 @@ static void do_history(void) {
         for (int i = 0; i < count && vi < 0; i++)
             if (strcmp(versions[i].timestamp, selected_ts) == 0) vi = i;
         // Overwriting the console's save: show what's there now and ask first
-        if (vi < 0 || !compare_title(idx, "Restore")) {
-            ui_message(UI_TONE_ERR, "Restore", "Couldn't read this console's save.\n" UI_DIM "Nothing was changed.");
+        bool read = vi >= 0;
+        while (read && !compare_title(idx, "Restore")) {
+            read = ui_error_card("Couldn't read this console's save", "Not enough memory to read it.",
+                                 "Nothing was changed.", "Try again.", true);
+        }
+        if (!read) {
+            set_status(UI_TONE_ERR, "Restore not started, nothing changed");
             free(selected_ts);
             return;
         }
@@ -338,16 +422,22 @@ static void do_history(void) {
             free(selected_ts);
             return;
         }
-        op_title = "Restoring";
-        sync_progress("Downloading history version...");
-        SyncResult res = sync_download_history(&config, &titles[idx], selected_ts, sync_progress);
-        if (res == SYNC_OK) {
-            set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
-                       had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");
-            titles[idx].in_conflict = false;
-            titles[idx].sync_state = TSTATE_DOWNLOADED;
-        } else {
+        for (;;) {
+            op_title = "Restoring";
+            sync_progress("Downloading history version...");
+            SyncResult res = sync_download_history(&config, &titles[idx], selected_ts, sync_progress);
+            if (res == SYNC_OK) {
+                set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
+                           had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");
+                titles[idx].in_conflict = false;
+                titles[idx].sync_state = TSTATE_DOWNLOADED;
+                break;
+            }
             set_status(UI_TONE_ERR, "Restore failed: %s", sync_result_str(res));
+            char title[96];
+            snprintf(title, sizeof(title), "Couldn't restore %.60s", titles[idx].name);
+            SyncFailText f = sync_fail_text(res, false);
+            if (!ui_error_card(title, sync_result_str(res), f.safety, f.next, f.retry)) break;
         }
         last_details_idx = -1;
         free(selected_ts);
@@ -377,6 +467,23 @@ static int append_names(char *body, int size, int pos, bool (*pick)(const TitleI
 
 static bool is_marked(const TitleInfo *t) { return t->marked; }
 static bool is_marked_conflict(const TitleInfo *t) { return t->marked && is_conflict(t); }
+static bool is_failed(const TitleInfo *t) { return t->sync_state == TSTATE_FAILED; }
+
+// Up to 3 failed titles (name, then the reason dim), "...and N more"
+static int append_failures(char *body, int size, int pos, int total) {
+    int listed = 0;
+    for (int i = 0; i < title_count && listed < 3 && pos < size; i++) {
+        if (!is_failed(&titles[i])) continue;
+        char name[GUI_WRAP_LINE], why[GUI_WRAP_LINE];
+        ui_body_line(titles[i].name, name, sizeof(name));
+        ui_body_line(titles[i].last_error[0] ? titles[i].last_error : "Sync failed", why, sizeof(why));
+        pos += snprintf(body + pos, size - pos, UI_HI "%s\n" UI_DIM "%s\n", name, why);
+        listed++;
+    }
+    if (total > listed && pos < size)
+        pos += snprintf(body + pos, size - pos, UI_HI "%sand %d more\n", gui_ellipsis(), total - listed);
+    return pos < size ? pos : size - 1;
+}
 
 static void do_batch_upload(int marked) {
     // Say plainly when an upload replaces a server copy that changed too
@@ -424,15 +531,27 @@ static void do_batch_upload(int marked) {
             titles[i].sync_state = TSTATE_UPLOADED;
         } else {
             fail_count++;
-            titles[i].sync_state = TSTATE_FAILED;
+            set_title_failed(&titles[i], sync_result_str(res));
         }
     }
     clear_marks();
     last_details_idx = -1;
-    set_status(fail_count ? UI_TONE_WARN : UI_TONE_OK, "Batch upload: %d OK, %d failed", ok_count, fail_count);
+    if (fail_count > 0) {
+        // Which ones, and why (the rest of the batch went through)
+        char fbody[640];
+        int fp = append_failures(fbody, sizeof(fbody), 0, fail_count);
+        snprintf(fbody + fp, sizeof(fbody) - fp, UI_DIM "%d uploaded. Nothing changed for the failed ones.",
+                 ok_count);
+        char ftitle[64];
+        snprintf(ftitle, sizeof(ftitle), "%d upload%s failed", fail_count, fail_count == 1 ? "" : "s");
+        ui_dialog_ex(UI_TONE_ERR, ftitle, fbody, (const UiButton[]){ { KEY_A | KEY_B, "A", "OK" } }, 1,
+                     &(UiDialogOpts){ 0, true });
+    }
+    set_status(fail_count ? UI_TONE_WARN : UI_TONE_OK, "Batch upload: %d uploaded, %d failed", ok_count, fail_count);
 }
 
-// Fetch the server's view of title `idx` into last_details; false on failure
+// Fetch the server's view of title `idx` into last_details; false only
+// when this console's save couldn't be read at all (out of memory)
 static bool compare_title(int idx, const char *what) {
     TitleInfo *t = &titles[idx];
     UiProgress pr = { 0 };
@@ -445,7 +564,6 @@ static bool compare_title(int idx, const char *what) {
     synced_ms = 0;
     if (!sync_get_save_details(&config, t, &last_details)) {
         last_details_idx = -1;
-        set_status(UI_TONE_ERR, "Failed to load save details");
         return false;
     }
     last_details_idx = idx;
@@ -453,27 +571,41 @@ static bool compare_title(int idx, const char *what) {
         case SYNC_ACTION_UPLOAD:   t->sync_state = TSTATE_NEEDS_UPLOAD; break;
         case SYNC_ACTION_DOWNLOAD: t->sync_state = TSTATE_NEEDS_DOWNLOAD; break;
         case SYNC_ACTION_CONFLICT: t->sync_state = TSTATE_CONFLICT; break;
-        // Couldn't ask the server: what we knew about this title still stands
+        // Couldn't ask the server: what we knew about this title still
+        // stands (never TSTATE_FAILED: the save itself is fine)
         case SYNC_ACTION_SERVER_ERROR: break;
         default:                   t->sync_state = TSTATE_SYNCED; break;
     }
     return true;
 }
 
-// The server couldn't be queried (no answer, or an HTTP error): say so
-// instead of offering an upload or download based on "no server save"
-static void server_query_failed(const char *what) {
-    char body[256];
-    if (last_details.server_status)
-        snprintf(body, sizeof(body),
-                 "The server answered with HTTP %lu.\n\n" UI_DIM "Nothing was changed. Check the server and retry.",
-                 (unsigned long)last_details.server_status);
-    else
-        snprintf(body, sizeof(body),
-                 "The server didn't answer.\n" UI_DIM "%s\n\n" UI_DIM "Nothing was changed. Check Wi-Fi and the server, then retry.",
-                 last_details.server_error_msg[0] ? last_details.server_error_msg : "No response");
-    ui_message(UI_TONE_ERR, what, body);
-    set_status(UI_TONE_ERR, "Server unreachable, nothing changed");
+// Compare, and when that can't be done say what happened, that nothing
+// changed and what to do; A tries again. True once last_details holds a
+// real answer from the server (never a "no server save" made up from a
+// failed query).
+static bool compare_ready(int idx, const char *what) {
+    for (;;) {
+        if (!compare_title(idx, what)) {
+            if (ui_error_card("Couldn't compare", "Not enough memory to read this console's save.",
+                              "Nothing was changed.", "Try again.", true))
+                continue;
+            set_status(UI_TONE_ERR, "Couldn't compare, nothing changed");
+            return false;
+        }
+        if (!last_details.server_error) return true;
+        char reason[160];
+        if (last_details.server_status)
+            snprintf(reason, sizeof(reason), "The server answered with HTTP %lu.",
+                     (unsigned long)last_details.server_status);
+        else
+            snprintf(reason, sizeof(reason), "%s",
+                     last_details.server_error_msg[0] ? last_details.server_error_msg : "The server didn't answer.");
+        if (ui_error_card("Server unreachable", reason, "Nothing was changed.",
+                          "Check WiFi, or Settings > Server URL.", true))
+            continue;
+        set_status(UI_TONE_ERR, "Server unreachable, nothing changed");
+        return false;
+    }
 }
 
 // After a successful transfer the copies match: if the top screen was
@@ -517,32 +649,38 @@ static void details_after_sync(const TitleInfo *t, bool uploaded) {
 }
 
 static void upload_title(TitleInfo *t) {
-    op_title = "Uploading";
-    SyncResult res = sync_title(&config, t, sync_progress);
-    if (res == SYNC_OK) {
-        set_status(UI_TONE_OK, "Uploaded: %.40s", t->name);
-        t->in_conflict = false;
-        t->sync_state = TSTATE_UPLOADED;
-        details_after_sync(t, true);
-    } else {
+    for (;;) {
+        op_title = "Uploading";
+        SyncResult res = sync_title(&config, t, sync_progress);
+        if (res == SYNC_OK) {
+            set_status(UI_TONE_OK, "Uploaded: %.40s", t->name);
+            t->in_conflict = false;
+            t->sync_state = TSTATE_UPLOADED;
+            details_after_sync(t, true);
+            return;
+        }
         set_status(UI_TONE_ERR, "Upload failed: %s", sync_result_str(res));
-        t->sync_state = TSTATE_FAILED;
+        set_title_failed(t, sync_result_str(res));
         last_details_idx = -1;
+        if (!transfer_failed_card(t, res, true, "upload")) return;
     }
 }
 
 static void download_title(TitleInfo *t) {
-    op_title = "Downloading";
-    SyncResult res = sync_download_title(&config, t, sync_progress);
-    if (res == SYNC_OK) {
-        set_status(UI_TONE_OK, "Downloaded: %.40s", t->name);
-        t->in_conflict = false;
-        t->sync_state = TSTATE_DOWNLOADED;
-        details_after_sync(t, false);
-    } else {
+    for (;;) {
+        op_title = "Downloading";
+        SyncResult res = sync_download_title(&config, t, sync_progress);
+        if (res == SYNC_OK) {
+            set_status(UI_TONE_OK, "Downloaded: %.40s", t->name);
+            t->in_conflict = false;
+            t->sync_state = TSTATE_DOWNLOADED;
+            details_after_sync(t, false);
+            return;
+        }
         set_status(UI_TONE_ERR, "Download failed: %s", sync_result_str(res));
-        t->sync_state = TSTATE_FAILED;
+        set_title_failed(t, sync_result_str(res));
         last_details_idx = -1;
+        if (!transfer_failed_card(t, res, false, "download")) return;
     }
 }
 
@@ -585,13 +723,11 @@ static void do_save_menu(void) {
 
     switch (ids[pick]) {
         case M_COMPARE:
-            if (compare_title(idx, "Save details")) ui_show_save_details(t, &last_details);
+            if (compare_ready(idx, "Save details")) ui_show_save_details(t, &last_details);
             break;
         case M_UPLOAD:
-            if (!compare_title(idx, "Upload")) break;
-            if (last_details.server_error) {
-                server_query_failed("Upload");
-            } else if (!last_details.local_exists) {
+            if (!compare_ready(idx, "Upload")) break;
+            if (!last_details.local_exists) {
                 ui_message(UI_TONE_INFO, "Upload", "This console has no save for this game yet.");
             } else if (ui_confirm_sync(t, &last_details, true, config.local_backups)) {
                 upload_title(t);
@@ -600,10 +736,8 @@ static void do_save_menu(void) {
             }
             break;
         case M_DOWNLOAD:
-            if (!compare_title(idx, "Download")) break;
-            if (last_details.server_error) {
-                server_query_failed("Download");
-            } else if (!last_details.server_exists) {
+            if (!compare_ready(idx, "Download")) break;
+            if (!last_details.server_exists) {
                 ui_message(UI_TONE_INFO, "Download", "The server has no save for this game yet.");
             } else if (ui_confirm_sync(t, &last_details, false, config.local_backups)) {
                 download_title(t);
@@ -631,8 +765,11 @@ static void do_smart_sync(void) {
     int idx = sel_title_idx();
     if (idx < 0) return;
     TitleInfo *t = &titles[idx];
-    if (!compare_title(idx, "Smart Sync")) return;
+    // A server we couldn't ask is explained there (with Try again); it
+    // never becomes an upload or download
+    if (!compare_ready(idx, "Smart Sync")) return;
     SyncAction suggested = sync_decide(&last_details);
+    if (suggested == SYNC_ACTION_SERVER_ERROR) return;   // compare_ready() already refused it
 
     if (suggested == SYNC_ACTION_UP_TO_DATE) {
         // Nothing to decide: say so without a modal
@@ -640,10 +777,7 @@ static void do_smart_sync(void) {
         return;
     }
     SyncAction chosen = ui_confirm_smart_sync(t, &last_details, suggested, config.local_backups);
-    if (suggested == SYNC_ACTION_SERVER_ERROR) {
-        // Never upload or download on a server state we couldn't read
-        set_status(UI_TONE_ERR, "Server unreachable, nothing changed");
-    } else if (chosen == SYNC_ACTION_UPLOAD) {
+    if (chosen == SYNC_ACTION_UPLOAD) {
         upload_title(t);
     } else if (chosen == SYNC_ACTION_DOWNLOAD) {
         download_title(t);
@@ -653,23 +787,32 @@ static void do_smart_sync(void) {
 }
 
 static void do_sync_all(void) {
-    // Clear all conflict flags before sync
-    for (int i = 0; i < title_count; i++)
-        titles[i].in_conflict = false;
-
-    op_title = "Sync all";
+    static char title_errors[MAX_TITLES][TITLE_ERROR_LEN];
     SyncSummary summary;
-    bool ok = sync_all(&config, titles, title_count, sync_progress, &summary);
-    last_details_idx = -1;
-    if (!ok) {
-        if (network_last_error()[0])
-            set_status(UI_TONE_ERR, "Sync failed: %.80s", network_last_error());
-        else
-            set_status(UI_TONE_ERR, "Sync failed! Check the server.");
-        return;
+    for (;;) {
+        // Clear all conflict flags before sync
+        for (int i = 0; i < title_count; i++)
+            titles[i].in_conflict = false;
+
+        op_title = "Sync all";
+        memset(title_errors, 0, sizeof(title_errors));
+        summary.title_error = title_errors;
+        bool ok = sync_all(&config, titles, title_count, sync_progress, &summary);
+        last_details_idx = -1;
+        if (ok) break;
+        // sync_all() only gives up before it uploads or downloads anything
+        if (!ui_error_card("Sync failed",
+                           network_last_error()[0] ? network_last_error()
+                                                   : "The server didn't accept the sync request.",
+                           "Nothing was changed.", "Check WiFi, or Settings > Server URL.", true)) {
+            set_status(UI_TONE_ERR, "Sync failed, nothing changed");
+            return;
+        }
     }
-    for (int i = 0; i < title_count && i < MAX_TITLES; i++)
+    for (int i = 0; i < title_count && i < MAX_TITLES; i++) {
         titles[i].sync_state = summary.title_state[i];
+        if (summary.title_state[i] == TSTATE_FAILED) set_title_failed(&titles[i], title_errors[i]);
+    }
 
     // Mark conflicting titles in our list
     for (int i = 0; i < summary.conflicts && i < MAX_CONFLICT_DISPLAY; i++) {
@@ -699,13 +842,29 @@ static void do_sync_all(void) {
         char title[64];
         snprintf(title, sizeof(title), "%d conflict%s", summary.conflicts, summary.conflicts == 1 ? "" : "s");
         ui_message(UI_TONE_WARN, title, body);
+    }
+    if (summary.failed > 0) {
+        // Which saves failed and why; the rest of the sync went through
+        char body[640];
+        int pos = append_failures(body, sizeof(body), 0, summary.failed);
+        snprintf(body + pos, sizeof(body) - pos,
+                 UI_DIM "Nothing changed for these. %d uploaded \xC2\xB7 %d downloaded \xC2\xB7 %d up to date",
+                 summary.uploaded, summary.downloaded, summary.up_to_date);
+        char title[64];
+        snprintf(title, sizeof(title), "Sync all: %d failed", summary.failed);
+        ui_dialog_ex(UI_TONE_ERR, title, body, (const UiButton[]){ { KEY_A | KEY_B, "A", "OK" } }, 1,
+                     &(UiDialogOpts){ 0, true });
+    }
 
-        set_status(UI_TONE_WARN, "Up %d  Down %d  OK %d  Conflict %d  Failed %d",
-                   summary.uploaded, summary.downloaded, summary.up_to_date,
-                   summary.conflicts, summary.failed);
+    if (summary.conflicts > 0 || summary.failed > 0) {
+        set_status(UI_TONE_WARN, "Synced: %d uploaded, %d downloaded, %d up to date, %d conflict%s, %d failed",
+                   summary.uploaded, summary.downloaded, summary.up_to_date, summary.conflicts,
+                   summary.conflicts == 1 ? "" : "s", summary.failed);
+    } else if (summary.uploaded + summary.downloaded + summary.up_to_date == 0) {
+        set_status(UI_TONE_OK, "Synced: nothing on this console to sync");
     } else {
-        set_status(summary.failed ? UI_TONE_WARN : UI_TONE_OK, "Up %d  Down %d  OK %d  Failed %d",
-                   summary.uploaded, summary.downloaded, summary.up_to_date, summary.failed);
+        set_status(UI_TONE_OK, "Synced: %d uploaded, %d downloaded, %d already up to date",
+                   summary.uploaded, summary.downloaded, summary.up_to_date);
     }
 }
 

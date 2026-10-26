@@ -350,6 +350,20 @@ u32 ui_dialog(UiTone tone, const char *title, const char *body, const UiButton *
     return ui_dialog_ex(tone, title, body, buttons, count, NULL);
 }
 
+bool ui_error_card(const char *title, const char *reason, const char *safety, const char *next, bool retry) {
+    char body[512];
+    snprintf(body, sizeof(body), "%s\n" UI_DIM "%s%s%s", reason && reason[0] ? reason : "Unknown error",
+             safety ? safety : "", next && next[0] ? "\n" : "", next ? next : "");
+    UiDialogOpts opts = { 0, true };
+    if (retry) {
+        static const UiButton b[] = { { KEY_B, "B", "Close" }, { KEY_A, "A", "Try again" } };
+        return (ui_dialog_ex(UI_TONE_ERR, title, body, b, 2, &opts) & KEY_A) != 0;
+    }
+    static const UiButton b[] = { { KEY_B | KEY_A, "B", "Close" } };
+    ui_dialog_ex(UI_TONE_ERR, title, body, b, 1, &opts);
+    return false;
+}
+
 void ui_body_line(const char *s, char *out, int out_size) {
     gui_fit(s, GUI_S_BODY, DLG_W - 24, out, (size_t)out_size);
 }
@@ -944,7 +958,17 @@ void ui_draw_saves_top(const SavesView *v) {
                       "Cartridge: not part of Sync All. Sync it with A.");
     }
 
-    if (v->details) {
+    if (t->sync_state == TSTATE_FAILED && !t->in_conflict && !v->details) {
+        // Why the last transfer of this save failed (and that A retries it)
+        gui_text(rx, y, GUI_S_BODY, gui_rgb(HEX_ERR), GUI_LEFT, "Sync failed");
+        float ry = y + gui_line_h(GUI_S_BODY) + 1;
+        int n = gui_text_wrap(rx, ry, GUI_S_SMALL, gui_rgb(HEX_ERR), colw, 3,
+                              t->last_error[0] ? t->last_error : "No reason recorded");
+        ry += n * lh + 2;
+        float cy = ry + lh / 2;
+        float bx = rx + gui_button(rx, cy, "A") + 5;
+        gui_text(bx, ry, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, "Check and sync again");
+    } else if (v->details) {
         SavesVerdict sv;
         saves_verdict(v->details, v->synced_ms, &sv);
         float ry = y;

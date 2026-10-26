@@ -103,6 +103,10 @@ u32 ui_dialog_ex(UiTone tone, const char *title, const char *body, const UiButto
 // it, or its key held), 0 otherwise. The backdrop reads it to preview the
 // choice before it is made.
 u32 ui_dialog_pressed(void);
+// Something failed: what happened (`reason`), whether anything changed
+// (`safety`, dim) and what to do next. ERR tone with a cross in the title;
+// B Close, plus A Try again when `retry`. True when A (try again) was picked.
+bool ui_error_card(const char *title, const char *reason, const char *safety, const char *next, bool retry);
 // Copy `s` cut to one line of dialog body text (for lists of names)
 void ui_body_line(const char *s, char *out, int out_size);
 // Message closed by any button

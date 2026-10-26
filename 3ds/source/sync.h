@@ -42,6 +42,9 @@ typedef struct {
     char conflict_titles[MAX_CONFLICT_DISPLAY][17];
     // TitleSyncState for each entry of the titles[] passed to sync_all
     u8 title_state[MAX_TITLES];
+    // Optional, set by the caller before sync_all (NULL = not wanted):
+    // MAX_TITLES strings that get why each failed entry of titles[] failed
+    char (*title_error)[TITLE_ERROR_LEN];
 } SyncSummary;
 
 // Callback for progress updates during sync

@@ -915,7 +915,8 @@ void ui_draw_saves_top(const SavesView *v) {
 
     if (v->count == 0 || v->selected < 0 || v->selected >= v->count) {
         gui_panel(8, 34, GUI_TOP_W - 16, 148);
-        if (searching && v->view_total > 0) {
+        // The same condition as the bottom screen's search-empty state
+        if (searching) {
             char q[80], line[112];
             search_label(v->search, q, sizeof(q));
             snprintf(line, sizeof(line), "No saves match %s", q);
@@ -925,6 +926,10 @@ void ui_draw_saves_top(const SavesView *v) {
                                    : "B clears the search.");
             gui_text(GUI_TOP_W / 2.0f, 120, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
                      new3ds ? "ZR or the search chip changes it." : "The search chip changes it.");
+            if (v->view_total == 0)
+                gui_text(GUI_TOP_W / 2.0f, 138, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,
+                         v->view_mode == VIEW_ALL ? "No titles with save data were found."
+                                                  : "This view is empty too. SELECT switches it.");
         } else {
             gui_text(GUI_TOP_W / 2.0f, 74, GUI_S_TITLE, gui_rgb(HEX_TEXT), GUI_CENTER, "No saves here");
             gui_text(GUI_TOP_W / 2.0f, 102, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_CENTER,

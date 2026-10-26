@@ -158,6 +158,12 @@ class Settings(BaseSettings):
     # Example: SYNC_ADMIN_USERS=admin,pepas
     admin_users: str = "admin"
 
+    # GitHub repository ("owner/repo") whose releases /update/check reports
+    # and /update/download is allowed to proxy for the 3DS/NDS clients.
+    update_repo: str = "pepasjc/GameSync"
+    # Set False to turn off both update endpoints (no outbound requests).
+    update_proxy_enabled: bool = True
+
     # ── Security toggles (secure-by-default) ─────────────────────────────
     # The X-Remote-User header is only trustworthy when set by a reverse
     # proxy we control (nginx Basic Auth).  A client hitting the server

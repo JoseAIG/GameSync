@@ -267,3 +267,148 @@ class TestUploadSizeLimit:
             headers=auth_headers,
         )
         assert r.status_code == 413
+
+
+# ── SSRF: update download proxy ─────────────────────────────────────────────
+
+ASSET_URL = "https://github.com/pepasjc/GameSync/releases/download/v0.5.4/3dssync.cia"
+
+
+@pytest.fixture()
+def github_mock(monkeypatch):
+    """Route the update proxy's HTTP client through a mock transport.
+
+    ``routes`` maps a URL to an ``httpx.Response``; every request made is
+    recorded in ``seen``.
+    """
+    import httpx
+
+    from app.routes import update
+
+    state = {"routes": {}, "seen": []}
+
+    def handler(request):
+        url = str(request.url)
+        state["seen"].append(url)
+        if url in state["routes"]:
+            return state["routes"][url]
+        return httpx.Response(404)
+
+    def factory(**kwargs):
+        return httpx.AsyncClient(transport=httpx.MockTransport(handler), **kwargs)
+
+    monkeypatch.setattr(update, "_http_client", factory)
+    return state
+
+
+class TestUpdateProxySSRF:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://localhost:8000/api/v1/status",
+            "http://github.com/pepasjc/GameSync/releases/download/v1/a.cia",
+            "https://github.com.evil.example/pepasjc/GameSync/releases/download/v1/a.cia",
+            "https://user@github.com/pepasjc/GameSync/releases/download/v1/a.cia",
+            "https://github.com:8443/pepasjc/GameSync/releases/download/v1/a.cia",
+            "https://github.com/someone/else/releases/download/v1/a.cia",
+            "https://github.com/pepasjc/GameSync/archive/refs/heads/master.zip",
+            "https://github.com/pepasjc/GameSync/releases/download/../../../x",
+            "https://github.com/pepasjc/GameSync/releases/download/v1/%2e%2e",
+            "https://github.com/pepasjc/GameSync/releases/download/v1/a.cia?x=1",
+            "file:///etc/passwd",
+        ],
+    )
+    def test_rejects_non_release_urls(self, client, auth_headers, github_mock, url):
+        r = client.get("/api/v1/update/download", params={"url": url}, headers=auth_headers)
+        assert r.status_code == 400
+        assert github_mock["seen"] == []
+
+    def test_proxies_release_asset_through_allowed_redirect(
+        self, client, auth_headers, github_mock
+    ):
+        import httpx
+
+        cdn = "https://release-assets.githubusercontent.com/github-production/abc?sig=1"
+        github_mock["routes"][ASSET_URL] = httpx.Response(302, headers={"Location": cdn})
+        github_mock["routes"][cdn] = httpx.Response(200, content=b"CIA-BYTES")
+        r = client.get(
+            "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
+        )
+        assert r.status_code == 200
+        assert r.content == b"CIA-BYTES"
+        assert "3dssync.cia" in r.headers["content-disposition"]
+
+    def test_redirect_off_github_is_refused(self, client, auth_headers, github_mock):
+        import httpx
+
+        github_mock["routes"][ASSET_URL] = httpx.Response(
+            302, headers={"Location": "http://192.168.1.1/admin"}
+        )
+        r = client.get(
+            "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
+        )
+        assert r.status_code == 502
+        assert github_mock["seen"] == [ASSET_URL]
+
+    def test_oversized_download_is_refused(
+        self, client, auth_headers, github_mock, monkeypatch
+    ):
+        import httpx
+
+        from app.routes import update
+
+        monkeypatch.setattr(update, "_MAX_DOWNLOAD_BYTES", 10)
+        github_mock["routes"][ASSET_URL] = httpx.Response(200, content=b"x" * 100)
+        r = client.get(
+            "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
+        )
+        assert r.status_code == 502
+
+    def test_configurable_repo(self, client, auth_headers, github_mock, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(settings, "update_repo", "JoseAIG/GameSync")
+        fork = "https://github.com/JoseAIG/GameSync/releases/download/v1/3dssync.cia"
+        github_mock["routes"][fork] = httpx.Response(200, content=b"FORK")
+        assert (
+            client.get("/api/v1/update/download", params={"url": fork}, headers=auth_headers).content
+            == b"FORK"
+        )
+        r = client.get(
+            "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
+        )
+        assert r.status_code == 400
+
+    def test_proxy_can_be_disabled(self, client, auth_headers, github_mock, monkeypatch):
+        monkeypatch.setattr(settings, "update_proxy_enabled", False)
+        r = client.get(
+            "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
+        )
+        assert r.status_code == 404
+        r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
+        assert r.status_code == 200
+        assert r.json()["available"] is False
+        assert github_mock["seen"] == []
+
+    def test_check_uses_configured_repo(self, client, auth_headers, github_mock, monkeypatch):
+        import httpx
+
+        monkeypatch.setattr(settings, "update_repo", "JoseAIG/GameSync")
+        api = "https://api.github.com/repos/JoseAIG/GameSync/releases/latest"
+        github_mock["routes"][api] = httpx.Response(
+            200,
+            json={
+                "tag_name": "v9.9.9",
+                "body": "",
+                "assets": [
+                    {
+                        "name": "3dssync.cia",
+                        "browser_download_url": "https://github.com/JoseAIG/GameSync/releases/download/v9.9.9/3dssync.cia",
+                        "size": 1,
+                    }
+                ],
+            },
+        )
+        r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
+        assert r.json()["available"] is True

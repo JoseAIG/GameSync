@@ -212,15 +212,55 @@ when a save sync is still running.
 
 ### Settings
 
-D-pad moves between the entries, A activates the highlighted one.
+D-pad moves between the entries, A activates the highlighted one. Every
+control saves the moment it changes; there is no Save button. A short
+*Saved* appears next to a control once its change is stored. The server URL
+and API key are saved when you press Done on the keyboard, when you move
+off the field, or when you leave the tab; a URL that doesn't start with
+`http://` or `https://` is flagged under the field and not saved. The page
+is grouped in cards, most-used first:
 
-| Entry | What it does |
+| Card | What it holds |
 |---|---|
-| Rescan saves | Look for emulator saves again (reads *Rescanning…* while a scan runs) |
-| Refresh catalog | Ask the server to rescan its ROM folder (`GET /api/v1/roms/scan`; a server that refuses with 403/404/405 is fine), throw the cached catalog away and download it again |
-| Server URL / API key, Test Connection, Save | Connection settings |
-| Emudeck, Auto Sync, Saturn / Sega CD / PS2 formats, ROM folders | As before |
-| Emulator Configuration → | Per-emulator save folders (its own screen; B goes back). An override that points to a folder that doesn't exist shows a warning above *Change*, which then becomes the highlighted button; the warning stays until the folder exists or the override is cleared |
+| Server | Server URL, API key, Test connection (it saves what you typed, then shows the result on the same line) |
+| Library | Rescan saves (reads *Rescanning…* while a scan runs); Refresh catalog: ask the server to rescan its ROM folder (`GET /api/v1/roms/scan`; a server that refuses with 403/404/405 is fine), throw the cached catalog away and download it again |
+| Folders | Emudeck folder, ROM directory, per-system folder overrides (Detect, change, reset, add a system) |
+| Save formats | Saturn download format, Sega CD save format, PS2 emulator |
+| Emulator configuration | Per-emulator save folders (its own screen; B goes back). An override that points to a folder that doesn't exist shows a warning above *Change*, which then becomes the highlighted button; the warning stays until the folder exists or the override is cleared |
+| Auto sync | The switch and its interval. A warning under the switch stays visible: auto sync can replace a save while an emulator is running, and the emulator may then overwrite it. Turning it on asks first (*Turn on* / *Keep off*); it is off by default |
+| Diagnostics | Collapsed until opened: Test ROM scan, Diagnose RetroArch paths, Prepare ROM folders, and what they found |
+| About | App version and console ID |
+
+The focused control always has a teal ring in its own shape.
+
+### Folder picker
+
+Browse opens a folder picker. The D-pad moves between folders and buttons,
+A opens the highlighted folder (or presses the highlighted button), **X**
+goes up one level and B cancels. Under the path a line says what GameSync
+would find in that folder, e.g. *Contains: 12 ROMs (.3ds), 3 saves (.srm)*,
+system folders such as `psx` or `GBA`, or an EmuDeck layout. Picking an
+emulator's save folder runs that emulator's own check instead (Azahar:
+*Found sdmc/Nintendo 3DS/…/title (14 titles)*). When nothing there is
+recognisable the line turns amber and *Select* asks before using the
+folder. The list slides the way you went, and going up returns to where
+you were in the parent folder.
+
+### Pickers on the save detail screen
+
+*Normalize* (choose the canonical name) and the Saturn archive picker use
+the same dialogs as the rest of the app: Up / Down move the cursor, A
+applies, B cancels. In the Saturn picker X includes or leaves out the
+archive under the cursor (tap a row to do the same by touch). The cursor
+starts on the current choice.
+
+### TalkBack
+
+List rows are read as one sentence with their status and, when it is the
+controller cursor, "selected"; the tap action is named ("Download",
+"Manage", "Open details"). Footer hints read as "A: Sync", dialog buttons by
+their label, tappable banners by what they do ("Review conflicts", "Fix
+emulator folder"), and download progress bars report their percentage.
 
 ## Game catalog cache
 
@@ -252,7 +292,8 @@ tests in `app/src/test/.../catalog/CatalogCacheTest.kt`.
 
 ## Configuration
 
-Open the app and go to **Settings** to enter your server URL and API key:
+Open the app and go to **Settings** to enter your server URL and API key
+(each is saved when you press Done or move off the field):
 
 ```
 Server URL:  http://192.168.1.100:8000

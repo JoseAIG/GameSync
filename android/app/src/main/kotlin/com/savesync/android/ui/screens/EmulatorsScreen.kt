@@ -45,6 +45,7 @@ import com.savesync.android.emulators.EmulatorRegistry
 import com.savesync.android.emulators.impl.RetroArchEmulator
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.GsButton
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
@@ -145,8 +146,7 @@ fun EmulatorsScreen(
         }
     }
 
-    val pickerKey = folderPickerForEmulator
-    if (pickerKey != null) {
+    GsDialogHost(folderPickerForEmulator) { pickerKey, _ ->
         FolderPickerDialog(
             initialPath = settings.saveDirOverrides[pickerKey] ?: "",
             // The contents line runs this emulator's own folder check.

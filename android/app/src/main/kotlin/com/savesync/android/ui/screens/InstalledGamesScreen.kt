@@ -66,6 +66,7 @@ import com.savesync.android.installed.InstalledRomsScanner
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.components.GsButton
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsConfirmDialog
 import com.savesync.android.ui.components.GsDialog
 import com.savesync.android.ui.components.GsDialogChoice
@@ -452,7 +453,7 @@ fun InstalledGamesScreen(
         }
     }
 
-    confirmTarget?.let { rom ->
+    GsDialogHost(confirmTarget) { rom, _ ->
         val wholeFolder = rememberDeletePlan(rom).wholeFolder
         // Per-rom action sheet: A syncs this game's save, X deletes the ROM
         // (after a second confirmation), B cancels.
@@ -520,7 +521,7 @@ fun InstalledGamesScreen(
         }
     }
 
-    deleteTarget?.let { rom ->
+    GsDialogHost(deleteTarget) { rom, _ ->
         val plan = rememberDeletePlan(rom)
         GsConfirmDialog(
             title = "Delete ${rom.displayName}?",

@@ -80,6 +80,20 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.max
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.ScrollState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import kotlinx.coroutines.delay
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.material3.CircularProgressIndicator
@@ -573,11 +587,117 @@ data class GsDialogChoice(
 )
 
 /**
+ * The enter/exit state of the dialog a [GsDialogHost] is showing; null
+ * outside a host.  [GsDialog] animates its card with it.
+ */
+val LocalGsDialogTransition = compositionLocalOf<MutableTransitionState<Boolean>?> { null }
+
+/**
+ * Keeps a dialog composed while it leaves, so it can animate out.  Callers
+ * drop their dialog state in the same click that closes it, which would
+ * remove the window on that frame; the host remembers the last non-null
+ * [target] and keeps composing [content] for it until the exit transition
+ * is idle.  [content] gets `dismissing = true` during the exit (GsDialog
+ * already ignores input then).  Use it for every dialog:
+ * `GsDialogHost(show.takeIf { it }) { _, _ -> GsDialog(…) }`.
+ */
+@Composable
+fun <T : Any> GsDialogHost(target: T?, content: @Composable (T, dismissing: Boolean) -> Unit) {
+    val transition = remember { MutableTransitionState(false) }
+    val last = remember { arrayOfNulls<Any>(1) }
+    if (target != null) last[0] = target
+    if (transition.targetState != (target != null)) transition.targetState = target != null
+    // A content that never runs the transition (no GsDialog inside) must not
+    // stay on screen: give the exit a generous ceiling.
+    var expired by remember { mutableStateOf(false) }
+    LaunchedEffect(target == null) {
+        expired = false
+        if (target == null) {
+            delay(DIALOG_EXIT_CEILING_MS)
+            expired = true
+        }
+    }
+    @Suppress("UNCHECKED_CAST")
+    val shown = last[0] as T?
+    val leaving = target == null
+    val stillVisible = dialogHostShows(
+        hasTarget = !leaving,
+        currentlyVisible = transition.currentState,
+        idle = transition.isIdle,
+        expired = expired,
+    )
+    if (shown != null && stillVisible) {
+        CompositionLocalProvider(LocalGsDialogTransition provides transition) {
+            content(shown, leaving)
+        }
+    } else if (leaving) {
+        last[0] = null
+    }
+}
+
+private const val DIALOG_EXIT_CEILING_MS = 1_000L
+
+/**
+ * Whether a [GsDialogHost] still composes its dialog: always while it has a
+ * target; after that only until the exit transition has finished (or the
+ * exit ceiling passed).
+ */
+internal fun dialogHostShows(hasTarget: Boolean, currentlyVisible: Boolean, idle: Boolean, expired: Boolean): Boolean =
+    hasTarget || (!expired && (currentlyVisible || !idle))
+
+/** Card enter: a slight grow from the centre and a fade (fade only under reduced motion). */
+internal fun gsDialogEnter(reduce: Boolean): EnterTransition =
+    if (reduce) fadeIn(GsMotion.fade())
+    else scaleIn(GsMotion.quick(), initialScale = GS_DIALOG_SCALE) + fadeIn(GsMotion.quick())
+
+/** Card exit: the mirror of [gsDialogEnter]. */
+internal fun gsDialogExit(reduce: Boolean): ExitTransition =
+    if (reduce) fadeOut(GsMotion.fade())
+    else scaleOut(GsMotion.quick(), targetScale = GS_DIALOG_SCALE) + fadeOut(GsMotion.fadeOut())
+
+/** Scale a dialog card enters from and leaves to (centre origin). */
+const val GS_DIALOG_SCALE = 0.94f
+
+/**
+ * A dialog card that materializes and leaves the same way: inside a
+ * [GsDialogHost] it follows the host's transition (enter and exit); alone it
+ * still animates in.  Must be called inside the Dialog's own content.
+ *
+ * The window itself doesn't animate (Theme.GameSync.Dialog has no window
+ * animation, and it is cleared here too).  The platform dim is kept: in
+ * Compose 1.6 a dialog window is sized to Configuration.screenWidthDp /
+ * screenHeightDp, which leave out the system bars, so a scrim of our own
+ * would leave the bars undimmed — worse than an instant dim.
+ */
+@Composable
+fun GsDialogMotion(content: @Composable () -> Unit) {
+    val reduce = LocalReduceMotion.current
+    val host = LocalGsDialogTransition.current
+    val standalone = remember { MutableTransitionState(false).apply { targetState = true } }
+    val transition = host ?: standalone
+    val view = LocalView.current
+    SideEffect { (view.parent as? DialogWindowProvider)?.window?.setWindowAnimations(0) }
+    AnimatedVisibility(
+        visibleState = transition,
+        enter = gsDialogEnter(reduce),
+        exit = gsDialogExit(reduce),
+        label = "gsDialog",
+    ) {
+        content()
+    }
+}
+
+/** True while the dialog this is called in is leaving (input is ignored then). */
+@Composable
+fun gsDialogDismissing(): Boolean = LocalGsDialogTransition.current?.targetState == false
+
+/**
  * Card dialog over the dimmed backdrop, driven by the controller like the
  * console clients: each choice answers to its own button glyph, B (and the
  * system Back gesture) cancels via [onDismiss] unless a choice claims B,
  * and START presses the A choice when [startConfirms].  Touch users get the
- * same choices as buttons.
+ * same choices as buttons.  Show it through a [GsDialogHost] so it can
+ * leave the way it came.
  *
  * A Dialog is its own window, so its keys never reach MainActivity's
  * dispatchKeyEvent or the screen behind it — they are handled here.
@@ -588,7 +708,8 @@ data class GsDialogChoice(
  * press), and the D-pad is consumed so focus can't wander.  A body with its
  * own cursor passes [onNavigate], which receives Up/Down as -1/+1; it draws
  * its rows with `GsListRow(isSelected = …)` and brings the selected row into
- * view itself.
+ * view itself.  While the dialog leaves, every input is ignored, so a second
+ * press can't act twice.
  */
 @Composable
 fun GsDialog(
@@ -598,91 +719,107 @@ fun GsDialog(
     message: String = "",
     startConfirms: Boolean = false,
     onNavigate: ((dy: Int) -> Unit)? = null,
+    /**
+     * X with no X choice: a dialog-internal action on the body's cursor
+     * (Sync all's "Include/skip").  Repeats are ignored like the choices'.
+     */
+    onButtonX: (() -> Unit)? = null,
+    /** The body's scroll position, so the body can scroll itself (e.g. with the D-pad). */
+    bodyScrollState: ScrollState? = null,
     body: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     val focusRequester = remember { FocusRequester() }
+    val dismissing = gsDialogDismissing()
+    val currentDismissing by rememberUpdatedState(dismissing)
     fun choiceFor(button: GsButton): GsDialogChoice? = choices.firstOrNull { it.button == button }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = GsShapes.Dialog,
-            color = GsColors.Panel,
-            shadowElevation = GsElevation.DialogShadow,
-            tonalElevation = GsElevation.DialogTonal,
-            modifier = Modifier
-                .widthIn(min = 280.dp, max = 520.dp)
-                .border(1.dp, GsColors.Line, GsShapes.Dialog)
-                .focusRequester(focusRequester)
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) {
-                        return@onPreviewKeyEvent false
-                    }
-                    val repeat = event.nativeKeyEvent.repeatCount > 0
-                    when (event.key) {
-                        Key.ButtonA, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
-                            if (!repeat) choiceFor(GsButton.A)?.onClick?.invoke()
-                            true
+    Dialog(onDismissRequest = { if (!currentDismissing) onDismiss() }) {
+        GsDialogMotion {
+            Surface(
+                shape = GsShapes.Dialog,
+                color = GsColors.Panel,
+                shadowElevation = GsElevation.DialogShadow,
+                tonalElevation = GsElevation.DialogTonal,
+                modifier = Modifier
+                    .widthIn(min = 280.dp, max = 520.dp)
+                    .border(1.dp, GsColors.Line, GsShapes.Dialog)
+                    .focusRequester(focusRequester)
+                    .focusable()
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) {
+                            return@onPreviewKeyEvent false
                         }
-                        Key.ButtonX -> {
-                            if (!repeat) choiceFor(GsButton.X)?.onClick?.invoke()
-                            true
+                        // Leaving: the choice already ran; swallow the rest.
+                        if (currentDismissing) return@onPreviewKeyEvent true
+                        val repeat = event.nativeKeyEvent.repeatCount > 0
+                        when (event.key) {
+                            Key.ButtonA, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
+                                if (!repeat) choiceFor(GsButton.A)?.onClick?.invoke()
+                                true
+                            }
+                            Key.ButtonX -> {
+                                if (!repeat) (choiceFor(GsButton.X)?.onClick ?: onButtonX)?.invoke()
+                                true
+                            }
+                            Key.ButtonY -> {
+                                if (!repeat) choiceFor(GsButton.Y)?.onClick?.invoke()
+                                true
+                            }
+                            Key.ButtonStart -> {
+                                if (!repeat && startConfirms) choiceFor(GsButton.A)?.onClick?.invoke()
+                                true
+                            }
+                            Key.ButtonB, Key.Escape -> {
+                                val b = choiceFor(GsButton.B)
+                                if (b != null) b.onClick() else onDismiss()
+                                true
+                            }
+                            Key.DirectionUp -> { onNavigate?.invoke(-1); true }
+                            Key.DirectionDown -> { onNavigate?.invoke(1); true }
+                            // Nothing in a dialog moves sideways; keep focus put.
+                            Key.DirectionLeft, Key.DirectionRight -> true
+                            else -> false
                         }
-                        Key.ButtonY -> {
-                            if (!repeat) choiceFor(GsButton.Y)?.onClick?.invoke()
-                            true
-                        }
-                        Key.ButtonStart -> {
-                            if (!repeat && startConfirms) choiceFor(GsButton.A)?.onClick?.invoke()
-                            true
-                        }
-                        Key.ButtonB, Key.Escape -> {
-                            val b = choiceFor(GsButton.B)
-                            if (b != null) b.onClick() else onDismiss()
-                            true
-                        }
-                        Key.DirectionUp -> { onNavigate?.invoke(-1); true }
-                        Key.DirectionDown -> { onNavigate?.invoke(1); true }
-                        // Nothing in a dialog moves sideways; keep focus put.
-                        Key.DirectionLeft, Key.DirectionRight -> true
-                        else -> false
-                    }
-                },
-        ) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Text(
-                    title,
-                    color = GsColors.Text,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (message.isNotBlank()) {
-                    Spacer(Modifier.height(8.dp))
+                    },
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        message,
-                        color = gsDim(),
-                        style = MaterialTheme.typography.bodyMedium,
+                        title,
+                        color = GsColors.Text,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
                     )
+                    if (message.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            message,
+                            color = gsDim(),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (body != null) {
+                        Spacer(Modifier.height(8.dp))
+                        // weight(fill = false): the title, message and choices
+                        // are measured first, so on a short window the body
+                        // shrinks and scrolls instead of pushing the buttons
+                        // out of the dialog.
+                        Column(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .heightIn(max = 360.dp)
+                                .verticalScroll(bodyScrollState ?: rememberScrollState()),
+                            content = body,
+                        )
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    FlowRowChoices(choices.map { c ->
+                        // A tap during the exit is ignored like a key.
+                        c.copy(onClick = { if (!currentDismissing) c.onClick() })
+                    })
                 }
-                if (body != null) {
-                    Spacer(Modifier.height(8.dp))
-                    // weight(fill = false): the title, message and choices
-                    // are measured first, so on a short window the body
-                    // shrinks and scrolls instead of pushing the buttons
-                    // out of the dialog.
-                    Column(
-                        modifier = Modifier
-                            .weight(1f, fill = false)
-                            .heightIn(max = 360.dp)
-                            .verticalScroll(rememberScrollState()),
-                        content = body,
-                    )
-                }
-                Spacer(Modifier.height(18.dp))
-                FlowRowChoices(choices)
             }
+            // Inside the Dialog's own composition: the requester lives there.
+            LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
         }
-        // Inside the Dialog's own composition: the requester lives there.
-        LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
     }
 }
 

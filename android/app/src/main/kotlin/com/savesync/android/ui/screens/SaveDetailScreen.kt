@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsListRow
 import com.savesync.android.ui.components.GsDialogChoice
@@ -211,8 +212,7 @@ fun SaveDetailScreen(
 
     // Normalize name and Saturn archive pickers: GsDialogs with their own
     // cursor (Up/Down through onNavigate), A applies, B cancels.
-    val pickerState = normalizePickerState
-    if (pickerState is NormalizePickerState.Visible) {
+    GsDialogHost(normalizePickerState as? NormalizePickerState.Visible) { pickerState, _ ->
         NormalizePickerDialog(
             state = pickerState,
             onApply = { name -> viewModel.applyNormalizationChoice(pickerState.entry, name) },
@@ -220,8 +220,7 @@ fun SaveDetailScreen(
         )
     }
 
-    val saturnPickerState = saturnArchivePickerState
-    if (saturnPickerState is SaturnArchivePickerState.Visible) {
+    GsDialogHost(saturnArchivePickerState as? SaturnArchivePickerState.Visible) { saturnPickerState, _ ->
         SaturnArchivePickerDialog(
             state = saturnPickerState,
             onApply = { selected -> viewModel.applySaturnArchiveSelection(selected) },
@@ -736,7 +735,7 @@ fun SaveDetailScreen(
 
     // ── Confirms ────────────────────────────────────────────────────
     val serverFound = serverMeta as? ServerMetaState.Found
-    if (confirmDownload) {
+    GsDialogHost(confirmDownload.takeIf { it }) { _, _ ->
         GsConfirmDialog(
             title = "Replace this device's save?",
             message = forceDownloadMessage(
@@ -757,7 +756,7 @@ fun SaveDetailScreen(
             onDismiss = { confirmDownload = false },
         )
     }
-    if (confirmUpload) {
+    GsDialogHost(confirmUpload.takeIf { it }) { _, _ ->
         GsConfirmDialog(
             title = "Replace the server's save?",
             message = "The server keeps the previous version in its history.",
@@ -769,7 +768,7 @@ fun SaveDetailScreen(
             onDismiss = { confirmUpload = false },
         )
     }
-    confirmRestore?.let { backup ->
+    GsDialogHost(confirmRestore) { backup, _ ->
         val shared = entry.systemName == "SAT" && entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
         GsConfirmDialog(
             title = "Put back the copy from ${formatWhen(backup.takenAt)}?",

@@ -70,6 +70,7 @@ import com.savesync.android.ui.screens.SaveDetailScreen
 import com.savesync.android.ui.screens.SavesScreen
 import com.savesync.android.ui.screens.SettingsScreen
 import com.savesync.android.ui.components.GsConfirmDialog
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.LocalServerOnline
 import com.savesync.android.ui.components.LocalServerConfigured
 import com.savesync.android.ui.components.GsNotice
@@ -681,7 +682,7 @@ private fun MainApp() {
             }
         }
 
-        if (showExitDialog) {
+        GsDialogHost(showExitDialog.takeIf { it }) { _, _ ->
             // A save sync dies with the app (downloads don't): say so.
             val syncState by viewModel.syncState.collectAsState()
             val detailState by viewModel.saveDetailState.collectAsState()

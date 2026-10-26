@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.Clear
 import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsNoticeKind
 import com.savesync.android.ui.components.LocalGsNotifier
 import androidx.compose.material.icons.filled.Download
@@ -352,7 +353,7 @@ fun DownloadsScreen(
         }
     }
 
-    removeTarget?.let { target ->
+    GsDialogHost(removeTarget) { target, _ ->
         val terminal = target.isTerminal
         GsConfirmDialog(
             title = if (terminal) "Remove from list?" else "Cancel download?",

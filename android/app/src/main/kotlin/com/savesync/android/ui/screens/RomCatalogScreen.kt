@@ -73,6 +73,7 @@ import com.savesync.android.catalog.RomCatalogFilter
 import com.savesync.android.findComponentActivity
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsDialog
@@ -618,7 +619,7 @@ fun RomCatalogScreen(
         }
     }
 
-    confirmTarget?.let { rom ->
+    GsDialogHost(confirmTarget) { rom, _ ->
         // A Wii U game's update and DLC are separate titles that are useless
         // apart, so one tap queues the whole set in install order.
         val group = rom.withRelated(catalog)

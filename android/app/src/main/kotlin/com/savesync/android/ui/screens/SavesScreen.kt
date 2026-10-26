@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.LinearProgressIndicator
 import com.savesync.android.ui.components.PullThresholdHaptic
+import com.savesync.android.ui.components.GsDialogHost
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -666,7 +667,7 @@ fun SavesScreen(
     }
 
     // ── Sync confirmation dialog ─────────────────────────────────────────
-    if (showConnectServer) {
+    GsDialogHost(showConnectServer.takeIf { it }) { _, _ ->
         GsDialog(
             title = "Connect a server first",
             message = "Sync all needs a GameSync server. Add its address in Settings.",
@@ -687,7 +688,7 @@ fun SavesScreen(
         )
     }
 
-    syncAllConfirm?.let { targets ->
+    GsDialogHost(syncAllConfirm) { targets, _ ->
         val copy = syncAllCopy(
             count = targets.size,
             filtersApplied = searchQuery.isNotBlank() || statusFilter != null,

@@ -88,6 +88,7 @@ import com.savesync.android.sync.SegaCdSyncFormat
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.components.FolderPickerDialog
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsChromeSpec
 import com.savesync.android.ui.components.GsConfirmDialog
@@ -856,7 +857,7 @@ fun SettingsScreen(
         }
     }
 
-    if (confirmAutoSync) {
+    GsDialogHost(confirmAutoSync.takeIf { it }) { _, _ ->
         GsConfirmDialog(
             title = "Turn on auto sync?",
             message = AUTO_SYNC_WARNING,
@@ -872,7 +873,7 @@ fun SettingsScreen(
     }
 
     // Folder pickers save the moment a folder is chosen.
-    if (showFolderPicker) {
+    GsDialogHost(showFolderPicker.takeIf { it }) { _, _ ->
         FolderPickerDialog(
             initialPath = romScanDir,
             onDismiss = { showFolderPicker = false },
@@ -883,7 +884,7 @@ fun SettingsScreen(
         )
     }
 
-    if (showEmudeckFolderPicker) {
+    GsDialogHost(showEmudeckFolderPicker.takeIf { it }) { _, _ ->
         FolderPickerDialog(
             initialPath = emudeckDir,
             onDismiss = { showEmudeckFolderPicker = false },
@@ -894,8 +895,7 @@ fun SettingsScreen(
         )
     }
 
-    val pickerSystem = folderPickerForSystem
-    if (pickerSystem != null) {
+    GsDialogHost(folderPickerForSystem) { pickerSystem, _ ->
         val currentOverride = settings.romDirOverrides[pickerSystem]
         val detectedPath = detectedFolders[pickerSystem]
         FolderPickerDialog(

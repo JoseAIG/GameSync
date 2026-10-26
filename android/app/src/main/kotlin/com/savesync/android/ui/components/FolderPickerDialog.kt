@@ -44,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -152,13 +153,17 @@ fun FolderPickerDialog(
     val config = LocalConfiguration.current
     val short = pickerIsShort(config.screenHeightDp, config.fontScale)
 
+    // Leaving (GsDialogHost exit): ignore input, so nothing acts twice.
+    val dismissing = gsDialogDismissing()
+    val currentDismissing by rememberUpdatedState(dismissing)
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = { if (!currentDismissing) onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         CompositionLocalProvider(
             LocalInputMode provides if (padMode) GsInputMode.Pad else GsInputMode.Touch,
         ) {
+          GsDialogMotion {
             Surface(
                 modifier = Modifier
                     .widthIn(max = 640.dp)
@@ -183,6 +188,7 @@ fun FolderPickerDialog(
                         .padding(if (short) 12.dp else 16.dp)
                         // Focus is always inside the dialog, so its root sees X.
                         .onPreviewKeyEvent { event ->
+                            if (currentDismissing) return@onPreviewKeyEvent true
                             if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
                             if (!padMode) {
                                 keysInDialog = true
@@ -321,10 +327,11 @@ fun FolderPickerDialog(
                     }
                 }
             }
+          }
         }
     }
 
-    confirmUnrecognised?.let { l ->
+    GsDialogHost(confirmUnrecognised) { l, _ ->
         GsConfirmDialog(
             title = "Nothing recognisable here — use anyway?",
             message = l.check.summary,

@@ -27,4 +27,7 @@ HOST_INC="-Itests/host -Iinclude"
 gcc $CFLAGS $HOST_INC -o "$out/test_history_parse" tests/test_history_parse.c source/history_parse.c
 "$out/test_history_parse"
 
+gcc $CFLAGS -o "$out/test_gui_motion" tests/test_gui_motion.c source/gui_motion.c -lm
+"$out/test_gui_motion"
+
 rm -rf "$out"

@@ -1,3 +1,8 @@
+// Drawing kit of the 3DS client (see gui.h).
+//
+// Spring response/damping parameterisation, momentum projection and
+// rubber-band formulas from Apple's *Designing Fluid Interfaces* (WWDC 2018).
+// The springs themselves live in gui_motion.c.
 #include "gui.h"
 #include "network.h"
 #include <3ds/util/utf.h>
@@ -10,6 +15,10 @@ static float screen_w = GUI_TOP_W;
 static int screen_id = GUI_TOP;
 static u32 ticks;
 static const char *ellipsis = "...";
+
+// Monotonic clock: system ticks since gui_init()
+static u64 tick0, frame_tick, frame_ms;
+static float frame_dt = 1.0f / 60.0f;
 
 u32 gui_mix(u32 a, u32 b, float t) {
     if (t < 0) t = 0;
@@ -33,6 +42,7 @@ void gui_init(void) {
     target_bottom = C2D_CreateScreenTarget(GFX_BOTTOM, GFX_LEFT);
     text_buf = C2D_TextBufNew(4096);
     fontEnsureMapped();
+    tick0 = frame_tick = svcGetSystemTick();
 
     // Use a real ellipsis when the system font has one
     CFNT_s *font = fontGetSystemFont();
@@ -47,11 +57,23 @@ void gui_exit(void) {
     gfxExit();
 }
 
+u64 gui_clock_ms(void) {
+    return (svcGetSystemTick() - tick0) / (SYSCLOCK_ARM11 / 1000);
+}
+
 void gui_begin(bool vsync) {
     C3D_FrameBegin(vsync ? C3D_FRAME_SYNCDRAW : 0);
     C2D_TextBufClear(text_buf);
     ticks++;
+    // Sampled after the vsync wait, so dt is the real frame-to-frame time
+    u64 now = svcGetSystemTick();
+    frame_dt = gui_dt_clamp((float)(now - frame_tick) / (float)SYSCLOCK_ARM11);
+    frame_tick = now;
+    frame_ms = (now - tick0) / (SYSCLOCK_ARM11 / 1000);
 }
+
+float gui_dt(void) { return frame_dt; }
+u64 gui_now_ms(void) { return frame_ms; }
 
 void gui_screen(int screen) {
     C3D_RenderTarget *t = (screen == GUI_TOP) ? target_top : target_bottom;
@@ -70,10 +92,36 @@ void gui_end(void) {
 float gui_w(void) { return screen_w; }
 u32 gui_ticks(void) { return ticks; }
 
-void gui_ease(float *value, float target, float speed) {
-    float d = target - *value;
-    if (fabsf(d) < 0.01f) *value = target;
-    else *value += d * speed;
+void gui_transition_start(GuiTransition *t, float from_px) {
+    t->from = from_px;
+    t->start_ms = gui_clock_ms();
+    t->frame = ticks;
+    gui_spring_set(&t->off, gui_reduce_motion() ? 0 : from_px);
+}
+
+void gui_transition_begin(GuiTransition *t) {
+    float fade;
+    if (gui_reduce_motion()) {
+        // Opacity only, timed: GUI_FADE_MS from fully faded to clear
+        gui_spring_set(&t->off, 0);
+        u64 age = gui_now_ms() > t->start_ms ? gui_now_ms() - t->start_ms : 0;
+        fade = age >= GUI_FADE_MS ? 0 : 0.6f * (1.0f - (float)age / GUI_FADE_MS);
+    } else {
+        if (t->frame != ticks) {
+            t->frame = ticks;
+            gui_spring(&t->off, 0, GUI_RESP_PUSH, frame_dt);
+        }
+        float k = t->from != 0 ? fabsf(t->off.x) / fabsf(t->from) : 0;
+        fade = 0.6f * (k > 1 ? 1 : k);
+    }
+    if (t->off.x != 0) C2D_ViewTranslate(t->off.x, 0);
+    // citro2d has no global alpha: tint toward the background instead
+    if (fade > 0) C2D_Fade(gui_rgba(HEX_BG, (u8)(fade * 255)));
+}
+
+void gui_transition_end(void) {
+    C2D_ViewReset();
+    C2D_Fade(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -357,8 +405,9 @@ void gui_bar(float x, float y, float w, float h, float frac, u32 color) {
     gui_rrect(x, y, w, h, h / 2, gui_rgb(HEX_BG2));
     if (frac < 0) {
         // Indeterminate: a segment sliding back and forth
+        // Wall-clock phase (~1.75 s period): right however often it's drawn
         float seg = w * 0.3f;
-        float t = (sinf(ticks * 0.06f) + 1) / 2;
+        float t = (sinf((float)(gui_now_ms() % 1745) * (2.0f * (float)M_PI / 1745.0f)) + 1) / 2;
         gui_rrect(x + (w - seg) * t, y, seg, h, h / 2, color);
         return;
     }
@@ -373,7 +422,7 @@ void gui_bar(float x, float y, float w, float h, float frac, u32 color) {
 
 void gui_spinner(float cx, float cy, float r, u32 color) {
     const int dots = 8;
-    int head = (ticks / 4) % dots;
+    int head = (int)((gui_now_ms() / 66) % dots);   // ~0.5 s per turn, wall clock
     for (int i = 0; i < dots; i++) {
         float a = (float)i / dots * 2 * (float)M_PI;
         int age = (head - i + dots) % dots;

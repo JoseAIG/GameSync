@@ -407,33 +407,35 @@ UiNav ui_tab_nav(u32 down) {
 void ui_list(UiListAnim *a, float x, float y, float w, int rows, float row_h,
              int count, int selected, int scroll, UiRowFn row, void *ctx) {
     if (!a->init || a->count != count) {
-        a->sel = selected;
-        a->scroll = scroll;
+        gui_spring_set(&a->sel, (float)selected);
+        gui_spring_set(&a->scroll, (float)scroll);
         a->count = count;
         a->init = true;
     }
-    // Long jumps snap, short moves glide
-    if (fabsf(a->sel - selected) > rows) a->sel = selected;
-    if (fabsf(a->scroll - scroll) > rows) a->scroll = scroll;
-    gui_ease(&a->sel, (float)selected, 0.4f);
-    gui_ease(&a->scroll, (float)scroll, 0.4f);
+    // Long jumps snap, short moves glide. The springs keep their velocity
+    // across retargets, so a held D-pad glides continuously.
+    if (fabsf(a->sel.x - selected) > rows) gui_spring_set(&a->sel, (float)selected);
+    if (fabsf(a->scroll.x - scroll) > rows) gui_spring_set(&a->scroll, (float)scroll);
+    float dt = gui_dt();
+    gui_spring(&a->sel, (float)selected, GUI_RESP_SELECT, dt);
+    gui_spring(&a->scroll, (float)scroll, GUI_RESP_SELECT, dt);
 
     bool bar = count > rows;
     float rw = bar ? w - 7 : w;
     if (count > 0 && selected >= 0) {
-        float sy = y + (a->sel - a->scroll) * row_h;
+        float sy = y + (a->sel.x - a->scroll.x) * row_h;
         gui_rrect(x + 3, sy + 1, rw - 6, row_h - 2, 5, gui_rgb(HEX_ACCENT));
     }
-    int first = (int)a->scroll;
+    int first = (int)floorf(a->scroll.x);
     for (int i = first; i <= first + rows && i < count; i++) {
         if (i < 0) continue;
-        float ry = y + (i - a->scroll) * row_h;
+        float ry = y + (i - a->scroll.x) * row_h;
         if (ry < y - row_h || ry > y + rows * row_h) continue;
         row(ctx, i, x, ry, rw, row_h, i == selected);
     }
     // Mask the row sliding out at the bottom
     gui_rect(x, y + rows * row_h, w, row_h, gui_rgb(HEX_BG));
-    if (bar) gui_scrollbar(x + w - 6, y + 3, rows * row_h - 6, scroll, rows, count, a->scroll);
+    if (bar) gui_scrollbar(x + w - 6, y + 3, rows * row_h - 6, scroll, rows, count, a->scroll.x);
 }
 
 int ui_list_touch(float y, int rows, float row_h, int count, int scroll) {
@@ -1202,7 +1204,7 @@ static void edit_top(void *ctx) {
     char cur[2] = { e->cursor < e->len ? e->text[e->cursor] : ' ', 0 };
     float cw = gui_text_w(GUI_S_BODY, cur);
     if (cw < 6) cw = 6;
-    bool blink = (gui_ticks() / 20) % 2 == 0;
+    bool blink = (gui_now_ms() / 333) % 2 == 0;
     gui_rrect(x, by + 6, cw + 2, bh - 12, 2, gui_rgb(blink ? HEX_ACCENT : HEX_PANEL_HI));
     gui_text(x + 1, ty, GUI_S_BODY, gui_rgb(HEX_INK), GUI_LEFT, cur);
     if (e->cursor < e->len)

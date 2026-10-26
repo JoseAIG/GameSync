@@ -9,6 +9,7 @@
 // lighter cards, teal accent, green / amber / blue / red status colours.
 
 #include "common.h"
+#include "gui_motion.h"
 #include <citro2d.h>
 
 #define GUI_TOP 0
@@ -72,18 +73,41 @@ void gui_init(void);
 void gui_exit(void);
 
 // Start a frame. vsync = true paces to 60 fps (interactive loops); false
-// draws right away (progress updates in the middle of a transfer).
+// draws right away (progress updates in the middle of a transfer). Also
+// samples the monotonic clock: see gui_now_ms() / gui_dt().
 void gui_begin(bool vsync);
 // Select and clear a screen (GUI_TOP / GUI_BOTTOM), draws the background
 void gui_screen(int screen);
 void gui_end(void);
 
-// Width of the selected screen, frame counter (for animations)
+// Width of the selected screen, frame counter. The counter must not drive
+// animation: frames are irregular (progress cards draw a few times a second)
 float gui_w(void);
 u32 gui_ticks(void);
 
-// Ease `*value` towards `target` (call once per frame)
-void gui_ease(float *value, float target, float speed);
+// Time. One monotonic clock, from the system tick counter (never osGetTime(),
+// which is the user-settable RTC):
+// seconds since the previous gui_begin(), clamped to [1/120, 1/20]
+float gui_dt(void);
+// ms since gui_init(), sampled at the current gui_begin()
+u64 gui_now_ms(void);
+// the same clock, read now (for code that runs between frames)
+u64 gui_clock_ms(void);
+
+// Content offset + fade toward the background, e.g. a tab or a folder level
+// entering from one side. start() at the change, then wrap the content's
+// drawing in begin()/end() every frame (begin() steps once per frame, so it
+// may wrap content on both screens). Under reduced motion the offset is 0
+// and a GUI_FADE_MS fade runs instead.
+typedef struct {
+    GuiSpring off;    // px
+    float from;       // px the content started from
+    u64 start_ms;
+    u32 frame;        // gui_ticks() of the last step
+} GuiTransition;
+void gui_transition_start(GuiTransition *t, float from_px);
+void gui_transition_begin(GuiTransition *t);
+void gui_transition_end(void);
 
 // ---------------------------------------------------------------------------
 // Shapes

@@ -113,8 +113,11 @@ UiNav ui_tab_nav(u32 down);
 // Scrolling list with an animated selection bar
 // ---------------------------------------------------------------------------
 
+// Presentation state of a list. The selection and scroll the caller owns
+// stay plain ints; these springs are what's drawn, in rows.
 typedef struct {
-    float sel, scroll;
+    GuiSpring sel;      // highlight position
+    GuiSpring scroll;   // viewport top
     int count;
     bool init;
 } UiListAnim;

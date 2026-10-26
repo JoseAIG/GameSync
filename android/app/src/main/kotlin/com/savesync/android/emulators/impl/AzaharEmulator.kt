@@ -3,6 +3,7 @@
 // src/core/file_sys/archive_source_sd_savedata.cpp.  No code copied.
 package com.savesync.android.emulators.impl
 
+import com.savesync.android.emulators.DirCheck
 import com.savesync.android.emulators.EmulatorBase
 import com.savesync.android.emulators.SaveEntry
 import java.io.File
@@ -140,6 +141,55 @@ class AzaharEmulator(
                     "or pick Azahar's user folder (the one containing sdmc)."
             }
             return null
+        }
+
+        /**
+         * What the folder picker shows for a candidate override: the
+         * [overrideWarning] when there is one, else where the saves were
+         * found and how many titles, e.g. "Found sdmc/Nintendo 3DS/…/title
+         * (14 titles)".  ok only when at least one title save is there.
+         * Reads the disk: call it off the main thread.
+         */
+        fun describeOverride(dir: File): DirCheck {
+            overrideWarning(dir.path)?.let { return DirCheck(false, it) }
+            val titleRoot = resolveOverrideTitleRoot(dir)
+            val titles = countTitleSaves(titleRoot)
+            val shown = displayTitleRoot(dir, titleRoot)
+            return if (titles > 0) {
+                DirCheck(true, "Found $shown (${if (titles == 1) "1 title" else "$titles titles"})")
+            } else {
+                DirCheck(
+                    false,
+                    "No 3DS saves in $shown yet. Start a game in Azahar once, " +
+                        "or pick Azahar's user folder (the one containing sdmc).",
+                )
+            }
+        }
+
+        /** Title folders under [titleRoot] that hold a save (``<high>/<low>/data/00000001``). */
+        private fun countTitleSaves(titleRoot: File): Int =
+            (titleRoot.listFiles() ?: emptyArray())
+                .filter { it.isDirectory && HEX8_REGEX.matches(it.name) }
+                .sumOf { high ->
+                    (high.listFiles() ?: emptyArray()).count { low ->
+                        low.isDirectory && HEX8_REGEX.matches(low.name) &&
+                            File(low, "data/00000001").isDirectory
+                    }
+                }
+
+        /** [titleRoot] relative to the picked [dir], the 32-hex ID folders shown as "…". */
+        private fun displayTitleRoot(dir: File, titleRoot: File): String {
+            val relative = titleRoot.absoluteFile.toRelativeString(dir.absoluteFile)
+            if (relative.isEmpty()) return dir.name
+            val parts = mutableListOf<String>()
+            relative.split(File.separatorChar).forEach { seg ->
+                if (HEX32_REGEX.matches(seg)) {
+                    if (parts.lastOrNull() != "…") parts += "…"
+                } else {
+                    parts += seg
+                }
+            }
+            return parts.joinToString("/")
         }
 
         /**

@@ -149,6 +149,8 @@ fun EmulatorsScreen(
     if (pickerKey != null) {
         FolderPickerDialog(
             initialPath = settings.saveDirOverrides[pickerKey] ?: "",
+            // The contents line runs this emulator's own folder check.
+            emulatorKey = pickerKey,
             onDismiss = { folderPickerForEmulator = null },
             onFolderSelected = { path ->
                 viewModel.setSaveDirOverride(pickerKey, path)

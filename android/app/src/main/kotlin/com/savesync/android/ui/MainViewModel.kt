@@ -2097,44 +2097,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun syncNow() {
+    /**
+     * Sync all: syncs exactly [entries], the local saves the Saves list
+     * shows (see [syncAllTargets]), so the count the confirm dialog names is
+     * what runs.  It used to ignore the search and status filter and sync
+     * every local save of the system, which could download over saves the
+     * user never saw listed.
+     */
+    fun syncNow(entries: List<SaveEntry>) {
         viewModelScope.launch {
             val currentSettings = settingsStore.settingsFlow.first()
             if (currentSettings.serverUrl.isBlank()) {
                 _syncState.value = SyncState.Error("Server URL not configured")
                 return@launch
             }
+            val localSaves = syncAllTargets(entries)
+            if (localSaves.isEmpty()) return@launch
 
             _syncState.value = SyncState.Syncing
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
-                // Only sync local saves (exclude server-only entries)
-                val romScanDir = effectiveRomScanDir(currentSettings)
-                val emudeckDir = currentSettings.emudeckDir
-                val romDirOverrides = currentSettings.romDirOverrides
                 val saveDirOverrides = currentSettings.saveDirOverrides
-                val allLocalSaves = _allSaves.value.filter { !it.isServerOnly }.ifEmpty {
-                    EmulatorRegistry.discoverAllSaves(
-                        romScanDir = romScanDir,
-                        emudeckDir = emudeckDir,
-                        romDirOverrides = romDirOverrides,
-                        saveDirOverrides = saveDirOverrides,
-                        saturnSyncFormat = currentSettings.saturnSyncFormat,
-                        segaCdSyncFormat = currentSettings.segaCdSyncFormat,
-                        ps2Emulator = currentSettings.ps2Emulator,
-                        beetleSaturnPerCoreFolder = currentSettings.beetleSaturnPerCoreFolder,
-                        cdGamesPerContentFolder = currentSettings.cdGamesPerContentFolder
-                    ).also { found ->
-                        _allSaves.value = found
-                    }
-                }
-                // Respect the active system filter — "All" syncs everything,
-                // any other filter scopes the sync to that system only.
-                val activeFilter = _selectedFilter.value
-                val localSaves = if (activeFilter == "All") allLocalSaves
-                                 else allLocalSaves.filter { it.systemName == activeFilter }
                 val result = engine.sync(localSaves)
                 // A broken save-folder override silently yields "nothing to
                 // sync" for that emulator; say so instead.

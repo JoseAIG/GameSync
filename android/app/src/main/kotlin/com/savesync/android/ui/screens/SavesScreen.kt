@@ -60,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -87,6 +88,8 @@ import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveSyncStatus
 import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.SaveDetailState
+import com.savesync.android.ui.syncAllCopy
+import com.savesync.android.ui.syncAllTargets
 import com.savesync.android.ui.components.ButtonGlyph
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsConfirmDialog
@@ -156,7 +159,9 @@ fun SavesScreen(
 
     // Saveable, so rotation keeps the search open and the cursor in place.
     var searchVisible by rememberSaveable { mutableStateOf(false) }
-    var showSyncConfirmDialog by remember { mutableStateOf(false) }
+    // The saves the open Sync-all dialog will sync, captured when it opened:
+    // its label and its action read this one list.
+    var syncAllConfirm by remember { mutableStateOf<List<SaveEntry>?>(null) }
 
     // ── Manual D-pad selection state ─────────────────────────────────────
     // We track the selected index ourselves and scroll the list manually so
@@ -298,9 +303,21 @@ fun SavesScreen(
         viewModel.syncSave(entry)
     }
 
-    val syncCountLabel = when {
-        selectedFilter == "All" -> "Sync all ${saves.size} saves?"
-        else -> "Sync ${saves.size} $selectedFilter saves?"
+    /**
+     * X / the header sync button: confirm a sync of exactly the local saves
+     * this list shows.  With none, say so instead of opening an empty dialog.
+     */
+    // The header button's lambda is remembered; it reads the current list.
+    val currentSaves by rememberUpdatedState(saves)
+    val currentlySyncing by rememberUpdatedState(isSyncing)
+    fun requestSyncAll() {
+        if (currentlySyncing) return
+        val targets = syncAllTargets(currentSaves)
+        if (targets.isEmpty()) {
+            notifier.show(GsNotice(GsNoticeKind.Info, "Nothing to sync in this view"))
+        } else {
+            syncAllConfirm = targets
+        }
     }
 
     // Header actions and footer hints, drawn by MainApp's persistent chrome.
@@ -321,7 +338,7 @@ fun SavesScreen(
                 // Sync all (X button); spins for a single A sync too, in
                 // the same fixed slot so nothing shifts under the finger.
                 GsActionSlot(busy = busy) {
-                    IconButton(onClick = { showSyncConfirmDialog = true }) {
+                    IconButton(onClick = { requestSyncAll() }) {
                         Icon(Icons.Default.Sync, contentDescription = "Sync all (X)", tint = GsColors.Text)
                     }
                 }
@@ -480,7 +497,7 @@ fun SavesScreen(
                         }
                         // X → sync all (with confirmation)
                         Key.ButtonX -> {
-                            if (!isSyncing) showSyncConfirmDialog = true
+                            requestSyncAll()
                             true
                         }
                         else -> false
@@ -528,16 +545,20 @@ fun SavesScreen(
     }
 
     // ── Sync confirmation dialog ─────────────────────────────────────────
-    if (showSyncConfirmDialog) {
+    syncAllConfirm?.let { targets ->
+        val copy = syncAllCopy(
+            count = targets.size,
+            filtersApplied = searchQuery.isNotBlank() || statusFilter != null,
+        )
         GsConfirmDialog(
-            title = "Sync all",
-            message = syncCountLabel,
+            title = copy.title,
+            message = copy.message,
             confirmLabel = "Sync",
             onConfirm = {
-                showSyncConfirmDialog = false
-                viewModel.syncNow()
+                syncAllConfirm = null
+                viewModel.syncNow(targets)
             },
-            onDismiss = { showSyncConfirmDialog = false },
+            onDismiss = { syncAllConfirm = null },
         )
     }
 }

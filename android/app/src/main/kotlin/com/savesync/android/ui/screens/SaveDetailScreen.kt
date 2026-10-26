@@ -96,6 +96,11 @@ import com.savesync.android.ui.SaturnArchivePickerState
 import com.savesync.android.ui.SaveDetailState
 import com.savesync.android.ui.SaveSyncStatus
 import com.savesync.android.ui.ServerMetaState
+import com.savesync.android.ui.ServerSide
+import com.savesync.android.ui.detailSyncStatus
+import androidx.compose.runtime.produceState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -109,7 +114,10 @@ fun SaveDetailScreen(
     onNavigateBack: () -> Unit,
     onNavigateToTab: (Int) -> Unit = {},
 ) {
-    val saves by viewModel.saves.collectAsState()
+    // Unfiltered: a status change that drops this game from the filtered
+    // list must not empty the screen.
+    val saves by viewModel.allSaves.collectAsState()
+    val allRows by viewModel.allRows.collectAsState()
     val detailState by viewModel.saveDetailState.collectAsState()
     val serverMeta by viewModel.serverMeta.collectAsState()
     // App-wide notices: a message survives this screen leaving, so a result
@@ -339,12 +347,28 @@ fun SaveDetailScreen(
             (listOf(entry.saveFile) + entry.extraFiles).filter { it.exists() }.maxOfOrNull { it.lastModified() } ?: 0L
         else -> entry.saveFile?.lastModified() ?: entry.saveDir?.lastModified() ?: 0L
     }
-    val localHash = remember(entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
-        viewModel.detailLocalHash(entry)
+    // Hashing and walking a save folder read files: off the main thread.
+    val localHash by produceState<String?>(null, entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
+        value = viewModel.detailLocalHash(entry)
     }
-    val localSize = remember(entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
-        viewModel.detailLocalSize(entry)
+    val localSize by produceState(0L, entry.titleId, fileModTime, saturnArchiveSelectionVersion) {
+        value = withContext(Dispatchers.IO) { viewModel.detailLocalSize(entry) }
     }
+    // The header pill: the same three values the Server block below shows
+    // (local hash, last-synced hash, server hash), so the two agree.
+    val serverSide = when (val m = serverMeta) {
+        is ServerMetaState.Found -> if (m.hash.isBlank() || m.hash == "—") ServerSide.Unknown else ServerSide.Hash(m.hash)
+        is ServerMetaState.NotFound -> ServerSide.Missing
+        else -> ServerSide.Unknown
+    }
+    val rowStatus = allRows.firstOrNull { it.entry.titleId == titleId }?.status
+    val headerStatus = detailSyncStatus(
+        hasLocal = viewModel.canUploadFromDetail(entry),
+        localHash = localHash,
+        lastSyncedHash = syncState?.lastSyncedHash,
+        server = serverSide,
+        fallback = rowStatus,
+    )
 
     // ── ROM availability (needed before we build the action list) ──
     val romAvailable by viewModel.romAvailable.collectAsState()
@@ -524,8 +548,7 @@ fun SaveDetailScreen(
         // System badge + sync status badge + picker for RETRO
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SystemChip(entry.systemName)
-            val detailSyncStatus = viewModel.computeSyncStatus(entry, syncState, cheapOnly = true)
-            SyncStatusBadge(detailSyncStatus)
+            SyncStatusBadge(headerStatus)
             if (entry.systemName == "RETRO") {
                 Text("Unknown — set below:", style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)

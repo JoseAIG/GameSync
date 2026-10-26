@@ -287,35 +287,16 @@ class SyncEngine(
         }
     }
 
-    private fun isSaturnEntry(entry: SaveEntry): Boolean {
-        return entry.systemName == "SAT" && entry.saveFile != null && !entry.isMultiFile && !entry.isPspSlot
-    }
+    private fun isSaturnEntry(entry: SaveEntry): Boolean = isSaturnSaveEntry(entry)
 
-    private fun isSharedYabaSanshiroContainer(entry: SaveEntry): Boolean {
-        return isSaturnEntry(entry) &&
-            saturnSyncFormat == SaturnSyncFormat.YABASANSHIRO &&
-            entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
-    }
+    private fun isSharedYabaSanshiroContainer(entry: SaveEntry): Boolean =
+        isSharedYabaSanshiroSave(entry, saturnSyncFormat)
 
     private fun saturnCanonicalSnapshot(
         entry: SaveEntry,
         @Suppress("UNUSED_PARAMETER") syncState: SyncStateEntity? = null
     ): SaturnCanonicalSnapshot? {
-        if (!isSaturnEntry(entry)) return null
-
-        val saveFile = entry.saveFile ?: return null
-        val canonicalBytes = if (isSharedYabaSanshiroContainer(entry)) {
-            val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
-            if (archiveNames.isEmpty()) {
-                throw UnsupportedOperationException(
-                    "This YabaSanshiro save still needs Saturn archive selection metadata."
-                )
-            }
-            SaturnSaveFormatConverter.extractCanonical(saveFile.readBytes(), archiveNames)
-        } else {
-            SaturnSaveFormatConverter.toCanonical(saveFile.readBytes())
-        }
-
+        val canonicalBytes = saturnCanonicalBytes(entry, saturnSyncFormat) ?: return null
         return SaturnCanonicalSnapshot(
             bytes = canonicalBytes,
             archiveNames = SaturnSaveFormatConverter.archiveNames(canonicalBytes)
@@ -341,11 +322,8 @@ class SyncEngine(
 
     private fun canonicalHash(
         entry: SaveEntry,
-        syncState: SyncStateEntity? = null
-    ): String {
-        return saturnCanonicalSnapshot(entry, syncState)?.let { HashUtils.sha256Bytes(it.bytes) }
-            ?: entry.computeHash()
-    }
+        @Suppress("UNUSED_PARAMETER") syncState: SyncStateEntity? = null
+    ): String = localSyncHash(entry, saturnSyncFormat)
 
     private fun canonicalSize(
         entry: SaveEntry,
@@ -1043,6 +1021,48 @@ class SyncEngine(
         }
     }
 }
+
+/** A Saturn save held as one native backup file (not a PSP slot or a folder). */
+internal fun isSaturnSaveEntry(entry: SaveEntry): Boolean =
+    entry.systemName == "SAT" && entry.saveFile != null && !entry.isMultiFile && !entry.isPspSlot
+
+/** YabaSanshiro's shared `backup.bin`, which holds many games' saves at once. */
+internal fun isSharedYabaSanshiroSave(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): Boolean =
+    isSaturnSaveEntry(entry) &&
+        saturnSyncFormat == SaturnSyncFormat.YABASANSHIRO &&
+        entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+
+/**
+ * The canonical bytes sync sends for a Saturn save, or null when [entry] is
+ * not one.  A shared YabaSanshiro container yields only the archives chosen
+ * for this title and throws until that choice exists.
+ */
+internal fun saturnCanonicalBytes(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): ByteArray? {
+    if (!isSaturnSaveEntry(entry)) return null
+    val saveFile = entry.saveFile ?: return null
+    return if (isSharedYabaSanshiroSave(entry, saturnSyncFormat)) {
+        val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
+        if (archiveNames.isEmpty()) {
+            throw UnsupportedOperationException(
+                "This YabaSanshiro save still needs Saturn archive selection metadata."
+            )
+        }
+        SaturnSaveFormatConverter.extractCanonical(saveFile.readBytes(), archiveNames)
+    } else {
+        SaturnSaveFormatConverter.toCanonical(saveFile.readBytes())
+    }
+}
+
+/**
+ * The hash sync compares for [entry]: what SyncEngine sends as `save_hash`
+ * and records as `lastSyncedHash`.  Saturn saves hash in canonical form, so a
+ * raw file hash would never match the recorded one.  Anything that shows a
+ * save's status must use this, or the status disagrees with what sync does.
+ * May throw (unreadable file, unparsable Saturn save).
+ */
+fun localSyncHash(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): String =
+    saturnCanonicalBytes(entry, saturnSyncFormat)?.let { HashUtils.sha256Bytes(it) }
+        ?: entry.computeHash()
 
 private enum class RawCardSyncOutcome {
     UPLOADED,

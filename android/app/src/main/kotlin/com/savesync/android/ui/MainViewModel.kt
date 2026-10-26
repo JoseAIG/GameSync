@@ -50,6 +50,7 @@ import com.savesync.android.sync.SegaCdSyncFormat
 import com.savesync.android.sync.SaturnSaveFormatConverter
 import com.savesync.android.sync.SyncEngine
 import com.savesync.android.sync.SyncResult
+import com.savesync.android.sync.localSyncHash
 import com.savesync.android.workers.SyncWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -63,6 +64,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -89,8 +93,8 @@ sealed class SyncState {
 enum class SaveSyncStatus(val label: String) {
     /** Local hash matches server hash — fully synced. */
     SYNCED("Synced"),
-    /** Exists locally but never synced / no server copy. */
-    LOCAL_ONLY("Local Only"),
+    /** No last-synced hash on this device, whether or not the server has a copy. */
+    LOCAL_ONLY("Never synced"),
     /** Exists on server but not locally. */
     SERVER_ONLY("Server Only"),
     /** Local changed since last sync, server unchanged → needs upload. */
@@ -99,8 +103,8 @@ enum class SaveSyncStatus(val label: String) {
     SERVER_NEWER("Server Newer"),
     /** Both sides changed since last sync → conflict. */
     CONFLICT("Conflict"),
-    /** No sync state recorded and hashes differ — unknown relationship. */
-    UNKNOWN("Not Synced")
+    /** The save couldn't be hashed, or nothing is known on either side. */
+    UNKNOWN("Unknown")
 }
 
 sealed class SaveDetailState {
@@ -219,137 +223,139 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
-     * Computes the sync status for a save entry by comparing local hash,
-     * server hash, and last-synced hash from the Room database.
-     *
-     * When [cheapOnly] is true, skip the expensive file-hash computation and
-     * only return statuses derivable from metadata (isServerOnly, presence of
-     * lastSyncedHash). Used during composition to avoid disk I/O on the main thread.
+     * Computed statuses, keyed by [StatusKey] (the save's files, its base
+     * hash and the hashing rules), so a filter or search change never
+     * re-hashes and a sync only re-hashes the titles it touched.
      */
-    fun computeSyncStatus(
-        entry: SaveEntry,
-        syncState: SyncStateEntity?,
-        cheapOnly: Boolean = false
-    ): SaveSyncStatus {
-        val isSharedYabaSanshiroEntry =
-            entry.systemName == "SAT" &&
-                entry.isServerOnly &&
-                entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+    private val statusCache = java.util.concurrent.ConcurrentHashMap<StatusKey, SaveSyncStatus>()
 
-        if (isSharedYabaSanshiroEntry && entry.saveFile?.exists() == true) {
-            if (syncState?.lastSyncedHash == null) {
-                return SaveSyncStatus.LOCAL_ONLY
-            }
-            if (cheapOnly) return SaveSyncStatus.SYNCED
-
-            val localHash = try {
-                val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
-                if (archiveNames.isEmpty() || entry.saveFile?.exists() != true) {
-                    ""
-                } else {
-                    val canonical = SaturnSaveFormatConverter.extractCanonical(
-                        entry.saveFile.readBytes(),
-                        archiveNames
-                    )
-                    HashUtils.sha256Bytes(canonical)
-                }
-            } catch (_: Exception) {
-                ""
-            }
-
-            return if (localHash.isNotEmpty() && localHash != syncState.lastSyncedHash) {
-                SaveSyncStatus.LOCAL_NEWER
-            } else {
-                SaveSyncStatus.SYNCED
-            }
+    /**
+     * Every save with its status, unfiltered.  Each change first emits what is
+     * known without hashing (server-only, never synced, cached results; the
+     * rest null = "Checking…"), then the hashed statuses — all off the main
+     * thread.  A status is the save's sync hash ([localSyncHash], the one
+     * SyncEngine sends) against its last-synced hash, so a row never says
+     * Synced while the L2/R2 filter would call it Local newer.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val allSaveRows: StateFlow<List<SaveRow>> = combine(
+        _allSaves,
+        syncStateEntities,
+        _saturnArchiveSelectionVersion,
+        settingsStore.settingsFlow.map { it.saturnSyncFormat }.distinctUntilChanged(),
+    ) { all, syncEntities, saturnVersion, saturnFormat ->
+        StatusInputs(all, syncEntities.associateBy { it.titleId }, "$saturnFormat#$saturnVersion", saturnFormat)
+    }.transformLatest { inputs ->
+        val pending = ArrayList<Int>()
+        val keys = arrayOfNulls<StatusKey>(inputs.saves.size)
+        val first = inputs.saves.mapIndexed { i, entry ->
+            val sync = inputs.syncMap[entry.titleId]
+            val cheap = cheapStatusFor(entry, sync)
+            if (cheap != null) return@mapIndexed SaveRow(entry, cheap)
+            val (mtime, size) = runCatching { entry.statFingerprint() }.getOrDefault(0L to 0L)
+            val key = StatusKey(entry.titleId, mtime, size, sync?.lastSyncedHash, inputs.hashRules)
+            keys[i] = key
+            val cached = statusCache[key]
+            if (cached == null) pending += i
+            SaveRow(entry, cached)
         }
-        if (entry.isServerOnly) return SaveSyncStatus.SERVER_ONLY
-
-        val lastSyncedHash = syncState?.lastSyncedHash
-        if (lastSyncedHash == null) {
-            // Never synced
-            return SaveSyncStatus.LOCAL_ONLY
+        emit(first)
+        if (pending.isEmpty()) return@transformLatest
+        val full = first.toMutableList()
+        for (i in pending) {
+            val entry = inputs.saves[i]
+            val status = fullStatusFor(entry, inputs.syncMap[entry.titleId], inputs.saturnFormat)
+            keys[i]?.let { statusCache[it] = status }
+            full[i] = SaveRow(entry, status)
         }
+        emit(full)
+    }.flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-        if (cheapOnly) {
-            // Cheap mode: we know it was synced at least once; assume SYNCED
-            // unless background computation says otherwise.
-            return SaveSyncStatus.SYNCED
-        }
+    private data class StatusInputs(
+        val saves: List<SaveEntry>,
+        val syncMap: Map<String, SyncStateEntity>,
+        val hashRules: String,
+        val saturnFormat: SaturnSyncFormat,
+    )
 
-        // Full mode (called from background coroutine in combine transform)
-        val localHash = try { entry.computeHash() } catch (_: Exception) { "" }
-        val localChanged = localHash.isNotEmpty() && localHash != lastSyncedHash
+    /** YabaSanshiro's shared backup.bin listed as a server-only row while it exists locally. */
+    private fun isSharedYabaRow(entry: SaveEntry): Boolean =
+        entry.systemName == "SAT" &&
+            entry.isServerOnly &&
+            entry.saveFile?.name.equals("backup.bin", ignoreCase = true) &&
+            entry.saveFile?.exists() == true
 
-        // Without eagerly fetching server meta for every entry, we can only
-        // tell "local changed since last sync" vs "matches last sync".
-        // The full three-way comparison happens during actual sync.
-        return when {
-            localChanged -> SaveSyncStatus.LOCAL_NEWER
-            else -> SaveSyncStatus.SYNCED
-        }
+    /** Status known without hashing, or null (see [cheapSyncStatus]). */
+    private fun cheapStatusFor(entry: SaveEntry, sync: SyncStateEntity?): SaveSyncStatus? {
+        // A shared Saturn container is a local save even though it is listed
+        // server-only (SyncEngine syncs it through the archive selection).
+        val serverOnly = entry.isServerOnly && !isSharedYabaRow(entry)
+        return cheapSyncStatus(isServerOnly = serverOnly, lastSyncedHash = sync?.lastSyncedHash)
     }
 
-    // Filtered view of saves, derived from _allSaves + _selectedFilter + _searchQuery + _statusFilter + syncStateEntities
-    val saves: StateFlow<List<SaveEntry>> = combine(
-        _allSaves,
-        _selectedFilter,
-        _searchQuery,
-        _statusFilter,
-        syncStateEntities,
-        _saturnArchiveSelectionVersion
-    ) { args: Array<*> ->
-        @Suppress("UNCHECKED_CAST")
-        val all = args[0] as List<SaveEntry>
-        val systemFilter = args[1] as String
-        val query = args[2] as String
-        val statusFilter = args[3] as SaveSyncStatus?
-        @Suppress("UNCHECKED_CAST")
-        val syncEntities = args[4] as List<SyncStateEntity>
-        args[5] as Int
-
-        var result = all
-
-        // System filter
-        if (systemFilter != "All") {
-            result = result.filter { it.systemName == systemFilter }
-        }
-
-        // Text search
-        if (query.isNotBlank()) {
-            val q = query.lowercase().trim()
-            result = result.filter { entry ->
-                entry.displayName.lowercase().contains(q) ||
-                entry.titleId.lowercase().contains(q) ||
-                (entry.canonicalName?.lowercase()?.contains(q) == true)
+    /** The hashed status ([localStatus]); runs on the IO dispatcher. */
+    private fun fullStatusFor(entry: SaveEntry, sync: SyncStateEntity?, saturnFormat: SaturnSyncFormat): SaveSyncStatus {
+        val localHash = try {
+            if (isSharedYabaRow(entry)) {
+                val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
+                if (archiveNames.isEmpty()) ""
+                else HashUtils.sha256Bytes(
+                    SaturnSaveFormatConverter.extractCanonical(entry.saveFile!!.readBytes(), archiveNames)
+                )
+            } else {
+                localSyncHash(entry.reconcileWithDisk(), saturnFormat)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
         }
+        return localStatus(localHash, sync?.lastSyncedHash)
+    }
 
-        // Status filter
-        if (statusFilter != null) {
-            val syncMap = syncEntities.associateBy { it.titleId }
-            result = result.filter { entry ->
-                computeSyncStatus(entry, syncMap[entry.titleId]) == statusFilter
-            }
-        }
+    /** The Saves list: [allSaveRows] through the system, search and status filters. */
+    private val saveListView: StateFlow<SaveListView> = combine(
+        allSaveRows, _selectedFilter, _searchQuery, _statusFilter,
+    ) { rows, system, query, status ->
+        filterSaveRows(rows, system, query, status)
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SaveListView(emptyList(), 0))
 
-        result
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** Rows the Saves list shows, each with its status (null = still checking). */
+    val saveRows: StateFlow<List<SaveRow>> = saveListView
+        .map { it.rows }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * Rows matching the system filter and search whose status is still being
+     * computed while a status filter hides them: the "Checking N saves…" line.
+     */
+    val savesChecking: StateFlow<Int> = saveListView
+        .map { it.checking }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /** The entries of [saveRows]. */
+    val saves: StateFlow<List<SaveEntry>> = saveRows
+        .map { rows -> rows.map { it.entry } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Every save, unfiltered (the detail screen looks its title up here). */
+    val allSaves: StateFlow<List<SaveEntry>> = _allSaves
+
+    /** Every save's row, unfiltered: the detail header falls back to it. */
+    val allRows: StateFlow<List<SaveRow>> = allSaveRows
 
     // "All" + distinct sorted system names present in _allSaves
     val availableFilters: StateFlow<List<String>> = _allSaves.map { saves ->
         listOf("All") + saves.map { it.systemName }.distinct().sorted()
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), listOf("All"))
 
-    // Status filter options that have at least one matching entry
-    val availableStatusFilters: StateFlow<List<SaveSyncStatus>> = combine(
-        _allSaves, syncStateEntities, _saturnArchiveSelectionVersion
-    ) { allSaves, syncEntities, _ ->
-        val syncMap = syncEntities.associateBy { it.titleId }
-        allSaves.map { computeSyncStatus(it, syncMap[it.titleId]) }
-            .distinct()
-            .sortedBy { it.ordinal }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** Status filter options that at least one save has (computed statuses only). */
+    val availableStatusFilters: StateFlow<List<SaveSyncStatus>> = allSaveRows
+        .map { rows -> rows.mapNotNull { it.status }.distinct().sortedBy { it.ordinal } }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)
     val syncState: StateFlow<SyncState> = _syncState
@@ -2464,14 +2470,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             entry.saveFile?.exists() == true
     }
 
-    fun detailLocalHash(entry: SaveEntry): String? {
+    /**
+     * The save's sync hash for the detail screen — the same hash SyncEngine
+     * sends, so the header's three-way status matches what sync would do.
+     * Reads files: call off the main thread.
+     */
+    suspend fun detailLocalHash(entry: SaveEntry): String? = withContext(Dispatchers.IO) {
+        detailLocalHashBlocking(entry, settingsStore.settingsFlow.first().saturnSyncFormat)
+    }
+
+    private fun detailLocalHashBlocking(entry: SaveEntry, saturnFormat: SaturnSyncFormat): String? {
         val isSharedYabaSanshiroEntry =
             entry.systemName == "SAT" &&
                 entry.isServerOnly &&
                 entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
 
         if (!isSharedYabaSanshiroEntry) {
-            return try { entry.computeHash().ifBlank { null } } catch (_: Exception) { null }
+            return try { localSyncHash(entry, saturnFormat).ifBlank { null } } catch (_: Exception) { null }
         }
 
         if (entry.saveFile?.exists() != true) return null

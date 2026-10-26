@@ -88,6 +88,8 @@ import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.SaveSyncStatus
 import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.SaveDetailState
+import com.savesync.android.ui.SaveRow
+import com.savesync.android.ui.resolveSelection
 import com.savesync.android.ui.syncAllCopy
 import com.savesync.android.ui.syncAllTargets
 import com.savesync.android.ui.components.ButtonGlyph
@@ -139,7 +141,10 @@ fun SavesScreen(
     onNavigateToTab: (Int) -> Unit = {},
 ) {
     val context = LocalContext.current
-    val saves by viewModel.saves.collectAsState()
+    // Rows arrive with what is known at once, then with hashed statuses.
+    val rows by viewModel.saveRows.collectAsState()
+    val saves = remember(rows) { rows.map { it.entry } }
+    val checking by viewModel.savesChecking.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val syncState by viewModel.syncState.collectAsState()
     val selectedFilter by viewModel.selectedFilter.collectAsState()
@@ -166,7 +171,10 @@ fun SavesScreen(
     // ── Manual D-pad selection state ─────────────────────────────────────
     // We track the selected index ourselves and scroll the list manually so
     // the gamepad cursor doesn't leak to the toolbar actions above it.
-    var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
+    // The cursor follows the game, not the index: rows can arrive or
+    // reorder as statuses resolve, and A must act on the game highlighted.
+    var selectedTitleId by rememberSaveable { mutableStateOf<String?>(null) }
+    var lastIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     val follower = rememberListFollower(listState)
     val coroutineScope = rememberCoroutineScope()
@@ -182,11 +190,19 @@ fun SavesScreen(
 
     val webLibraryUrl = remember(settings.serverUrl) { buildWebLibraryUrl(settings.serverUrl) }
 
-    // Clamp selection when list size changes (e.g. filter applied)
-    LaunchedEffect(saves.size) {
-        if (saves.isNotEmpty()) {
-            selectedIndex = selectedIndex.coerceIn(0, saves.size - 1)
-        }
+    /** The highlighted row's index: its game's row, else the old index clamped. */
+    fun currentIndex(): Int =
+        resolveSelection(saves.map { it.titleId }, selectedTitleId, lastIndex).coerceAtLeast(0)
+    fun select(index: Int) {
+        val entry = saves.getOrNull(index) ?: return
+        lastIndex = index
+        selectedTitleId = entry.titleId
+    }
+    // A new list (status emission, filter, scan): keep the cursor on its
+    // game, or on the row now at its old index when the game left the list.
+    LaunchedEffect(saves) {
+        val i = resolveSelection(saves.map { it.titleId }, selectedTitleId, lastIndex)
+        if (i >= 0) select(i)
     }
 
     // Focus the search field as soon as it opens, without waiting for the
@@ -293,7 +309,7 @@ fun SavesScreen(
      * so they open it instead; a conflict found by the sync does too.
      */
     fun smartSyncSelected() {
-        val entry = saves.getOrNull(selectedIndex) ?: return
+        val entry = saves.getOrNull(currentIndex()) ?: return
         if (isSyncing || isSyncingOne) return
         if (entry.systemName == "SAT") {
             onNavigateToDetail(entry.titleId)
@@ -417,14 +433,15 @@ fun SavesScreen(
                                 if (saves.isNotEmpty()) {
                                     val page = listState.layoutInfo.visibleItemsInfo.size
                                         .coerceAtLeast(1)
-                                    selectedIndex = (selectedIndex + d * page)
+                                    val to = (currentIndex() + d * page)
                                         .coerceIn(0, saves.size - 1)
-                                    follower.follow(selectedIndex, reduceMotion)
+                                    select(to)
+                                    follower.follow(to, reduceMotion)
                                 }
                             },
                             onAlphabet = { d ->
                                 if (saves.isNotEmpty()) {
-                                    val cur = selectedIndex.coerceIn(0, saves.size - 1)
+                                    val cur = currentIndex().coerceIn(0, saves.size - 1)
                                     val curLetter = firstLetter(saves[cur].displayName)
                                     val step = if (d > 0) 1 else -1
                                     var row = cur + step
@@ -436,9 +453,10 @@ fun SavesScreen(
                                         }
                                         row += step
                                     }
-                                    selectedIndex = if (found >= 0) found
+                                    val to = if (found >= 0) found
                                         else if (d > 0) saves.size - 1 else 0
-                                    follower.follow(selectedIndex, reduceMotion)
+                                    select(to)
+                                    follower.follow(to, reduceMotion)
                                 }
                             },
                         )
@@ -454,19 +472,19 @@ fun SavesScreen(
                         // Re-anchors first if a fling left the cursor
                         // off-screen; otherwise steps and the list follows.
                         Key.DirectionDown -> {
-                            selectedIndex = follower.step(
-                                selectedIndex, 1, saves.size,
+                            select(follower.step(
+                                currentIndex(), 1, saves.size,
                                 reveal = inputTracker?.isRevealPress == true,
                                 reduce = reduceMotion,
-                            )
+                            ))
                             true
                         }
                         Key.DirectionUp -> {
-                            selectedIndex = follower.step(
-                                selectedIndex, -1, saves.size,
+                            select(follower.step(
+                                currentIndex(), -1, saves.size,
                                 reveal = inputTracker?.isRevealPress == true,
                                 reduce = reduceMotion,
-                            )
+                            ))
                             true
                         }
                         // A → smart sync the selected save.  A held A's
@@ -477,7 +495,7 @@ fun SavesScreen(
                         }
                         // Enter (keyboard) keeps opening the detail screen
                         Key.Enter -> {
-                            saves.getOrNull(selectedIndex)?.let { onNavigateToDetail(it.titleId) }
+                            saves.getOrNull(currentIndex())?.let { onNavigateToDetail(it.titleId) }
                             true
                         }
                         // B / Escape → close search if open; otherwise
@@ -492,7 +510,7 @@ fun SavesScreen(
                         }
                         // Y → details of the selected save
                         Key.ButtonY -> {
-                            saves.getOrNull(selectedIndex)?.let { onNavigateToDetail(it.titleId) }
+                            saves.getOrNull(currentIndex())?.let { onNavigateToDetail(it.titleId) }
                             true
                         }
                         // X → sync all (with confirmation)
@@ -522,21 +540,32 @@ fun SavesScreen(
                     )
                 }
 
-                if (saves.isEmpty()) {
-                    EmptyState(
-                        activeFilter = selectedFilter,
-                        statusFilter = statusFilter,
-                        searchQuery = searchQuery
+                // A status filter hides rows until their status is known, so
+                // they appear as they resolve instead of vanishing later.
+                if (checking > 0) {
+                    Text(
+                        text = "Checking $checking " + (if (checking == 1) "save" else "saves") + "…",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = gsTextMuted(),
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
                     )
+                }
+                if (rows.isEmpty()) {
+                    if (checking == 0) {
+                        EmptyState(
+                            activeFilter = selectedFilter,
+                            statusFilter = statusFilter,
+                            searchQuery = searchQuery
+                        )
+                    }
                 } else {
                     SavesList(
-                        saves = saves,
+                        rows = rows,
                         syncStateEntities = syncStateEntities,
-                        viewModel = viewModel,
                         listState = listState,
-                        selectedIndex = { selectedIndex },
+                        selectedTitleId = { selectedTitleId },
                         onSaveClick = onNavigateToDetail,
-                        onSelectIndex = { selectedIndex = it },
+                        onSelectIndex = { select(it) },
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -658,12 +687,14 @@ private fun EmptyState(
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SavesList(
-    saves: List<SaveEntry>,
+    rows: List<SaveRow>,
     syncStateEntities: List<SyncStateEntity>,
-    viewModel: MainViewModel,
     listState: androidx.compose.foundation.lazy.LazyListState,
-    /** Read lazily so a D-pad step recomposes only the two rows that change. */
-    selectedIndex: () -> Int,
+    /**
+     * The highlighted game, read lazily so a D-pad step recomposes only the
+     * two rows that change.  Keyed by title id: the cursor follows the game.
+     */
+    selectedTitleId: () -> String?,
     onSaveClick: (String) -> Unit,
     onSelectIndex: (Int) -> Unit,
     modifier: Modifier = Modifier
@@ -679,13 +710,15 @@ private fun SavesList(
         verticalArrangement = Arrangement.spacedBy(4.dp),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
     ) {
-        itemsIndexed(saves, key = { _, entry -> entry.titleId }) { index, entry ->
-            val syncStatus = viewModel.computeSyncStatus(entry, syncMap[entry.titleId], cheapOnly = true)
-            val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
+        itemsIndexed(rows, key = { _, row -> row.entry.titleId }) { index, row ->
+            val entry = row.entry
+            val isSelected by remember(entry.titleId) {
+                derivedStateOf { selectedTitleId() == entry.titleId }
+            }
             SaveCard(
                 entry = entry,
                 syncState = syncMap[entry.titleId],
-                syncStatus = syncStatus,
+                syncStatus = row.status,
                 isSelected = isSelected,
                 timeFormat = timeFormat,
                 onClick = {
@@ -708,7 +741,8 @@ private fun SavesList(
 private fun SaveCard(
     entry: SaveEntry,
     syncState: SyncStateEntity?,
-    syncStatus: SaveSyncStatus,
+    /** null = still checking. */
+    syncStatus: SaveSyncStatus?,
     isSelected: Boolean,
     timeFormat: SimpleDateFormat,
     onClick: () -> Unit,
@@ -838,9 +872,14 @@ private fun StatusFilterChip(
 
 // ── Non-focusable badge composables ──────────────────────────────────────────
 
+/** A status pill; null renders the neutral "Checking…" pill (no icon). */
 @Composable
-fun SyncStatusBadge(status: SaveSyncStatus) {
-    GsPill(text = "${statusIcon(status)} ${status.label}", color = statusChipColor(status))
+fun SyncStatusBadge(status: SaveSyncStatus?) {
+    if (status == null) {
+        GsPill(text = "Checking…", color = GsColors.Muted, textColor = gsTextMuted())
+    } else {
+        GsPill(text = "${statusIcon(status)} ${status.label}", color = statusChipColor(status))
+    }
 }
 
 /** System code tag: a quiet outlined chip, so the status pill stays the loud one. */

@@ -373,8 +373,9 @@ class SyncEngine(
     private fun writeDownloadedBytes(entry: SaveEntry, canonicalBytes: ByteArray): Boolean {
         return when {
             entry.isMultiFile && entry.saveDir != null -> {
-                entry.saveDir.mkdirs()
-                unzipBytesToDirectory(canonicalBytes, entry.saveDir)
+                AtomicSaveWriter.replaceDirectory(entry.saveDir, keepExisting = true) { staging ->
+                    unzipBytesToDirectory(canonicalBytes, staging)
+                }
                 true
             }
             entry.saveFile != null -> {
@@ -387,7 +388,7 @@ class SyncEngine(
                 } else {
                     canonicalBytes
                 }
-                entry.saveFile.writeBytes(bytesToWrite)
+                AtomicSaveWriter.replaceFile(entry.saveFile, bytesToWrite)
                 true
             }
             else -> false
@@ -682,8 +683,7 @@ class SyncEngine(
             }
             val body = response.body() ?: return false
             val bytes = body.bytes()
-            saveFile.parentFile?.mkdirs()
-            saveFile.writeBytes(bytes)
+            AtomicSaveWriter.replaceFile(saveFile, bytes)
             true
         } catch (e: Exception) {
             Log.e(TAG, "downloadPs1Card failed for $titleId", e)
@@ -703,8 +703,7 @@ class SyncEngine(
             }
             val body = response.body() ?: return false
             val bytes = body.bytes()
-            saveFile.parentFile?.mkdirs()
-            saveFile.writeBytes(bytes)
+            AtomicSaveWriter.replaceFile(saveFile, bytes)
             true
         } catch (e: Exception) {
             Log.e(TAG, "downloadPs2Card failed for $titleId", e)
@@ -754,16 +753,9 @@ class SyncEngine(
             val bytes = response.body()?.bytes() ?: return false
             val files = BundleUtils.parseBundle(bytes)
             if (files.isEmpty()) return false
-            slotDir.mkdirs()
-            for ((name, data) in files) {
-                val target = safeChildFile(slotDir, name)
-                if (target == null) {
-                    Log.w(TAG, "Rejected unsafe bundle entry name '$name' for $titleId")
-                    continue
-                }
-                target.parentFile?.mkdirs()
-                target.writeBytes(data)
-            }
+            // Overlay onto the existing slot (files the bundle doesn't carry
+            // are kept, as before), but swap the result in atomically.
+            AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true)
             true
         } catch (e: Exception) {
             Log.e(TAG, "downloadPspBundle failed for $titleId", e)
@@ -784,19 +776,10 @@ class SyncEngine(
             val bytes = response.body()?.bytes() ?: return false
             val files = BundleUtils.parseBundle(bytes)
             if (files.isEmpty()) return false
-            if (saveDir.exists()) {
-                saveDir.deleteRecursively()
-            }
-            saveDir.mkdirs()
-            for ((name, data) in files) {
-                val target = safeChildFile(saveDir, name)
-                if (target == null) {
-                    Log.w(TAG, "Rejected unsafe bundle entry name '$name' for $titleId")
-                    continue
-                }
-                target.parentFile?.mkdirs()
-                target.writeBytes(data)
-            }
+            // The bundle is the whole save: write it next to the current one,
+            // verify it, then swap.  The old save is only removed once the new
+            // one is in place, so a failure never leaves a half-written save.
+            AtomicSaveWriter.replaceDirectory(saveDir, files)
             true
         } catch (e: Exception) {
             Log.e(TAG, "downloadTreeBundle failed for $titleId", e)
@@ -969,8 +952,7 @@ class SyncEngine(
                 return false
             }
             val bytes = response.body()?.bytes() ?: return false
-            saveFile.parentFile?.mkdirs()
-            saveFile.writeBytes(bytes)
+            AtomicSaveWriter.replaceFile(saveFile, bytes)
             true
         } catch (e: Exception) {
             Log.e(TAG, "downloadGcCard failed for $titleId", e)

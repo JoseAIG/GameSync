@@ -170,6 +170,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         downloadManager.observeAll()
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
+    /** Downloads running or waiting to run: the Downloads tab badge. */
+    val activeDownloadCount: StateFlow<Int> =
+        downloads
+            .map { list ->
+                list.count {
+                    it.status == DownloadEntity.Status.DOWNLOADING ||
+                        it.status == DownloadEntity.Status.QUEUED
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
+
     /** Per-download throttled progress events.  Re-exposed verbatim so the
      *  Downloads screen can collect velocity / sub-second progress without
      *  thrashing Room. */

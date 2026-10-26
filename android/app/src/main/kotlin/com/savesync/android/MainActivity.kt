@@ -72,6 +72,8 @@ import com.savesync.android.ui.navMotionFor
 import com.savesync.android.ui.components.GsChromeFooter
 import com.savesync.android.ui.components.GsChromeHeader
 import com.savesync.android.ui.components.GsChromeState
+import com.savesync.android.ui.components.GsCountBadge
+import com.savesync.android.ui.components.GsTabBadge
 import com.savesync.android.ui.components.LocalGsChrome
 import com.savesync.android.ui.components.chromeKeyFor
 import com.savesync.android.ui.components.GsNotifier
@@ -529,11 +531,15 @@ private fun MainApp() {
         Scaffold(
             containerColor = MaterialTheme.colorScheme.background,
             topBar = {
+                // Collected here, so a count change recomposes the header only.
+                val activeDownloads by viewModel.activeDownloadCount.collectAsState()
+                val badges = remember(activeDownloads) { tabBadges(activeDownloads) }
                 GsChromeHeader(
                     routePattern = currentRoute,
                     key = chromeKey,
                     onTabClick = onNavigateToTab,
                     onBack = { navController.popBackStack() },
+                    badges = badges,
                 )
             },
             bottomBar = { GsChromeFooter(chromeKey) },
@@ -636,6 +642,25 @@ private fun MainApp() {
             )
         }
     }
+}
+
+/**
+ * The tab strip's badges.  Downloads shows how many downloads are running or
+ * queued; the count shown last stays on the capsule while it pops out.
+ */
+private fun tabBadges(activeDownloads: Int): Map<Int, GsTabBadge> = mapOf(
+    TAB_ROUTES.indexOf("downloads") to GsTabBadge(
+        visible = activeDownloads > 0,
+        contentDescription = "Downloads, $activeDownloads active",
+        content = { LastPositiveCount(activeDownloads) },
+    ),
+)
+
+@Composable
+private fun LastPositiveCount(count: Int) {
+    val last = remember { intArrayOf(count) }
+    if (count > 0) last[0] = count
+    GsCountBadge(last[0])
 }
 
 private fun navigateToTab(navController: NavHostController, route: String) {

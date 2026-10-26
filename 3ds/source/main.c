@@ -193,7 +193,11 @@ int main(int argc, char *argv[]) {
     // Initial title scan
     scan_titles();
 
-    snprintf(status, sizeof(status), "Server: %.200s", config.server_url);
+    if (config.server_url_alt[0]) {
+        ui_draw_message("Looking for the server...");
+        network_select_server(&config);
+    }
+    snprintf(status, sizeof(status), "Server: %.200s", config_active_url(&config));
     // Draw to both buffers to prevent flicker
     build_filtered_titles();
     for (int buf = 0; buf < 2; buf++) {
@@ -470,7 +474,8 @@ int main(int argc, char *argv[]) {
                 scan_titles();
                 snprintf(status, sizeof(status), "Rescanned. %d title(s) found.", title_count);
             } else if (result == CONFIG_RESULT_SAVED) {
-                snprintf(status, sizeof(status), "Config saved. Server: %.30s", config.server_url);
+                if (config.server_url_alt[0]) network_select_server(&config);
+                snprintf(status, sizeof(status), "Config saved. Server: %.30s", config_active_url(&config));
             } else if (result == CONFIG_RESULT_UPDATE && !config.update_check) {
                 snprintf(status, sizeof(status), "Updates disabled (update_check=0 in config)");
             } else if (result == CONFIG_RESULT_UPDATE) {

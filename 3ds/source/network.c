@@ -1,5 +1,6 @@
 #include "network.h"
 #include "root_certs.h"
+#include "config.h"
 #include <3ds/svc.h>
 #include <dirent.h>
 #include <stdarg.h>
@@ -176,7 +177,7 @@ void network_exit(void) {
 
 // Build full URL from config base + path
 static void build_url(const AppConfig *config, const char *path, char *url, int url_size) {
-    snprintf(url, url_size, "%s/api/v1%s", config->server_url, path);
+    snprintf(url, url_size, "%s/api/v1%s", config_active_url(config), path);
 }
 
 // Download data with timeout - wraps httpcReceiveDataTimeout + httpcGetDownloadSizeState
@@ -359,4 +360,26 @@ u8 *network_post_json(const AppConfig *config, const char *path,
 
     return post_data(config, path, (const u8 *)json_body, json_len, "application/json",
                      out_size, out_status);
+}
+
+static bool probe_status(const AppConfig *config) {
+    u32 size = 0, status = 0;
+    u8 *resp = network_get(config, "/status", &size, &status);
+    if (resp) free(resp);
+    return resp && status == 200;
+}
+
+bool network_select_server(AppConfig *config) {
+    config->use_alt_url = false;
+    if (probe_status(config)) return true;
+    if (!config->server_url_alt[0]) return false;
+
+    config->use_alt_url = true;
+    if (probe_status(config)) {
+        log_line("primary server unreachable, using server_url_alt=%s", config->server_url_alt);
+        return true;
+    }
+    config->use_alt_url = false;  // neither answered: keep the primary
+    log_line("no server answered (primary=%s alt=%s)", config->server_url, config->server_url_alt);
+    return false;
 }

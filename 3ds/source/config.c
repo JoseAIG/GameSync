@@ -108,6 +108,8 @@ bool config_load(AppConfig *config, char *error_out, int error_size) {
 
         if (strcmp(key, "server_url") == 0) {
             strncpy(config->server_url, val, MAX_URL_LEN - 1);
+        } else if (strcmp(key, "server_url_alt") == 0) {
+            strncpy(config->server_url_alt, val, MAX_URL_LEN - 1);
         } else if (strcmp(key, "api_key") == 0) {
             strncpy(config->api_key, val, MAX_API_KEY_LEN - 1);
         } else if (strcmp(key, "nds_dir") == 0) {
@@ -269,6 +271,8 @@ bool config_save(const AppConfig *config) {
 
     fprintf(f, "# 3DS Save Sync Configuration\n");
     fprintf(f, "server_url=%s\n", config->server_url);
+    if (config->server_url_alt[0])
+        fprintf(f, "server_url_alt=%s\n", config->server_url_alt);
     fprintf(f, "api_key=%s\n", config->api_key);
     if (config->nds_dir[0])
         fprintf(f, "nds_dir=%s\n", config->nds_dir);
@@ -416,4 +420,10 @@ bool config_edit_field(const char *hint, char *buffer, int max_len) {
         return true;
     }
     return false;
+}
+
+const char *config_active_url(const AppConfig *config) {
+    if (config->use_alt_url && config->server_url_alt[0])
+        return config->server_url_alt;
+    return config->server_url;
 }

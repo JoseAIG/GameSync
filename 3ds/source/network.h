@@ -9,6 +9,12 @@ bool network_init(void);
 // Cleanup httpc service. Call at shutdown.
 void network_exit(void);
 
+// When server_url_alt is set, probe GET /status on server_url and, if it
+// doesn't answer, on server_url_alt; use whichever answers (primary wins
+// ties, and stays selected if neither answers). Returns true if a server
+// answered.
+bool network_select_server(AppConfig *config);
+
 // HTTP GET - returns malloc'd response body, sets out_size and out_status.
 // Returns NULL on failure. Caller must free.
 u8 *network_get(const AppConfig *config, const char *path,

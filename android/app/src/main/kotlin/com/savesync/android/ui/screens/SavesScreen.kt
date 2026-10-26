@@ -43,6 +43,15 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.outlined.HelpOutline
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Smartphone
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Language
@@ -1020,25 +1029,33 @@ private fun StatusFilterChip(
                     onSelect(null)
                     expanded = false
                 },
-                leadingIcon = if (statusFilter == null) {
-                    { Text("✓", fontWeight = FontWeight.Bold) }
+                trailingIcon = if (statusFilter == null) {
+                    { Icon(Icons.Filled.Check, contentDescription = "Selected", modifier = Modifier.size(18.dp)) }
                 } else null
             )
             options.forEach { status ->
                 DropdownMenuItem(
                     text = {
                         Text(
-                            text = "${statusIcon(status)} ${status.label}",
+                            text = status.label,
                             fontWeight = if (status == statusFilter) FontWeight.Bold else FontWeight.Normal,
-                            color = statusChipColor(status)
+                            color = textVariantOf(statusChipColor(status))
                         )
                     },
                     onClick = {
                         onSelect(if (status == statusFilter) null else status)
                         expanded = false
                     },
-                    leadingIcon = if (status == statusFilter) {
-                        { Text("✓", fontWeight = FontWeight.Bold) }
+                    leadingIcon = {
+                        Icon(
+                            statusIconVector(status),
+                            contentDescription = null,
+                            tint = textVariantOf(statusChipColor(status)),
+                            modifier = Modifier.size(18.dp),
+                        )
+                    },
+                    trailingIcon = if (status == statusFilter) {
+                        { Icon(Icons.Filled.Check, contentDescription = "Selected", modifier = Modifier.size(18.dp)) }
                     } else null
                 )
             }
@@ -1059,10 +1076,10 @@ fun SyncStatusBadge(status: SaveSyncStatus?, decorative: Boolean = false) {
         GsPill(text = "Checking…", color = GsColors.Muted, textColor = gsTextMuted(), decorative = decorative)
     } else {
         GsPill(
-            text = "${statusIcon(status)} ${status.label}",
+            text = status.label,
             color = statusChipColor(status),
             decorative = decorative,
-            spokenText = status.label,
+            icon = statusIconVector(status),
         )
     }
 }
@@ -1112,14 +1129,19 @@ fun RaBadge(titleOnly: Boolean = false) {
 
 // ── Helper functions ─────────────────────────────────────────────────────────
 
-private fun statusIcon(status: SaveSyncStatus): String = when (status) {
-    SaveSyncStatus.SYNCED -> "✓"
-    SaveSyncStatus.LOCAL_ONLY -> "●"
-    SaveSyncStatus.SERVER_ONLY -> "☁"
-    SaveSyncStatus.LOCAL_NEWER -> "↑"
-    SaveSyncStatus.SERVER_NEWER -> "↓"
-    SaveSyncStatus.CONFLICT -> "⚠"
-    SaveSyncStatus.UNKNOWN -> "?"
+/**
+ * A status's icon (material-icons-extended, tinted by the caller).  Glyphs
+ * (check marks, clouds, arrows) were replaced because OEM fonts may draw them as colour
+ * emoji that ignore the tint; the label always sits beside the icon.
+ */
+fun statusIconVector(status: SaveSyncStatus): ImageVector = when (status) {
+    SaveSyncStatus.SYNCED -> Icons.Filled.CheckCircle
+    SaveSyncStatus.LOCAL_ONLY -> Icons.Filled.Smartphone
+    SaveSyncStatus.SERVER_ONLY -> Icons.Filled.Cloud
+    SaveSyncStatus.LOCAL_NEWER -> Icons.Filled.ArrowUpward
+    SaveSyncStatus.SERVER_NEWER -> Icons.Filled.ArrowDownward
+    SaveSyncStatus.CONFLICT -> Icons.Filled.Warning
+    SaveSyncStatus.UNKNOWN -> Icons.Outlined.HelpOutline
 }
 
 /** Status pill colours, shared with every console client. */

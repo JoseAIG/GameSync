@@ -1,5 +1,6 @@
 package com.savesync.android.ui.components
 
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -102,8 +103,8 @@ fun SystemFilterChip(
                         onSelect(option)
                         expanded = false
                     },
-                    leadingIcon = if (option == label) {
-                        { Text("✓", fontWeight = FontWeight.Bold) }
+                    trailingIcon = if (option == label) {
+                        { Icon(Icons.Filled.Check, contentDescription = "Selected", modifier = Modifier.size(18.dp)) }
                     } else null,
                 )
             }

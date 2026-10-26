@@ -72,6 +72,8 @@ import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Cloud
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudUpload
@@ -936,7 +938,7 @@ private fun FactsGroup(
     noteIsError: Boolean = false,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text(title, style = MaterialTheme.typography.titleSmall, color = gsTextMuted())
+        SectionHeader(title)
         if (note != null) {
             Text(
                 note,
@@ -967,6 +969,27 @@ private fun FactCell(fact: Fact, modifier: Modifier = Modifier) {
             if (fact.newer) GsPill(text = "Newer", color = GsColors.Info)
         }
     }
+}
+
+/**
+ * A detail section title with its 16dp icon: a phone for "This device", a
+ * cloud for "Server" (TextMuted, decorative — the title says it).
+ */
+@Composable
+private fun SectionHeader(title: String, style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.titleSmall) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        sectionIcon(title)?.let { icon ->
+            Icon(icon, contentDescription = null, tint = gsTextMuted(), modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(6.dp))
+        }
+        Text(title, style = style, color = gsTextMuted())
+    }
+}
+
+private fun sectionIcon(title: String): ImageVector? = when (title) {
+    "This device" -> Icons.Filled.Smartphone
+    "Server" -> Icons.Filled.Cloud
+    else -> null
 }
 
 /** One side of a conflict, as its panel shows it. */
@@ -1011,7 +1034,13 @@ private fun ConflictPanel(side: ConflictSide, modifier: Modifier = Modifier) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
-        Text(side.title, style = MaterialTheme.typography.titleSmall, color = GsColors.Text)
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            sectionIcon(side.title)?.let { icon ->
+                Icon(icon, contentDescription = null, tint = gsTextMuted(), modifier = Modifier.size(16.dp))
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(side.title, style = MaterialTheme.typography.titleSmall, color = GsColors.Text)
+        }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(side.time, style = MaterialTheme.typography.bodyMedium, color = GsColors.Text, modifier = Modifier.weight(1f, fill = false))
             if (side.newer) GsPill(text = "Newer", color = GsColors.Info)

@@ -463,9 +463,15 @@ fun GsPill(
     decorative: Boolean = false,
     /** What TalkBack reads instead of [text] (e.g. without a leading glyph). */
     spokenText: String? = null,
+    /**
+     * A 14dp icon before the text, tinted like it.  Decorative: the text
+     * beside it carries the meaning (and is what TalkBack reads).
+     */
+    icon: ImageVector? = null,
 ) {
     val high = LocalHighContrast.current
     val shape = GsShapes.Pill
+    val contentColor = if (filled) GsColors.Ink else textColor
     Box(
         modifier = modifier
             .then(
@@ -487,14 +493,20 @@ fun GsPill(
             .padding(horizontal = 8.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
-            color = if (filled) GsColors.Ink else textColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 

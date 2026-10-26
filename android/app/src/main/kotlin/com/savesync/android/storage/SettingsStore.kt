@@ -117,6 +117,11 @@ class SettingsStore(private val context: Context) {
      * Backup file stored on external storage — survives full app uninstall/reinstall.
      * New location: /sdcard/GameSync/config.json
      * Legacy location: /sdcard/SaveSync/config.json
+     *
+     * Shared storage is readable by any app holding a storage permission, so
+     * the API key is deliberately NOT written here (older versions did; see
+     * [scrubApiKeyFromBackups]).  After a reinstall the server URL and paths
+     * come back, and the key has to be entered again.
      */
     private val backupFile: File
         get() = File(Environment.getExternalStorageDirectory(), "GameSync/config.json")
@@ -167,6 +172,14 @@ class SettingsStore(private val context: Context) {
      * settings from the external backup file (survives uninstall).
      */
     suspend fun restoreFromBackupIfNeeded() {
+        try {
+            restoreFromBackupFile()
+        } finally {
+            scrubApiKeyFromBackups()
+        }
+    }
+
+    private suspend fun restoreFromBackupFile() {
         val prefs = context.dataStore.data.first()
         // Already has settings — nothing to do
         if (!prefs[Keys.SERVER_URL].isNullOrBlank()) return
@@ -181,6 +194,8 @@ class SettingsStore(private val context: Context) {
         // Write all fields from the backup file into DataStore
         context.dataStore.edit { p ->
             backup.serverUrl.takeIf { it.isNotBlank() }?.let { p[Keys.SERVER_URL] = it }
+            // Only legacy backups still carry a key; restore it once, then
+            // scrubApiKeyFromBackups() removes it from the file.
             backup.apiKey.takeIf { it.isNotBlank() }?.let { p[Keys.API_KEY] = it }
             p[Keys.AUTO_SYNC_ENABLED] = backup.autoSyncEnabled
             p[Keys.AUTO_SYNC_INTERVAL] = backup.autoSyncIntervalMinutes
@@ -326,7 +341,7 @@ class SettingsStore(private val context: Context) {
             val current = settingsFlow.first()
             val json = JSONObject().apply {
                 put("server_url", current.serverUrl)
-                put("api_key", current.apiKey)
+                // api_key intentionally omitted — shared storage is world-readable.
                 put("auto_sync_enabled", current.autoSyncEnabled)
                 put("auto_sync_interval_minutes", current.autoSyncIntervalMinutes)
                 put("console_id", current.consoleId)
@@ -346,6 +361,29 @@ class SettingsStore(private val context: Context) {
             file.writeText(json.toString(2))
         } catch (_: Exception) {
             // Backup is best-effort; never crash the app
+        }
+    }
+
+    /**
+     * Removes the ``api_key`` field that versions up to 0.5.4 wrote into the
+     * world-readable backup files, keeping every other field intact.
+     */
+    private fun scrubApiKeyFromBackups() {
+        for (file in listOf(backupFile, legacyBackupFile)) {
+            try {
+                if (!file.isFile) continue
+                val json = JSONObject(file.readText())
+                if (!json.has("api_key")) continue
+                json.remove("api_key")
+                val tmp = File(file.parentFile, "${file.name}.tmp")
+                tmp.writeText(json.toString(2))
+                if (!tmp.renameTo(file)) {
+                    tmp.delete()
+                    file.writeText(json.toString(2))
+                }
+            } catch (_: Exception) {
+                // Best-effort, like the backup itself
+            }
         }
     }
 

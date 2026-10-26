@@ -2,6 +2,10 @@
 
 ``GET  /ra/set/{md5}``  achievement set in the DS's text format
 ``POST /ra/sets``       up to 64 sets in one response (see ``_render_batch``)
+
+Both need ``SYNC_RA_ENABLED`` (on by default) and a Connect login
+(``SYNC_RA_USERNAME`` + ``SYNC_RA_TOKEN``); without either they answer 503
+before anything is sent to retroachievements.org.
 """
 
 import asyncio
@@ -21,6 +25,11 @@ router = APIRouter(prefix="/ra")
 
 
 def _require_token() -> None:
+    if not settings.ra_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail="RetroAchievements is disabled: set SYNC_RA_ENABLED=true",
+        )
     if not settings.ra_username or not settings.ra_token:
         raise HTTPException(
             status_code=503,

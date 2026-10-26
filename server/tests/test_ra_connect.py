@@ -22,6 +22,7 @@ PATCH = {
 
 @pytest.fixture()
 def ra_settings(monkeypatch):
+    monkeypatch.setattr(settings, "ra_enabled", True)
     monkeypatch.setattr(settings, "ra_username", "tester")
     monkeypatch.setattr(settings, "ra_token", "tok")
 
@@ -154,3 +155,36 @@ def test_batch_without_token(client, auth_headers, monkeypatch):
 def test_empty_batch_is_just_the_frame(client, auth_headers, batch_ra):
     resp = client.post("/api/v1/ra/sets", headers=auth_headers, json={"md5s": []})
     assert resp.text == "RASETS\t1\nEND\n"
+
+
+# ---------------------------------------------------------------------------
+# SYNC_RA_ENABLED=false: the set routes are off even with a token, and
+# nothing is sent to retroachievements.org
+
+
+@pytest.fixture()
+def ra_disabled(monkeypatch, ra_settings):
+    import urllib.request
+
+    from app.routes import ra as ra_routes
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("outbound request attempted while disabled")
+
+    monkeypatch.setattr(settings, "ra_enabled", False)
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    monkeypatch.setattr(ra_connect, "fetch_patch", refuse)
+    monkeypatch.setattr(ra_routes, "_libraries", refuse)
+
+
+def test_get_set_when_disabled(client, auth_headers, ra_disabled):
+    for url in (f"/api/v1/ra/set/{MD5}?game_id=9878", f"/api/v1/ra/set/{MD5}"):
+        resp = client.get(url, headers=auth_headers)
+        assert resp.status_code == 503
+        assert "SYNC_RA_ENABLED" in resp.json()["detail"]
+
+
+def test_batch_when_disabled(client, auth_headers, ra_disabled):
+    resp = client.post("/api/v1/ra/sets", headers=auth_headers, json={"md5s": [MD5]})
+    assert resp.status_code == 503
+    assert "SYNC_RA_ENABLED" in resp.json()["detail"]

@@ -155,12 +155,14 @@ class Settings(BaseSettings):
     # background after a ROM scan and cached in roms.db, so leaving this on
     # costs one read of each cartridge ROM, once.  Without an API key the
     # public endpoints are used, which report no achievement counts.
+    # False also turns off the /ra/* set routes (routes/ra.py), so nothing
+    # talks to retroachievements.org.
     ra_enabled: bool = True
     ra_api_key: str = ""
     ra_username: str = ""
     # Connect token for the DS real-hardware achievements (routes/ra.py):
-    # the set routes need it, the catalog badges above don't.  Get it
-    # with ``uv run python ra_login.py``.
+    # the set routes need it (and ra_enabled), the catalog badges above
+    # don't.  Get it with ``uv run python ra_login.py``.
     ra_token: str = ""
     # Rewrite zstd-compressed CHDs in the ROM library to chdman's standard
     # codecs after each scan (lossless, verified; see

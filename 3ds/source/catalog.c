@@ -81,6 +81,11 @@ typedef struct {
 
     int selected, scroll;
     int direction;           // of the last move: where to load ahead
+    // The last fetch ensure_window() made (viewport top, offset, total)
+    // and the window it left: while nothing of that changed, the request
+    // isn't repeated every settled frame when its window still fails the
+    // test (a server returning fewer rows than its total claims)
+    int ew_first, ew_off, ew_total, ew_win_off, ew_win_count;
     bool loading;            // a page request is in flight (drawn as a spinner)
     UiListAnim anim;
     UiBar bar;
@@ -293,6 +298,7 @@ static void unload_lists(Catalog *cat) {
     cat->nsystems = cat->sys = 0;
     cat->total = -1;
     cat->win_off = cat->win_count = 0;
+    cat->ew_first = cat->ew_off = cat->ew_total = -1;
     cat->selected = cat->scroll = 0;
     ui_list_reset(&cat->anim);
 }
@@ -504,7 +510,16 @@ static void ensure_window(Catalog *cat, int first) {
     bool near_start = cat->win_off > 0 && first - CAT_ROWS < cat->win_off;
     if (cat_window_covers(cat->win_off, cat->win_count, first, CAT_ROWS, cat->total) && !near_end && !near_start)
         return;
-    fetch_window(cat, cat_window_start(first, CAT_ROWS, CAT_WINDOW, cat->total, cat->direction));
+    int off = cat_window_start(first, CAT_ROWS, CAT_WINDOW, cat->total, cat->direction);
+    if (first == cat->ew_first && off == cat->ew_off && cat->total == cat->ew_total &&
+        cat->win_off == cat->ew_win_off && cat->win_count == cat->ew_win_count)
+        return;
+    fetch_window(cat, off);
+    cat->ew_first = first;
+    cat->ew_off = off;
+    cat->ew_total = cat->total;
+    cat->ew_win_off = cat->win_off;
+    cat->ew_win_count = cat->win_count;
 }
 
 // Make sure the visible rows are loaded, scrolling to keep the selection
@@ -530,6 +545,7 @@ static void ensure_loaded(Catalog *cat) {
 static void reset_list(Catalog *cat) {
     cat->total = -1;
     cat->win_off = cat->win_count = 0;
+    cat->ew_first = cat->ew_off = cat->ew_total = -1;
     cat->selected = cat->scroll = 0;
     cat->error[0] = '\0';
     ui_list_reset(&cat->anim);

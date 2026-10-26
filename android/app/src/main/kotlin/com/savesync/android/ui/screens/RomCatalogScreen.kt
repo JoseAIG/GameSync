@@ -132,6 +132,7 @@ fun RomCatalogScreen(
 
     val notifier = LocalGsNotifier.current
     val scope = rememberCoroutineScope()
+    val reduceMotion = LocalReduceMotion.current
 
     // Filter state uses rememberSaveable so the user's place in the catalog
     // (selected system + search query + whether the search bar is open)
@@ -412,7 +413,7 @@ fun RomCatalogScreen(
                                         .coerceAtLeast(1)
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, filtered.size - 1)
-                                    scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                                 }
                             },
                             onAlphabet = { d ->
@@ -431,7 +432,7 @@ fun RomCatalogScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
-                                    scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                                 }
                             },
                         )
@@ -441,14 +442,14 @@ fun RomCatalogScreen(
                         Key.DirectionDown -> {
                             if (filtered.isNotEmpty()) {
                                 selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                             }
                             true
                         }
                         Key.DirectionUp -> {
                             if (filtered.isNotEmpty()) {
                                 selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                             }
                             true
                         }
@@ -693,6 +694,7 @@ private fun CatalogRomCard(
                     fontWeight = FontWeight.SemiBold,
                     color = GsColors.Text,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 if (rom.hasRa) RaBadge(rom.raIsTitleOnly)
@@ -702,11 +704,13 @@ private fun CatalogRomCard(
                 if (rom.size > 0) append("  ·  ${formatBytes(rom.size)}")
                 append("  ·  ${rom.title_id}")
             }
+            // TextMuted, not Dim: this row may be lifted onto PanelHi.
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Dim,
+                color = gsTextMuted(),
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Icon(
@@ -746,7 +750,7 @@ private fun CatalogFooter(total: Int, shown: Int, raOnly: Boolean = false) {
             text = (if (shown == total) "$total ROMs" else "$shown / $total ROMs") +
                 if (raOnly) "  ·  RA only (X)" else "",
             style = MaterialTheme.typography.labelSmall,
-            color = GsColors.Muted,
+            color = gsTextMuted(),
         )
     }
 }

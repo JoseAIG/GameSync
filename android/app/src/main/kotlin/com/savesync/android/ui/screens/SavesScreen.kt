@@ -153,6 +153,7 @@ fun SavesScreen(
     var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    val reduceMotion = LocalReduceMotion.current
     // Hold-to-accelerate state for d-pad left/right: page scroll → faster
     // page scroll → alphabet jump.  See HoldNav.kt.
     val holdNav = rememberHoldNavState()
@@ -393,7 +394,7 @@ fun SavesScreen(
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, saves.size - 1)
                                     coroutineScope.launch {
-                                        listState.animateScrollToItem(selectedIndex)
+                                        listState.gsScrollToItem(selectedIndex, reduceMotion)
                                     }
                                 }
                             },
@@ -414,7 +415,7 @@ fun SavesScreen(
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) saves.size - 1 else 0
                                     coroutineScope.launch {
-                                        listState.animateScrollToItem(selectedIndex)
+                                        listState.gsScrollToItem(selectedIndex, reduceMotion)
                                     }
                                 }
                             },
@@ -427,7 +428,7 @@ fun SavesScreen(
                             if (saves.isNotEmpty()) {
                                 selectedIndex = (selectedIndex + 1).coerceAtMost(saves.size - 1)
                                 coroutineScope.launch {
-                                    listState.animateScrollToItem(selectedIndex)
+                                    listState.gsScrollToItem(selectedIndex, reduceMotion)
                                 }
                             }
                             true
@@ -436,7 +437,7 @@ fun SavesScreen(
                             if (saves.isNotEmpty()) {
                                 selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
                                 coroutineScope.launch {
-                                    listState.animateScrollToItem(selectedIndex)
+                                    listState.gsScrollToItem(selectedIndex, reduceMotion)
                                 }
                             }
                             true
@@ -687,7 +688,7 @@ private fun SaveCard(
                 Text(
                     text = canonical,
                     style = MaterialTheme.typography.labelSmall,
-                    color = GsColors.Dim,
+                    color = gsTextMuted(),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -705,7 +706,9 @@ private fun SaveCard(
                     Text(
                         text = timeFormat.format(Date(ts)),
                         style = MaterialTheme.typography.labelSmall,
-                        color = GsColors.Muted
+                        color = gsTextMuted(),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -725,28 +728,31 @@ private fun StatusFilterChip(
 ) {
     var expanded by remember { mutableStateOf(false) }
     Box {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(GsColors.Panel)
-                .clickable { expanded = true }
-                .padding(horizontal = 10.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            if (LocalShowButtonHints.current) ButtonGlyph(GsButton.L2R2)
-            Icon(
-                Icons.Default.FilterList,
-                contentDescription = "Status filter",
-                tint = if (statusFilter != null) statusChipColor(statusFilter) else GsColors.Dim,
-                modifier = Modifier.size(16.dp),
-            )
-            Text(
-                text = statusFilter?.label ?: "All status",
-                style = MaterialTheme.typography.labelLarge,
-                color = if (statusFilter != null) statusChipColor(statusFilter) else GsColors.Dim,
-                maxLines = 1,
-            )
+        GsHitTarget(onClick = { expanded = true }) { indication ->
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(GsColors.Panel)
+                    .then(indication)
+                    .padding(horizontal = 10.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                if (LocalShowButtonHints.current) ButtonGlyph(GsButton.L2R2)
+                Icon(
+                    Icons.Default.FilterList,
+                    contentDescription = "Status filter",
+                    tint = if (statusFilter != null) statusChipColor(statusFilter) else GsColors.Dim,
+                    modifier = Modifier.size(16.dp),
+                )
+                Text(
+                    text = statusFilter?.label ?: "All status",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (statusFilter != null) textVariantOf(statusChipColor(statusFilter)) else GsColors.Dim,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         DropdownMenu(
             expanded = expanded,

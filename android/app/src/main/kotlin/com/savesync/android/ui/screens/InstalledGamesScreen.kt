@@ -119,6 +119,7 @@ fun InstalledGamesScreen(
 
     val notifier = LocalGsNotifier.current
     val scope = rememberCoroutineScope()
+    val reduceMotion = LocalReduceMotion.current
 
     // Saveable, so rotation keeps the filter, the search and the cursor.
     var query by rememberSaveable { mutableStateOf("") }
@@ -288,7 +289,7 @@ fun InstalledGamesScreen(
                                         .coerceAtLeast(1)
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, filtered.size - 1)
-                                    scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                                 }
                             },
                             onAlphabet = { d ->
@@ -307,7 +308,7 @@ fun InstalledGamesScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
-                                    scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                    scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                                 }
                             },
                         )
@@ -317,14 +318,14 @@ fun InstalledGamesScreen(
                         Key.DirectionDown -> {
                             if (filtered.isNotEmpty()) {
                                 selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                             }
                             true
                         }
                         Key.DirectionUp -> {
                             if (filtered.isNotEmpty()) {
                                 selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                scope.launch { listState.gsScrollToItem(selectedIndex, reduceMotion) }
                             }
                             true
                         }
@@ -459,7 +460,7 @@ fun InstalledGamesScreen(
                 Text(
                     rom.path.parentFile?.absolutePath ?: rom.path.absolutePath,
                     style = MaterialTheme.typography.bodySmall,
-                    color = GsColors.Muted,
+                    color = gsDim(),
                 )
             } else {
                 val extra = if (rom.companionFiles.isNotEmpty()) {
@@ -469,7 +470,7 @@ fun InstalledGamesScreen(
                 Text(
                     "Location: ${rom.path.parentFile?.absolutePath ?: "?"}",
                     style = MaterialTheme.typography.bodySmall,
-                    color = GsColors.Muted,
+                    color = gsDim(),
                 )
             }
             Spacer(Modifier.height(6.dp))
@@ -477,9 +478,15 @@ fun InstalledGamesScreen(
             Spacer(Modifier.height(12.dp))
             Text(
                 "Sync Saves uploads / downloads this game's save against the server. " +
-                    "Delete removes the ROM data permanently — this can't be undone.",
+                    "Delete removes the ROM data permanently.",
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Muted,
+                color = gsDim(),
+            )
+            Text(
+                "This can't be undone.",
+                style = MaterialTheme.typography.bodySmall,
+                fontWeight = FontWeight.Medium,
+                color = GsColors.ErrText,
             )
         }
     }
@@ -489,12 +496,13 @@ fun InstalledGamesScreen(
         GsConfirmDialog(
             title = "Delete ${rom.displayName}?",
             message = if (wholeFolder) {
-                "Removes the folder ${rom.path.parentFile?.name ?: "?"} and everything in it. This can't be undone."
+                "Removes the folder ${rom.path.parentFile?.name ?: "?"} and everything in it."
             } else {
                 "Removes ${rom.filename}" +
                     (if (rom.companionFiles.isNotEmpty()) " and ${rom.companionFiles.size} companion file(s)" else "") +
-                    ". This can't be undone."
+                    "."
             },
+            warning = "This can't be undone.",
             confirmLabel = "Delete",
             destructive = true,
             onConfirm = {
@@ -551,6 +559,7 @@ private fun InstalledRomCard(
                 fontWeight = FontWeight.SemiBold,
                 color = GsColors.Text,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             val companionNote = if (rom.companionFiles.isNotEmpty()) {
                 "  ·  +${rom.companionFiles.size} file(s)"
@@ -559,8 +568,10 @@ private fun InstalledRomCard(
             Text(
                 "${rom.filename}$companionNote$sizeNote",
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Dim,
+                // TextMuted, not Dim: this row may be lifted onto PanelHi.
+                color = gsTextMuted(),
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -585,7 +596,7 @@ private fun InstalledFooter(total: Int, shown: Int, totalBytes: Long) {
             Text(
                 summary,
                 style = MaterialTheme.typography.labelSmall,
-                color = GsColors.Muted,
+                color = gsTextMuted(),
             )
         }
     }

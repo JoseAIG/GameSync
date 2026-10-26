@@ -142,6 +142,7 @@ fun DownloadsScreen(
     var selectedIndex by rememberSaveable { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
+    val reduceMotion = LocalReduceMotion.current
     val holdNav = rememberHoldNavState()
     val listFocusRequester = remember { FocusRequester() }
     // Y asks before cancelling / removing the selected row.
@@ -158,7 +159,7 @@ fun DownloadsScreen(
     fun moveTo(index: Int) {
         if (downloads.isEmpty()) return
         selectedIndex = index.coerceIn(0, downloads.size - 1)
-        scope.launch { listState.animateScrollToItem(selectedIndex + headerItems) }
+        scope.launch { listState.gsScrollToItem(selectedIndex + headerItems, reduceMotion) }
     }
 
     /** A: the selected row's main action, by status. */
@@ -418,12 +419,15 @@ private fun DownloadRow(
                         fontWeight = FontWeight.SemiBold,
                         color = GsColors.Text,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
+                    // TextMuted, not Dim: this row may be lifted onto PanelHi.
                     Text(
                         text = "${download.system} · ${download.filename}",
                         style = MaterialTheme.typography.bodySmall,
-                        color = GsColors.Dim,
+                        color = gsTextMuted(),
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 Spacer(Modifier.size(8.dp))
@@ -463,7 +467,7 @@ private fun DownloadRow(
             Text(
                 text = buildSubtitle(download, downloaded, total, liveProgress?.bytesPerSecond),
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Dim,
+                color = gsTextMuted(),
             )
 
             val error = download.errorMessage
@@ -472,7 +476,7 @@ private fun DownloadRow(
                 Text(
                     text = error,
                     style = MaterialTheme.typography.bodySmall,
-                    color = GsColors.Err,
+                    color = GsColors.ErrText,
                 )
             }
         }
@@ -498,7 +502,14 @@ private fun StatusPill(status: String) {
         DownloadEntity.Status.QUEUED -> "Queued"
         else -> "Downloading"
     }
-    GsPill(text = label, color = statusColor(status))
+    val color = statusColor(status)
+    // Muted / Dim are not legible on a tint (or on a lifted row): their pill
+    // text steps up to TextMuted.
+    GsPill(
+        text = label,
+        color = color,
+        textColor = if (color == GsColors.Muted || color == GsColors.Dim) gsTextMuted() else textVariantOf(color),
+    )
 }
 
 @Composable

@@ -64,6 +64,10 @@ import com.savesync.android.ui.components.LocalServerOnline
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.rememberShowButtonHints
 import com.savesync.android.ui.theme.SaveSyncTheme
+import com.savesync.android.ui.NAV_TAB_ROUTES
+import com.savesync.android.ui.enter
+import com.savesync.android.ui.exit
+import com.savesync.android.ui.navMotionFor
 import com.savesync.android.ui.components.GsFooterHeights
 import com.savesync.android.ui.components.GsNotifier
 import com.savesync.android.ui.components.GsSnackbarHost
@@ -377,7 +381,7 @@ class MainActivity : ComponentActivity() {
  * Ordered list of top-level tab routes. The index is what [TabSwitchBar]
  * binds to, so any reorder here automatically shifts the selected indicator.
  */
-internal val TAB_ROUTES: List<String> = listOf("saves", "catalog", "installed", "downloads", "settings")
+internal val TAB_ROUTES: List<String> = NAV_TAB_ROUTES
 
 /** The top-level tab a pushed route belongs to, for L1/R1 from inside it. */
 private fun parentTabIndex(route: String?): Int = when {
@@ -486,10 +490,29 @@ private fun MainApp() {
                 )
             },
         ) { padding ->
+            // Transitions come from the route pair alone (see NavMotion.kt):
+            // fade between tabs, slide for push/pop, fade-only under reduced
+            // motion.  Enter and pop-enter share one rule, as do the exits.
             NavHost(
                 navController = navController,
                 startDestination = TAB_ROUTES[0],
                 modifier = Modifier.padding(padding),
+                enterTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .enter(reduceMotion)
+                },
+                exitTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .exit(reduceMotion)
+                },
+                popEnterTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .enter(reduceMotion)
+                },
+                popExitTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .exit(reduceMotion)
+                },
             ) {
                 composable(TAB_ROUTES[0]) {
                     SavesScreen(

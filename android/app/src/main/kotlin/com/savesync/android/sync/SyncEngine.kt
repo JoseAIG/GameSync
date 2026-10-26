@@ -52,9 +52,21 @@ class SyncEngine(
     private val api: SaveSyncApi,
     private val db: AppDatabase,
     private val consoleId: String,
-    private val saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN
+    private val saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN,
+    /** Where saves are copied before a download replaces them (default: the app's). */
+    backupStore: LocalBackupStore? = null,
 ) {
     private val dao = db.syncStateDao()
+
+    /**
+     * Every download path snapshots the current save here before
+     * [AtomicSaveWriter] replaces it.  Resolved lazily; if it can't be had,
+     * the download fails rather than overwrite without a copy.
+     */
+    private val backups: LocalBackupStore by lazy { backupStore ?: LocalBackups.store }
+
+    /** The title's sync state now, recorded in the snapshot (see [LocalBackup]). */
+    private suspend fun syncStateForBackup(entry: SaveEntry): SyncStateEntity? = dao.getById(entry.titleId)
 
     private suspend fun autoResolveSharedSaturnArchives(entry: SaveEntry): List<String> {
         if (!isSharedYabaSanshiroContainer(entry)) return emptyList()
@@ -378,11 +390,14 @@ class SyncEngine(
         }
     }
 
-    private fun writeDownloadedBytes(entry: SaveEntry, canonicalBytes: ByteArray): Boolean {
+    private suspend fun writeDownloadedBytes(entry: SaveEntry, canonicalBytes: ByteArray): Boolean {
+        val prev = syncStateForBackup(entry)
         return when {
             entry.isMultiFile && entry.saveDir != null -> {
-                AtomicSaveWriter.replaceDirectory(entry.saveDir, keepExisting = true) { staging ->
-                    unzipBytesToDirectory(canonicalBytes, staging)
+                backedUpWrite(backups, entry.titleId, entry.saveDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                    AtomicSaveWriter.replaceDirectory(entry.saveDir, keepExisting = true) { staging ->
+                        unzipBytesToDirectory(canonicalBytes, staging)
+                    }
                 }
                 true
             }
@@ -396,7 +411,9 @@ class SyncEngine(
                 } else {
                     canonicalBytes
                 }
-                AtomicSaveWriter.replaceFile(entry.saveFile, bytesToWrite)
+                backedUpWrite(backups, entry.titleId, entry.saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                    AtomicSaveWriter.replaceFile(entry.saveFile, bytesToWrite)
+                }
                 true
             }
             else -> false
@@ -691,8 +708,13 @@ class SyncEngine(
             }
             val body = response.body() ?: return false
             val bytes = body.bytes()
-            AtomicSaveWriter.replaceFile(saveFile, bytes)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceFile(saveFile, bytes)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadPs1Card failed for $titleId", e)
             false
@@ -711,8 +733,13 @@ class SyncEngine(
             }
             val body = response.body() ?: return false
             val bytes = body.bytes()
-            AtomicSaveWriter.replaceFile(saveFile, bytes)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceFile(saveFile, bytes)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadPs2Card failed for $titleId", e)
             false
@@ -738,6 +765,8 @@ class SyncEngine(
                 upsertKnownSyncState(entry, serverHash, archiveNames)
             }
             wrote
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadSaveRaw failed for $titleId", e)
             false
@@ -763,8 +792,13 @@ class SyncEngine(
             if (files.isEmpty()) return false
             // Overlay onto the existing slot (files the bundle doesn't carry
             // are kept, as before), but swap the result in atomically.
-            AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, slotDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadPspBundle failed for $titleId", e)
             false
@@ -787,8 +821,13 @@ class SyncEngine(
             // The bundle is the whole save: write it next to the current one,
             // verify it, then swap.  The old save is only removed once the new
             // one is in place, so a failure never leaves a half-written save.
-            AtomicSaveWriter.replaceDirectory(saveDir, files)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceDirectory(saveDir, files)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadTreeBundle failed for $titleId", e)
             false
@@ -960,8 +999,13 @@ class SyncEngine(
                 return false
             }
             val bytes = response.body()?.bytes() ?: return false
-            AtomicSaveWriter.replaceFile(saveFile, bytes)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceFile(saveFile, bytes)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadGcCard failed for $titleId", e)
             false

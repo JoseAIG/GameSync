@@ -31,6 +31,8 @@ class SaveSyncApp : Application() {
         super.onCreate()
         instance = this
         database = AppDatabase.getInstance(this)
+        // Saves are copied here before any download replaces them.
+        com.savesync.android.sync.LocalBackups.init(this)
         // Notification channels must exist BEFORE the DownloadManager
         // can ever try to start its foreground service, otherwise the
         // service throws on Android 8+ when looking up the channel id.

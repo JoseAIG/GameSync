@@ -511,6 +511,9 @@ bool ui_pick_folder_ex(const UiFolderRules *rules, const char *start, char *out,
     if (count_out) memset(count_out, 0, sizeof(*count_out));
     static Picker p;   // ~10 KB of state, plus the two listings on the heap
     memset(&p, 0, sizeof(p));
+    // Counts are kept for this visit only: ROMs may have arrived since
+    // (the Catalog installs DS games into this folder)
+    memset(&count_cache, 0, sizeof(count_cache));
     p.rules = rules;
     p.fr = (FolderRules){ rules->exts, rules->save_ext, rules->save_subdir };
     p.list.cap = p.spare.cap = FOLDER_SCAN_CAP;

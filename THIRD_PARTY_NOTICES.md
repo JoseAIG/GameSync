@@ -138,6 +138,7 @@ are **not** covered by GameSync's license and retain their original terms:
 | `server/data/ps3db.txt` | PS3 title lists |
 | `server/data/xbox_titleids.json`, `xbox_titleid_map.txt` | dbox.tools |
 | Wii U title ids in `server/data/dats/Nintendo - Wii U.dat` | wiiubrew Title database |
+| `3ds/source/root_certs.c` | Public root CA certificates, embedded unmodified (DER) so the 3DS client can verify HTTPS servers: ISRG Root X1 ([Let's Encrypt](https://letsencrypt.org/certificates/)), GTS Root R1 ([Google Trust Services](https://pki.goog/repository/)), SSL.com TLS RSA Root CA 2022 ([SSL.com](https://www.ssl.com/repository/)). Published by their issuers for distribution in trust stores; use is subject to each CA's CP/CPS and relying party terms. Source URLs and SHA-256 fingerprints are in the file header. |
 
 ---
 

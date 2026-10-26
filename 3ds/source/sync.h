@@ -12,6 +12,11 @@ typedef enum {
     SYNC_ERR_ARCHIVE,
     SYNC_ERR_BUNDLE,
     SYNC_ERR_TOO_LARGE,
+    SYNC_ERR_TOO_MANY_FILES,
+    SYNC_ERR_INTEGRITY,      // Downloaded file failed its SHA-256 check
+    SYNC_ERR_BACKUP,         // Current save couldn't be backed up; nothing written
+    SYNC_ERR_RESTORED,       // Write failed; the previous save was put back
+    SYNC_ERR_RESTORE_FAILED, // Write failed and so did restoring the previous save
 } SyncResult;
 
 // Sync action decided by smart sync
@@ -20,6 +25,7 @@ typedef enum {
     SYNC_ACTION_DOWNLOAD,  // Server newer than client -> download
     SYNC_ACTION_UP_TO_DATE, // Hashes match
     SYNC_ACTION_CONFLICT,   // Both changed -> user needs to decide
+    SYNC_ACTION_SERVER_ERROR, // Server state unknown (network/HTTP error) -> do nothing
 } SyncAction;
 
 // Summary of sync_all operation
@@ -72,6 +78,11 @@ typedef struct {
     char server_hash[65];
     char server_last_sync[32];      // ISO 8601 date
     char server_console_id[17];     // Which console uploaded
+    // True when the server could not be queried (no response, or an HTTP
+    // status other than 200/404). server_exists is then meaningless: we must
+    // not treat "couldn't ask" as "server has nothing" and offer an upload.
+    bool server_error;
+    u32 server_status;              // HTTP status, 0 if there was no response
 
     // Sync status
     bool is_synced;           // local_hash == server_hash

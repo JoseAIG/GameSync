@@ -1,5 +1,6 @@
 #include "sync.h"
 #include "archive.h"
+#include "backup.h"
 #include "bundle.h"
 #include "config.h"
 #include "nds.h"
@@ -9,18 +10,43 @@
 #include <inttypes.h>
 #include <sys/stat.h>
 
-#define MAX_SAVE_FILES 64
+#define MAX_SAVE_FILES 256
 #define STATE_DIR "sdmc:/3ds/3dssync/state"
 #define MAX_UPLOAD_SIZE 0x70000  // 448KB compressed - bundles are zlib compressed
 
+// Stringify a numeric macro for messages
+#define STR_(x) #x
+#define STR(x) STR_(x)
+
+// HTTP status of the last request that ended in SYNC_ERR_SERVER
+static u32 last_server_status;
+
+static SyncResult server_error(u32 status) {
+    last_server_status = status;
+    return SYNC_ERR_SERVER;
+}
+
 const char *sync_result_str(SyncResult result) {
+    static char detail[128];
     switch (result) {
         case SYNC_OK:           return "OK";
-        case SYNC_ERR_NETWORK:  return "Network error";
-        case SYNC_ERR_SERVER:   return "Server error";
+        case SYNC_ERR_NETWORK:
+            if (!network_last_error()[0]) return "Network error";
+            snprintf(detail, sizeof(detail), "Network error: %s", network_last_error());
+            return detail;
+        case SYNC_ERR_SERVER:
+            if (!last_server_status) return "Server error";
+            snprintf(detail, sizeof(detail), "Server error (HTTP %lu)",
+                     (unsigned long)last_server_status);
+            return detail;
         case SYNC_ERR_ARCHIVE:  return "Save read/write error";
         case SYNC_ERR_BUNDLE:   return "Bundle format error";
-        case SYNC_ERR_TOO_LARGE: return "Save too large";
+        case SYNC_ERR_TOO_LARGE: return "Save too large (over 448 KB compressed)";
+        case SYNC_ERR_TOO_MANY_FILES: return "Save has too many files (max " STR(MAX_SAVE_FILES) ")";
+        case SYNC_ERR_INTEGRITY: return "SHA-256 mismatch in download";
+        case SYNC_ERR_BACKUP:   return "Backup failed, save untouched";
+        case SYNC_ERR_RESTORED: return "Write failed, old save restored";
+        case SYNC_ERR_RESTORE_FAILED: return "Write and restore failed!";
         default:                return "Unknown error";
     }
 }
@@ -112,13 +138,28 @@ static int json_parse_string_array(const char *json, const char *key,
     return count;
 }
 
+// Seconds between 1900-01-01 (osGetTime() epoch) and 1970-01-01 (Unix epoch)
+#define SECONDS_1900_TO_1970 2208988800ULL
+
+// Current time as a Unix timestamp (UTC).
+// osGetTime() returns milliseconds since 1900-01-01 on the console clock, which
+// is local time with no time zone, so the configured UTC offset is removed.
+static u32 unix_timestamp_now(const AppConfig *config) {
+    u64 secs = osGetTime() / 1000ULL;
+    if (secs < SECONDS_1900_TO_1970) return 0;
+    s64 unix_secs = (s64)(secs - SECONDS_1900_TO_1970)
+                  - (s64)config->utc_offset_minutes * 60;
+    if (unix_secs < 0) return 0;
+    if (unix_secs > 0xFFFFFFFFLL) return 0xFFFFFFFFu;
+    return (u32)unix_secs;
+}
+
 // Build JSON metadata for one title
-static int build_title_json(char *buf, int buf_size, const TitleInfo *title,
+static int build_title_json(char *buf, int buf_size, const AppConfig *config,
+                            const TitleInfo *title,
                             const char *hash, u32 total_size,
                             const char *last_synced_hash) {
-    // Get a timestamp (seconds since 2000-01-01 from 3DS, convert to rough unix)
-    u64 ms = osGetTime(); // ms since Jan 1 2000
-    u32 timestamp = (u32)(ms / 1000) + 946684800; // add seconds from 1970 to 2000
+    u32 timestamp = unix_timestamp_now(config);
 
     if (last_synced_hash && last_synced_hash[0] != '\0') {
         return snprintf(buf, buf_size,
@@ -154,7 +195,11 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
     else
         file_count = archive_read(title->title_id, title->media_type,
                                   files, MAX_SAVE_FILES);
-    if (file_count < 0) { free(files); return SYNC_ERR_ARCHIVE; }
+    if (file_count < 0) {
+        free(files);
+        return file_count == ARCHIVE_ERR_TOO_MANY_FILES ? SYNC_ERR_TOO_MANY_FILES
+                                                        : SYNC_ERR_ARCHIVE;
+    }
     if (file_count == 0) { free(files); return SYNC_OK; }
 
     // Compute hash if not provided
@@ -169,8 +214,7 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
     if (progress) progress(msg);
 
     // Create bundle
-    u64 ms = osGetTime();
-    u32 timestamp = (u32)(ms / 1000) + 946684800;
+    u32 timestamp = unix_timestamp_now(config);
     u32 bundle_size;
     u8 *bundle = bundle_create(title->title_id, timestamp,
                                files, file_count, &bundle_size);
@@ -185,13 +229,17 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
         return SYNC_ERR_TOO_LARGE;
     }
 
-    // POST to server — include product code so the server can store the game name
+    // POST to server — include product code so the server can store the game name.
+    // Every upload is either directed by the three-way hash sync plan or
+    // explicitly confirmed by the user, so skip the server's timestamp check
+    // with force=true (as the Android client does). Otherwise a save uploaded
+    // by another device with a newer clock would reject this upload with 409.
     char path[128];
     if (title->product_code[0]) {
-        snprintf(path, sizeof(path), "/saves/%s?game_code=%s",
+        snprintf(path, sizeof(path), "/saves/%s?force=true&game_code=%s",
                  title->title_id_hex, title->product_code);
     } else {
-        snprintf(path, sizeof(path), "/saves/%s", title->title_id_hex);
+        snprintf(path, sizeof(path), "/saves/%s?force=true", title->title_id_hex);
     }
 
     u32 resp_size, status;
@@ -206,7 +254,84 @@ static SyncResult upload_title_with_hash(const AppConfig *config, const TitleInf
         save_last_synced_hash(title->title_id_hex, hash_to_save);
         return SYNC_OK;
     }
-    return SYNC_ERR_SERVER;
+    return server_error(status);
+}
+
+// Map a bundle_parse error code to a SyncResult
+static SyncResult bundle_error(int code) {
+    if (code == -2) return SYNC_ERR_TOO_MANY_FILES;
+    if (code == -3) return SYNC_ERR_INTEGRITY;
+    return SYNC_ERR_BUNDLE;
+}
+
+// Read the current save of any kind of title (3DS archive, NDS .sav, NDS cart)
+static int read_title_save(const TitleInfo *title, ArchiveFile *files) {
+    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
+        return nds_cart_read_save(files, MAX_SAVE_FILES);
+    if (title->is_nds)
+        return nds_read_save(title->sav_path, files, MAX_SAVE_FILES);
+    return archive_read(title->title_id, title->media_type, files, MAX_SAVE_FILES);
+}
+
+static bool write_title_save(const TitleInfo *title, const ArchiveFile *files,
+                             int file_count) {
+    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
+        return nds_cart_write_save(files, file_count);
+    if (title->is_nds)
+        return nds_write_save(title->sav_path, files, file_count);
+    return archive_write(title->title_id, title->media_type, files, file_count);
+}
+
+// Replace a title's save with `files`. The current save is kept in memory to
+// restore it if the write fails, and copied to the SD card first
+// (config->local_backups copies are kept) so it can be recovered by hand.
+static SyncResult write_save_safely(const AppConfig *config, const TitleInfo *title,
+                                    const ArchiveFile *files, int file_count,
+                                    SyncProgressCb progress) {
+    char msg[128];
+
+    // A bundle with no files would wipe the save; never treat it as a save
+    if (file_count <= 0) return SYNC_ERR_BUNDLE;
+
+    ArchiveFile *old_files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
+    if (!old_files) return SYNC_ERR_BACKUP;
+
+    int old_count = read_title_save(title, old_files);
+    if (old_count == ARCHIVE_ERR_TOO_MANY_FILES || old_count == ARCHIVE_ERR_READ) {
+        // A save exists but can't be copied completely: don't overwrite it
+        free(old_files);
+        return SYNC_ERR_BACKUP;
+    }
+    if (old_count < 0) old_count = 0;  // No current save, nothing to lose
+
+    if (old_count > 0 && config->local_backups > 0) {
+        snprintf(msg, sizeof(msg), "Backing up: %s", title->title_id_hex);
+        if (progress) progress(msg);
+        if (!backup_save(title->title_id_hex, old_files, old_count,
+                         config->local_backups, NULL, 0)) {
+            archive_free_files(old_files, old_count);
+            free(old_files);
+            return SYNC_ERR_BACKUP;
+        }
+    }
+
+    snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
+    if (progress) progress(msg);
+
+    SyncResult result = SYNC_OK;
+    if (!write_title_save(title, files, file_count)) {
+        result = SYNC_ERR_ARCHIVE;
+        if (old_count > 0) {
+            snprintf(msg, sizeof(msg), "Write failed, restoring: %s", title->title_id_hex);
+            if (progress) progress(msg);
+            result = write_title_save(title, old_files, old_count)
+                   ? SYNC_ERR_RESTORED : SYNC_ERR_RESTORE_FAILED;
+        }
+    }
+
+    archive_free_files(old_files, old_count);
+    free(old_files);
+    return result;
 }
 
 static SyncResult download_title(const AppConfig *config, const TitleInfo *title,
@@ -221,7 +346,7 @@ static SyncResult download_title(const AppConfig *config, const TitleInfo *title
     u32 resp_size, status;
     u8 *resp = network_get(config, path, &resp_size, &status);
     if (!resp) return SYNC_ERR_NETWORK;
-    if (status != 200) { free(resp); return SYNC_ERR_SERVER; }
+    if (status != 200) { free(resp); return server_error(status); }
 
     // Heap-allocate to avoid stack overflow
     ArchiveFile *files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
@@ -235,41 +360,31 @@ static SyncResult download_title(const AppConfig *config, const TitleInfo *title
         free(files);
         if (decompressed) free(decompressed);
         free(resp);
-        return SYNC_ERR_BUNDLE;
+        return bundle_error(file_count);
     }
 
     // Compute hash of downloaded save (before write, while data is valid)
     char new_hash[65];
     bundle_compute_save_hash(files, file_count, new_hash);
 
-    snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
-    if (progress) progress(msg);
-
-    // Write save data
-    bool ok;
-    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
-        ok = nds_cart_write_save(files, file_count);
-    else if (title->is_nds)
-        ok = nds_write_save(title->sav_path, files, file_count);
-    else
-        ok = archive_write(title->title_id, title->media_type, files, file_count);
+    // Write save data (backs up and restores the current save on failure)
+    SyncResult result = write_save_safely(config, title, files, file_count, progress);
     free(files);
     // Free decompressed buffer if we had a compressed bundle
     // (file data pointers point into decompressed, not resp)
     if (decompressed) free(decompressed);
     free(resp);
 
-    if (ok) {
+    if (result == SYNC_OK) {
         // Download and write succeeded - save this hash as last synced state
         save_last_synced_hash(title->title_id_hex, new_hash);
-        return SYNC_OK;
     }
-    return SYNC_ERR_ARCHIVE;
+    return result;
 }
 
 SyncResult sync_title(const AppConfig *config, const TitleInfo *title,
                       SyncProgressCb progress) {
-    // For single-title sync: always upload (the server will reject if older)
+    // For single-title sync: always upload (the user chose to upload this save)
     // Pass NULL for hash - upload_title_with_hash will compute it
     return upload_title_with_hash(config, title, progress, NULL);
 }
@@ -296,8 +411,10 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     if (!files) { free(hash_cache); return false; }
 
     // Build JSON for sync request
-    // Estimate: ~230 bytes per title (with last_synced_hash) + overhead
-    int json_cap = title_count * 230 + 64;
+    // Largest entry: 73 bytes of keys/punctuation + 16 (title id) + 2 * 64
+    // (hashes) + 2 * 10 (timestamp, size) = 237, plus the separating comma.
+    // Header and "]}" are under 64 bytes.
+    int json_cap = title_count * 256 + 64;
     char *json = (char *)malloc(json_cap);
     if (!json) { free(files); free(hash_cache); return false; }
 
@@ -360,6 +477,17 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
             else
                 fc = archive_read(titles[i].title_id, titles[i].media_type,
                                   files, MAX_SAVE_FILES);
+            if (fc == ARCHIVE_ERR_TOO_MANY_FILES || fc == ARCHIVE_ERR_READ) {
+                // Never report a partial save: leave this title out of the
+                // sync (like a cartridge) and count it as failed.
+                snprintf(msg, sizeof(msg), "Cannot read save: %s (%s)",
+                    titles[i].title_id_hex,
+                    fc == ARCHIVE_ERR_TOO_MANY_FILES ? "too many files" : "read error");
+                if (progress) progress(msg);
+                hash_cache[i][0] = '\0';
+                local_summary.failed++;
+                continue;
+            }
             if (fc < 0) fc = 0;
 
             if (fc > 0) {
@@ -383,7 +511,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
 
         if (!first_title) pos += snprintf(json + pos, json_cap - pos, ",");
         first_title = false;
-        pos += build_title_json(json + pos, json_cap - pos, &titles[i],
+        pos += build_title_json(json + pos, json_cap - pos, config, &titles[i],
                                current_hash, total_size,
                                has_last_synced ? last_synced : NULL);
     }
@@ -481,6 +609,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         // Find the title and its cached hash
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, upload_ids[i]) == 0) {
+                if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
                 snprintf(msg, sizeof(msg), "Uploading %d/%d: %s",
                     i + 1, upload_count, upload_ids[i]);
                 if (progress) progress(msg);
@@ -501,6 +630,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     for (int i = 0; i < download_count; i++) {
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, download_ids[i]) == 0) {
+                if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
                 snprintf(msg, sizeof(msg), "Downloading %d/%d: %s",
                     ++dl_done, total_dl, download_ids[i]);
                 if (progress) progress(msg);
@@ -514,10 +644,15 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         }
     }
 
-    // server_only titles: download if title exists locally
+    // server_only titles: download if title exists locally.
+    // Titles left out of the sync request (cartridges, marked with an empty
+    // hash_cache entry) always come back as server_only; never touch them here.
+    // The same check above keeps a cartridge from being picked instead of an
+    // installed copy that shares its title ID.
     for (int i = 0; i < server_only_count; i++) {
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, server_only_ids[i]) == 0) {
+                if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
                 snprintf(msg, sizeof(msg), "Downloading %d/%d: %s",
                     ++dl_done, total_dl, server_only_ids[i]);
                 if (progress) progress(msg);
@@ -624,6 +759,14 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
             details->local_size += files[i].size;
         }
         archive_free_files(files, file_count);
+    } else if (file_count == ARCHIVE_ERR_TOO_MANY_FILES || file_count == ARCHIVE_ERR_READ) {
+        // A save exists but can't be read completely: don't let it look
+        // missing (that would suggest a download over it)
+        details->local_exists = true;
+        details->local_file_count = 0;
+        details->local_size = 0;
+        strcpy(details->local_hash, file_count == ARCHIVE_ERR_TOO_MANY_FILES
+               ? "ERROR: too many files" : "ERROR: read failed");
     } else {
         details->local_exists = (file_count == 0);  // 0 files = empty save, -1 = error/no save
         details->local_file_count = 0;
@@ -639,8 +782,10 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
     char path[64];
     snprintf(path, sizeof(path), "/saves/%s/meta", title->title_id_hex);
 
-    u32 resp_size, status;
+    u32 resp_size = 0, status = 0;
     u8 *resp = network_get(config, path, &resp_size, &status);
+    details->server_error = false;
+    details->server_status = status;
 
     if (resp && status == 200) {
         // Null-terminate for string parsing
@@ -663,11 +808,16 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
         } else {
             free(resp);
         }
-    } else if (resp) {
+    } else if (resp && status == 404) {
+        // The server answered and has no save for this title.
         free(resp);
         details->server_exists = false;
     } else {
+        // No response (timeout, Wi-Fi drop) or an unexpected status: the
+        // server state is unknown.
+        if (resp) free(resp);
         details->server_exists = false;
+        details->server_error = true;
     }
 
     // --- Determine sync status ---
@@ -681,6 +831,11 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
 }
 
 SyncAction sync_decide(const SaveDetails *details) {
+    // Never suggest an upload or download when we couldn't read the server.
+    if (details->server_error) {
+        return SYNC_ACTION_SERVER_ERROR;
+    }
+
     // No local and no server -> up to date (nothing to sync)
     if (!details->local_exists && !details->server_exists) {
         return SYNC_ACTION_UP_TO_DATE;
@@ -818,7 +973,7 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
     u32 resp_size, status;
     u8 *resp = network_get(config, path, &resp_size, &status);
     if (!resp) return SYNC_ERR_NETWORK;
-    if (status != 200) { free(resp); return SYNC_ERR_SERVER; }
+    if (status != 200) { free(resp); return server_error(status); }
 
     // Parse bundle
     ArchiveFile *files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
@@ -832,30 +987,23 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
         free(files);
         if (decompressed) free(decompressed);
         free(resp);
-        return SYNC_ERR_BUNDLE;
+        return bundle_error(file_count);
     }
 
-    snprintf(msg, sizeof(msg), "Writing save: %s (%d files)", title->title_id_hex, file_count);
-    if (progress) progress(msg);
+    // Compute hash of the restored version while the file data is still valid
+    char hash[65];
+    bundle_compute_save_hash(files, file_count, hash);
 
-    // Write save data
-    bool ok;
-    if (title->is_nds && title->media_type == MEDIATYPE_GAME_CARD)
-        ok = nds_cart_write_save(files, file_count);
-    else if (title->is_nds)
-        ok = nds_write_save(title->sav_path, files, file_count);
-    else
-        ok = archive_write(title->title_id, title->media_type, files, file_count);
+    // Write save data (backs up and restores the current save on failure)
+    SyncResult result = write_save_safely(config, title, files, file_count, progress);
 
     free(files);
     if (decompressed) free(decompressed);
     free(resp);
 
-    if (!ok) return SYNC_ERR_ARCHIVE;
+    if (result != SYNC_OK) return result;
 
     // Update last synced hash with the downloaded version
-    char hash[65];
-    bundle_compute_save_hash(files, file_count, hash);
     save_last_synced_hash(title->title_id_hex, hash);
 
     return SYNC_OK;

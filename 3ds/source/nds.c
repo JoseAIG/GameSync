@@ -3,6 +3,7 @@
 #include "title.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <sys/stat.h>
 
 #define NDS_GAMECODE_OFFSET 0x0C
@@ -197,19 +198,25 @@ int nds_scan(const char *nds_dir, TitleInfo *titles, int offset, int max_titles)
 }
 
 int nds_read_save(const char *sav_path, ArchiveFile *files, int max_files) {
-    if (max_files < 1) return -1;
+    if (max_files < 1) return ARCHIVE_ERR_TOO_MANY_FILES;
 
+    // A missing .sav means "no save yet"; any other failure is a read error,
+    // so an unreadable save is never mistaken for an empty one
     FILE *f = fopen(sav_path, "rb");
-    if (!f) return -1;
+    if (!f) return errno == ENOENT ? ARCHIVE_ERR_OPEN : ARCHIVE_ERR_READ;
 
     // Get file size
-    fseek(f, 0, SEEK_END);
-    long size = ftell(f);
+    long size = -1;
+    if (fseek(f, 0, SEEK_END) == 0) size = ftell(f);
+    if (size < 0 || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return ARCHIVE_ERR_READ;
+    }
 
-    u8 *data = (u8 *)malloc((size_t)size);
+    u8 *data = (u8 *)malloc(size ? (size_t)size : 1);
     if (!data) {
         fclose(f);
-        return -1;
+        return ARCHIVE_ERR_READ;
     }
 
     size_t rd = fread(data, 1, (size_t)size, f);
@@ -217,7 +224,7 @@ int nds_read_save(const char *sav_path, ArchiveFile *files, int max_files) {
 
     if ((long)rd != size) {
         free(data);
-        return -1;
+        return ARCHIVE_ERR_READ;
     }
 
     // Store as single file "save.dat" (matches ds_sync.py bundle format)
@@ -249,26 +256,29 @@ bool nds_write_save(const char *sav_path, const ArchiveFile *files, int file_cou
     if (!f) return false;
 
     size_t written = fwrite(sav->data, 1, sav->size, f);
-    fclose(f);
+    // fclose flushes; a full SD card can fail here
+    if (fclose(f) != 0) return false;
 
     return written == sav->size;
 }
 
 int nds_cart_read_save(ArchiveFile *files, int max_files) {
-    if (max_files < 1) return -1;
+    if (max_files < 1) return ARCHIVE_ERR_TOO_MANY_FILES;
 
+    // No detectable save chip: nothing to read (and nothing can be written)
     CardSaveType type = card_spi_detect();
-    if (type == SAVE_TYPE_UNKNOWN) return -1;
+    if (type == SAVE_TYPE_UNKNOWN) return ARCHIVE_ERR_OPEN;
 
     u32 save_size = card_spi_get_size(type);
-    if (save_size == 0) return -1;
+    if (save_size == 0) return ARCHIVE_ERR_OPEN;
 
+    // From here on a save exists, so failures are read errors
     u8 *data = (u8 *)malloc(save_size);
-    if (!data) return -1;
+    if (!data) return ARCHIVE_ERR_READ;
 
     if (!card_spi_read_save(type, data, save_size)) {
         free(data);
-        return -1;
+        return ARCHIVE_ERR_READ;
     }
 
     strncpy(files[0].path, "save.dat", MAX_PATH_LEN - 1);

@@ -22,14 +22,17 @@ u8 *bundle_create(u64 title_id, u32 timestamp,
 // that contains decompressed data - caller must free it.
 // If bundle is uncompressed, *out_decompressed is NULL and file data
 // points into bundle_data.
-// Returns -1 on error.
+// Every file is checked against the SHA-256 in the bundle's file table.
+// Returns -1 on error, -2 if the bundle has more than max_files files,
+// -3 if a file fails its SHA-256 check.
 int bundle_parse(const u8 *bundle_data, u32 bundle_size,
                  u64 *out_title_id, u32 *out_timestamp,
                  ArchiveFile *files, int max_files,
                  u8 **out_decompressed);
 
 // Compute SHA-256 hash of all save data (for sync comparison).
-// Hashes the concatenation of all file contents in order.
+// Hashes the concatenation of all file contents in array order; callers pass
+// files sorted by path (archive_read/bundle_parse already sort them).
 void bundle_compute_save_hash(const ArchiveFile *files, int file_count,
                               char *hex_out); // 65 bytes: 64 hex + null
 

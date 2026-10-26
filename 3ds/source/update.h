@@ -9,6 +9,7 @@ typedef struct {
     char latest_version[16];
     char download_url[256];
     u32 file_size;
+    char sha256[65];   // Expected SHA-256 of the CIA (hex), empty if not published
 } UpdateInfo;
 
 // Check for updates from server.
@@ -16,10 +17,12 @@ typedef struct {
 bool update_check(const AppConfig *config, UpdateInfo *info);
 
 // Download update to SD card.
-// Returns true on success.
+// The download must match info->file_size and, if published, info->sha256.
+// Returns true on success; error_out receives a description of what failed.
 // Progress callback receives percentage (0-100).
 typedef void (*UpdateProgressCb)(int percent);
-bool update_download(const AppConfig *config, const char *url, UpdateProgressCb progress);
+bool update_download(const AppConfig *config, const UpdateInfo *info,
+                     UpdateProgressCb progress, char *error_out, int error_size);
 
 // Install CIA from SD card using AM service.
 // Returns true on success.

@@ -1,5 +1,6 @@
 #include "update.h"
 #include "network.h"
+#include "sha256.h"
 #include <3ds.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,16 +112,34 @@ bool update_check(const AppConfig *config, UpdateInfo *info) {
     json_get_string(json, "download_url", info->download_url, sizeof(info->download_url));
     info->file_size = json_get_int(json, "file_size");
 
+    // Optional checksum of the CIA: "sha256": "<hex>", or GitHub's asset
+    // "digest": "sha256:<hex>" if the server passes it through
+    char digest[80] = "";
+    if (json_get_string(json, "sha256", digest, sizeof(digest)) ||
+        (json_get_string(json, "digest", digest, sizeof(digest)) &&
+         strncmp(digest, "sha256:", 7) == 0)) {
+        const char *hex = strncmp(digest, "sha256:", 7) == 0 ? digest + 7 : digest;
+        bool valid = strlen(hex) == 64;
+        for (int i = 0; valid && i < 64; i++)
+            valid = strchr("0123456789abcdefABCDEF", hex[i]) != NULL;
+        if (valid) {
+            for (int i = 0; i < 64; i++)
+                info->sha256[i] = (hex[i] >= 'A' && hex[i] <= 'F') ? hex[i] + 32 : hex[i];
+            info->sha256[64] = '\0';
+        }
+    }
+
     free(json);
     return true;
 }
 
-bool update_download(const AppConfig *config, const char *url, UpdateProgressCb progress) {
+bool update_download(const AppConfig *config, const UpdateInfo *info,
+                     UpdateProgressCb progress, char *error_out, int error_size) {
     // Build proxy download path
     // URL needs to be URL-encoded, but for simplicity we'll just use it directly
     // since it's from our own server's response
     char path[512];
-    snprintf(path, sizeof(path), "/update/download?url=%s", url);
+    snprintf(path, sizeof(path), "/update/download?url=%s", info->download_url);
 
     // Report initial progress
     if (progress) progress(0);
@@ -131,8 +150,37 @@ bool update_download(const AppConfig *config, const char *url, UpdateProgressCb 
     u8 *data = network_get(config, path, &resp_size, &status);
 
     if (!data || status != 200 || resp_size == 0) {
+        char msg[128];
+        if (!data)
+            snprintf(msg, sizeof(msg), "Network error: %s", network_last_error());
+        else
+            snprintf(msg, sizeof(msg), "Server returned HTTP %lu (%lu bytes)",
+                     (unsigned long)status, (unsigned long)resp_size);
+        set_error(error_out, error_size, msg);
         if (data) free(data);
         return false;
+    }
+
+    // Never install a truncated or tampered CIA
+    if (info->file_size && resp_size != info->file_size) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Size mismatch: got %lu, expected %lu bytes",
+                 (unsigned long)resp_size, (unsigned long)info->file_size);
+        set_error(error_out, error_size, msg);
+        free(data);
+        return false;
+    }
+    if (info->sha256[0]) {
+        u8 hash[32];
+        char hex[65];
+        sha256(data, resp_size, hash);
+        for (int i = 0; i < 32; i++)
+            snprintf(hex + i * 2, 3, "%02x", hash[i]);
+        if (strcmp(hex, info->sha256) != 0) {
+            set_error(error_out, error_size, "SHA-256 mismatch, update rejected");
+            free(data);
+            return false;
+        }
     }
 
     // Ensure directory exists
@@ -142,6 +190,7 @@ bool update_download(const AppConfig *config, const char *url, UpdateProgressCb 
     // Write to SD card
     FILE *f = fopen(UPDATE_CIA_PATH, "wb");
     if (!f) {
+        set_error(error_out, error_size, "Cannot write " UPDATE_CIA_PATH);
         free(data);
         return false;
     }
@@ -154,6 +203,7 @@ bool update_download(const AppConfig *config, const char *url, UpdateProgressCb 
 
         size_t wrote = fwrite(data + written, 1, chunk, f);
         if (wrote != chunk) {
+            set_error(error_out, error_size, "SD card write failed");
             fclose(f);
             free(data);
             remove(UPDATE_CIA_PATH);

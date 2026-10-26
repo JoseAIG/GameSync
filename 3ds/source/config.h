@@ -13,6 +13,10 @@ bool config_load(AppConfig *config, char *error_out, int error_size);
 // Returns true on success, false on failure.
 bool config_save(const AppConfig *config);
 
+// URL requests go to: server_url, or server_url_alt when the startup probe
+// found only the alternate reachable (see network_select_server).
+const char *config_active_url(const AppConfig *config);
+
 // Open software keyboard to edit a string field
 // Returns true if user confirmed, false if cancelled
 // hint: placeholder text shown when empty

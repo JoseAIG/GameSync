@@ -39,9 +39,15 @@ typedef struct {
 // App configuration loaded from SD card
 typedef struct {
     char server_url[MAX_URL_LEN];
+    char server_url_alt[MAX_URL_LEN]; // Optional fallback, e.g. the server's IP on a second LAN
+    bool use_alt_url;       // Runtime only (never saved): primary didn't answer, alt did
     char api_key[MAX_API_KEY_LEN];
     char console_id[17];  // 16 hex chars + null (generated on first run)
     char nds_dir[MAX_PATH_LEN]; // NDS ROM directory on SD (e.g., "sdmc:/roms/nds")
+    int utc_offset_minutes; // Console clock offset from UTC (e.g. -240 for UTC-4)
+    int local_backups;      // Copies of the previous save kept before overwriting (0 = off)
+    bool tls_verify;        // Verify HTTPS server certificates (default true)
+    bool update_check;      // Allow checking for / installing app updates (default true)
 } AppConfig;
 
 #endif // COMMON_H

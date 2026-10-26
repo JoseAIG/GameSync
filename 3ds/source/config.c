@@ -71,6 +71,10 @@ static void skip_bom(char *str) {
 
 bool config_load(AppConfig *config, char *error_out, int error_size) {
     memset(config, 0, sizeof(AppConfig));
+    config->utc_offset_minutes = 0;
+    config->local_backups = 3;
+    config->tls_verify = true;
+    config->update_check = true;
 
     FILE *f = fopen(CONFIG_PATH, "r");
     if (!f) {
@@ -104,10 +108,31 @@ bool config_load(AppConfig *config, char *error_out, int error_size) {
 
         if (strcmp(key, "server_url") == 0) {
             strncpy(config->server_url, val, MAX_URL_LEN - 1);
+        } else if (strcmp(key, "server_url_alt") == 0) {
+            strncpy(config->server_url_alt, val, MAX_URL_LEN - 1);
         } else if (strcmp(key, "api_key") == 0) {
             strncpy(config->api_key, val, MAX_API_KEY_LEN - 1);
         } else if (strcmp(key, "nds_dir") == 0) {
             strncpy(config->nds_dir, val, MAX_PATH_LEN - 1);
+        } else if (strcmp(key, "utc_offset_minutes") == 0) {
+            // The 3DS clock is local time without a zone; this is the offset
+            // of that clock from UTC, used to send real Unix timestamps.
+            int offset = atoi(val);
+            if (offset < -14 * 60) offset = -14 * 60;
+            if (offset > 14 * 60) offset = 14 * 60;
+            config->utc_offset_minutes = offset;
+        } else if (strcmp(key, "local_backups") == 0) {
+            // Copies of a save kept on the SD card before it is overwritten
+            int keep = atoi(val);
+            if (keep < 0) keep = 0;
+            if (keep > 50) keep = 50;
+            config->local_backups = keep;
+        } else if (strcmp(key, "tls_verify") == 0) {
+            // 0 = accept any HTTPS certificate (old behaviour)
+            config->tls_verify = atoi(val) != 0;
+        } else if (strcmp(key, "update_check") == 0) {
+            // 0 = never contact the server for app updates
+            config->update_check = atoi(val) != 0;
         }
     }
 
@@ -246,9 +271,15 @@ bool config_save(const AppConfig *config) {
 
     fprintf(f, "# 3DS Save Sync Configuration\n");
     fprintf(f, "server_url=%s\n", config->server_url);
+    if (config->server_url_alt[0])
+        fprintf(f, "server_url_alt=%s\n", config->server_url_alt);
     fprintf(f, "api_key=%s\n", config->api_key);
     if (config->nds_dir[0])
         fprintf(f, "nds_dir=%s\n", config->nds_dir);
+    fprintf(f, "utc_offset_minutes=%d\n", config->utc_offset_minutes);
+    fprintf(f, "local_backups=%d\n", config->local_backups);
+    fprintf(f, "tls_verify=%d\n", config->tls_verify ? 1 : 0);
+    fprintf(f, "update_check=%d\n", config->update_check ? 1 : 0);
 
     fclose(f);
     return true;
@@ -389,4 +420,10 @@ bool config_edit_field(const char *hint, char *buffer, int max_len) {
         return true;
     }
     return false;
+}
+
+const char *config_active_url(const AppConfig *config) {
+    if (config->use_alt_url && config->server_url_alt[0])
+        return config->server_url_alt;
+    return config->server_url;
 }

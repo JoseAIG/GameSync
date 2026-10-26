@@ -153,6 +153,14 @@ reads and writes.
 - **[dbox.tools](https://dbox.tools/)** — original Xbox title-id database (`server/data/xbox_titleids.json`).
 - **[Serial Station](https://serialstation.com/)** — PlayStation serial lookups (`server/app/services/serialstation.py`).
 
+### Trusted root certificates
+
+The 3DS client embeds these public root CA certificates, unmodified, so it can verify HTTPS servers (`3ds/source/root_certs.c`). They are not covered by GameSync's license.
+
+- **ISRG Root X1** — [Internet Security Research Group / Let's Encrypt](https://letsencrypt.org/certificates/), from <https://letsencrypt.org/certs/isrgrootx1.der>.
+- **GTS Root R1** — [Google Trust Services](https://pki.goog/repository/), from <https://i.pki.goog/r1.crt>.
+- **SSL.com TLS RSA Root CA 2022** — [SSL Corporation](https://www.ssl.com/repository/), from <https://repo-certs.ssl.com/repo/certs/SSLcom-TLS-Root-2022-RSA.der>.
+
 ### External tools invoked or recommended
 
 - **[chdman](https://www.mamedev.org/)** — CHD compression (MAMEdev, part of `mame-tools`).

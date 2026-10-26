@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     max_decompressed_bytes: int = 256 * 1024 * 1024
     host: str = "0.0.0.0"
     port: int = 8000
+    # Auto-reload on code changes when started via ``python run.py``.
+    # Handy for development; set SYNC_RELOAD=false in production.
+    reload: bool = True
     max_history_versions: int = 10
     rom_scan_interval: int = 300
 

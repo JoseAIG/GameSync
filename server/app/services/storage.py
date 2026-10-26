@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import shutil
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -213,6 +214,49 @@ def get_metadata_for_sync(title_id: str, console_id: str = "") -> SaveMetadata |
     return meta
 
 
+_STAGING_PREFIX = ".current-new-"
+_RETIRED_PREFIX = ".current-old-"
+
+
+def _swap_into_place(staging: Path, current: Path) -> None:
+    """Replace ``current`` with ``staging`` using renames only.
+
+    If the second rename fails the previous save is moved back, so
+    ``current`` is always either the old or the new save.
+    """
+    if not current.exists():
+        staging.rename(current)
+        return
+    retired = current.with_name(f"{_RETIRED_PREFIX}{uuid.uuid4().hex}")
+    current.rename(retired)
+    try:
+        staging.rename(current)
+    except BaseException:
+        retired.rename(current)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
+
+
+def _recover_interrupted_swap(title_dir: Path) -> None:
+    """Clean up after a crash in the middle of ``store_save``.
+
+    A leftover staging dir is an unfinished upload and is discarded.  A
+    retired dir with no ``current`` means the process died between the two
+    renames, so the previous save is restored.
+    """
+    current = title_dir / "current"
+    for entry in title_dir.iterdir():
+        if not entry.is_dir():
+            continue
+        if entry.name.startswith(_RETIRED_PREFIX):
+            if not current.exists():
+                entry.rename(current)
+            else:
+                shutil.rmtree(entry, ignore_errors=True)
+        elif entry.name.startswith(_STAGING_PREFIX):
+            shutil.rmtree(entry, ignore_errors=True)
+
+
 def store_save(
     bundle: SaveBundle,
     source: str = "3ds",
@@ -229,30 +273,43 @@ def store_save(
     for f in bundle.files:
         validate_relative_path(f.path)
 
-    # Archive existing save to history
-    if current.exists():
-        old_meta = get_metadata(title_id)
-        if old_meta:
-            ts = old_meta.last_sync.replace(":", "_").replace("+", "_")
-            archive_dir = history / ts
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            for item in current.iterdir():
-                if item.is_file():
-                    shutil.copy2(item, archive_dir / item.name)
-                elif item.is_dir():
-                    shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
+    title_dir = _title_dir(title_id)
+    title_dir.mkdir(parents=True, exist_ok=True)
+    _recover_interrupted_swap(title_dir)
 
-            _prune_history(title_id)
-
-        shutil.rmtree(current)
-
-    # Write new save files
-    current.mkdir(parents=True, exist_ok=True)
+    # Write the new save into a sibling staging directory first, so a failed
+    # write (disk full, I/O error) never leaves ``current`` half-written or
+    # missing.  The swap below is two renames on the same filesystem.
     _trace_files("store-write", title_id, [(f.path, f.data) for f in bundle.files])
-    for f in bundle.files:
-        file_path = safe_join(current, f.path)
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        file_path.write_bytes(f.data)
+    # Plain mkdir (not mkdtemp) so ``current`` keeps the usual umask-based
+    # permissions after the rename.
+    staging = title_dir / f"{_STAGING_PREFIX}{uuid.uuid4().hex}"
+    staging.mkdir()
+    try:
+        for f in bundle.files:
+            file_path = safe_join(staging, f.path)
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(f.data)
+
+        # Archive existing save to history
+        if current.exists():
+            old_meta = get_metadata(title_id)
+            if old_meta:
+                ts = old_meta.last_sync.replace(":", "_").replace("+", "_")
+                archive_dir = history / ts
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                for item in current.iterdir():
+                    if item.is_file():
+                        shutil.copy2(item, archive_dir / item.name)
+                    elif item.is_dir():
+                        shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
+
+                _prune_history(title_id)
+
+        _swap_into_place(staging, current)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
 
     # Compute sync metadata hash. For PS1, preserve PSP/Vita-compatible hashing
     # over the PSP-visible file set so legacy clients continue to compare correctly.

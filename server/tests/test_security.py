@@ -505,3 +505,83 @@ class TestRomScanAdmin:
         monkeypatch.setattr(settings, "trust_proxy_auth", True)
         r = client.get("/api/v1/roms/scan", headers={"X-Remote-User": "admin"})
         assert r.status_code == 401
+
+
+# ── Atomic save replacement ─────────────────────────────────────────────────
+
+
+def _save_bundle(files, timestamp=1):
+    return SaveBundle(
+        title_id=TITLE_ID,
+        timestamp=timestamp,
+        files=[
+            BundleFile(p, len(d), hashlib.sha256(d).digest(), d) for p, d in files
+        ],
+    )
+
+
+class TestAtomicStore:
+    def test_failed_write_keeps_previous_save(self, tmp_save_dir, monkeypatch):
+        from pathlib import Path
+
+        storage.store_save(_save_bundle([("a", b"old-a"), ("b", b"old-b")]))
+        history_before = storage.list_history(TITLE_HEX)
+
+        real_write = Path.write_bytes
+
+        def failing_write(self, data):
+            if self.name == "b":
+                raise OSError(28, "No space left on device")
+            return real_write(self, data)
+
+        monkeypatch.setattr(Path, "write_bytes", failing_write)
+        with pytest.raises(OSError):
+            storage.store_save(_save_bundle([("a", b"new-a"), ("b", b"new-b")], 2))
+        monkeypatch.undo()
+
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old-a"), ("b", b"old-b")]
+        assert storage.list_history(TITLE_HEX) == history_before
+        leftovers = [p.name for p in (tmp_save_dir / TITLE_HEX).iterdir()]
+        assert sorted(leftovers) == ["current"]
+
+    def test_failed_swap_restores_previous_save(self, tmp_save_dir, monkeypatch):
+        storage.store_save(_save_bundle([("a", b"old")]))
+
+        real_rename = storage.Path.rename
+
+        def failing_rename(self, target):
+            if self.name.startswith(storage._STAGING_PREFIX):
+                raise OSError("rename failed")
+            return real_rename(self, target)
+
+        monkeypatch.setattr(storage.Path, "rename", failing_rename)
+        with pytest.raises(OSError):
+            storage.store_save(_save_bundle([("a", b"new")], 2))
+        monkeypatch.undo()
+
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
+        assert sorted(p.name for p in (tmp_save_dir / TITLE_HEX).iterdir()) == [
+            "current",
+            "history",
+        ]
+
+    def test_successful_store_replaces_and_archives(self, tmp_save_dir):
+        storage.store_save(_save_bundle([("a", b"v1"), ("dir/x", b"v1x")]))
+        storage.store_save(_save_bundle([("b", b"v2")], 2))
+        assert storage.load_save_files(TITLE_HEX) == [("b", b"v2")]
+        versions = storage.list_history(TITLE_HEX)
+        assert len(versions) == 1 and versions[0]["file_count"] == 2
+        assert sorted(p.name for p in (tmp_save_dir / TITLE_HEX).iterdir()) == [
+            "current",
+            "history",
+        ]
+
+    def test_interrupted_swap_is_recovered(self, tmp_save_dir):
+        storage.store_save(_save_bundle([("a", b"old")]))
+        title_dir = tmp_save_dir / TITLE_HEX
+        # Simulate a crash between the two renames.
+        (title_dir / "current").rename(title_dir / f"{storage._RETIRED_PREFIX}x")
+        (title_dir / f"{storage._STAGING_PREFIX}y").mkdir()
+        storage._recover_interrupted_swap(title_dir)
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
+        assert sorted(p.name for p in title_dir.iterdir()) == ["current"]

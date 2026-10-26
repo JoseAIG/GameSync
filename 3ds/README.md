@@ -134,7 +134,10 @@ key that does the same thing.
   your previous save was put back") and what to do next, with **A** *Try
   again* where retrying makes sense. If the server can't be reached, nothing
   is uploaded or downloaded. After *Sync all* or a batch upload with
-  failures, a card lists the saves that failed and why.
+  failures, a card lists the saves that failed in that run and why, and
+  says whether they were changed: if a download couldn't be written and the
+  previous save couldn't be put back either, it says so first and points to
+  the local backup.
 - **Progress**: syncs, restores, updates and catalog installs show a card with
   a progress bar (with speed, elapsed and remaining time for downloads).
   Downloads that can be stopped have a **B Cancel** button.

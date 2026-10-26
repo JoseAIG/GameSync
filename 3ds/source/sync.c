@@ -395,10 +395,15 @@ SyncResult sync_download_title(const AppConfig *config, const TitleInfo *title,
     return download_title(config, title, progress);
 }
 
-// Why titles[i] failed, for the save list (when the caller asked for it)
-static void note_title_error(SyncSummary *s, int i, const char *why) {
-    if (s->title_error && i >= 0 && i < MAX_TITLES)
-        snprintf(s->title_error[i], TITLE_ERROR_LEN, "%s", why);
+// titles[i] failed with `r`: count it, and record how and why (the text
+// for the save list, when the caller asked for it)
+static void note_title_failed(SyncSummary *s, int i, SyncResult r, bool upload, const char *why) {
+    s->failed++;
+    if (i < 0 || i >= MAX_TITLES) return;
+    s->title_state[i] = TSTATE_FAILED;
+    s->title_result[i] = (u8)r;
+    s->title_upload[i] = upload;
+    if (s->title_error) snprintf(s->title_error[i], TITLE_ERROR_LEN, "%s", why);
 }
 
 bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
@@ -493,10 +498,10 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                     fc == ARCHIVE_ERR_TOO_MANY_FILES ? "too many files" : "read error");
                 if (progress) progress(msg);
                 hash_cache[i][0] = '\0';
-                local_summary.failed++;
-                if (i < MAX_TITLES) local_summary.title_state[i] = TSTATE_FAILED;
-                note_title_error(&local_summary, i, fc == ARCHIVE_ERR_TOO_MANY_FILES
-                                 ? "Can't read the save: too many files" : "Can't read the save");
+                note_title_failed(&local_summary, i,
+                                  fc == ARCHIVE_ERR_TOO_MANY_FILES ? SYNC_ERR_TOO_MANY_FILES : SYNC_ERR_ARCHIVE,
+                                  true, fc == ARCHIVE_ERR_TOO_MANY_FILES
+                                  ? "Can't read the save: too many files" : "Can't read the save");
                 continue;
             }
             if (fc < 0) fc = 0;
@@ -636,15 +641,12 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                 if (progress) progress(msg);
 
                 SyncResult r = upload_title_with_hash(config, &titles[j], NULL, hash_cache[j]);
-                bool ok = r == SYNC_OK;
-                if (ok)
+                if (r == SYNC_OK) {
                     local_summary.uploaded++;
-                else {
-                    local_summary.failed++;
-                    note_title_error(&local_summary, j, sync_result_str(r));
+                    if (j < MAX_TITLES) local_summary.title_state[j] = TSTATE_UPLOADED;
+                } else {
+                    note_title_failed(&local_summary, j, r, true, sync_result_str(r));
                 }
-                if (j < MAX_TITLES)
-                    local_summary.title_state[j] = ok ? TSTATE_UPLOADED : TSTATE_FAILED;
                 break;
             }
         }
@@ -663,15 +665,12 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                 if (progress) progress(msg);
 
                 SyncResult r = download_title(config, &titles[j], NULL);
-                bool ok = r == SYNC_OK;
-                if (ok)
+                if (r == SYNC_OK) {
                     local_summary.downloaded++;
-                else {
-                    local_summary.failed++;
-                    note_title_error(&local_summary, j, sync_result_str(r));
+                    if (j < MAX_TITLES) local_summary.title_state[j] = TSTATE_DOWNLOADED;
+                } else {
+                    note_title_failed(&local_summary, j, r, false, sync_result_str(r));
                 }
-                if (j < MAX_TITLES)
-                    local_summary.title_state[j] = ok ? TSTATE_DOWNLOADED : TSTATE_FAILED;
                 break;
             }
         }
@@ -691,17 +690,13 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                 if (progress) progress(msg);
 
                 SyncResult r = download_title(config, &titles[j], NULL);
-                bool ok = r == SYNC_OK;
-                if (ok) {
+                local_summary.skipped--; // Was counted as skipped, now downloaded or failed
+                if (r == SYNC_OK) {
                     local_summary.downloaded++;
-                    local_summary.skipped--; // Was counted as skipped, now downloaded
+                    if (j < MAX_TITLES) local_summary.title_state[j] = TSTATE_DOWNLOADED;
                 } else {
-                    local_summary.failed++;
-                    local_summary.skipped--;
-                    note_title_error(&local_summary, j, sync_result_str(r));
+                    note_title_failed(&local_summary, j, r, false, sync_result_str(r));
                 }
-                if (j < MAX_TITLES)
-                    local_summary.title_state[j] = ok ? TSTATE_DOWNLOADED : TSTATE_FAILED;
                 break;
             }
         }

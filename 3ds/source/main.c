@@ -330,10 +330,11 @@ static bool compare_ready(int idx, const char *what);
 typedef struct {
     const char *safety, *next;
     bool retry;
+    bool unchanged;   // `safety` says the console's save is as it was
 } SyncFailText;
 
 static SyncFailText sync_fail_text(SyncResult r, bool upload) {
-    SyncFailText f = { "Nothing was changed on the console or the server.", "Try again.", true };
+    SyncFailText f = { "Nothing was changed on the console or the server.", "Try again.", true, true };
     bool backup = config.local_backups > 0;
     switch (r) {
         case SYNC_OK:
@@ -370,12 +371,14 @@ static SyncFailText sync_fail_text(SyncResult r, bool upload) {
             f.next = backup ? "Copy it back from " BACKUP_DIR " with a save manager such as Checkpoint."
                             : "Check the save with a save manager such as Checkpoint.";
             f.retry = false;
+            f.unchanged = false;
             break;
         case SYNC_ERR_ARCHIVE:
             // The fork only returns a plain ARCHIVE error on a download when
             // there was no previous save to protect
             f.safety = upload ? "Couldn't read this console's save. Nothing was changed."
                               : "Couldn't write the save. There was no previous save on this console.";
+            f.unchanged = upload;
             break;
     }
     return f;
@@ -485,22 +488,70 @@ static int append_names(char *body, int size, int pos, bool (*pick)(const TitleI
 
 static bool is_marked(const TitleInfo *t) { return t->marked; }
 static bool is_marked_conflict(const TitleInfo *t) { return t->marked && is_conflict(t); }
-static bool is_failed(const TitleInfo *t) { return t->sync_state == TSTATE_FAILED; }
 
-// Up to 3 failed titles (name, then the reason dim), "...and N more"
-static int append_failures(char *body, int size, int pos, int total) {
-    int listed = 0;
-    for (int i = 0; i < title_count && listed < 3 && pos < size; i++) {
-        if (!is_failed(&titles[i])) continue;
-        char name[GUI_WRAP_LINE], why[GUI_WRAP_LINE];
-        ui_body_line(titles[i].name, name, sizeof(name));
-        ui_body_line(titles[i].last_error[0] ? titles[i].last_error : "Sync failed", why, sizeof(why));
-        pos += snprintf(body + pos, size - pos, UI_HI "%s\n" UI_DIM "%s\n", name, why);
-        listed++;
+// How each entry of titles[] failed in the batch upload / Sync All being
+// reported (result SYNC_OK: it didn't). Only this run's failures: a title
+// still FAILED from an earlier single transfer isn't part of it.
+typedef struct {
+    u8 result;     // SyncResult
+    bool upload;
+} RunFailure;
+static RunFailure run_failures[MAX_TITLES];
+
+static bool run_failed(int i) {
+    return i >= 0 && i < MAX_TITLES && run_failures[i].result != SYNC_OK;
+}
+
+static SyncFailText run_fail_text(int i) {
+    return sync_fail_text((SyncResult)run_failures[i].result, run_failures[i].upload);
+}
+
+// Listing order: 0 = may be damaged, 1 = changed (nothing lost), 2 = unchanged
+static int run_fail_rank(int i) {
+    if (run_failures[i].result == SYNC_ERR_RESTORE_FAILED) return 0;
+    return run_fail_text(i).unchanged ? 2 : 1;
+}
+
+// The card after a run with `total` failures: which ones and why, and
+// whether the saves were changed (from each one's SyncResult, never
+// assumed). `counts` ends the card when nothing changed. Saves that may
+// have been changed are listed first so the cap never hides them.
+static void run_failures_card(const char *title, int total, const char *counts) {
+    bool damaged = false, changed = false;
+    for (int i = 0; i < title_count && i < MAX_TITLES; i++) {
+        if (!run_failed(i)) continue;
+        int rank = run_fail_rank(i);
+        if (rank == 0) damaged = true;
+        if (rank < 2) changed = true;
     }
-    if (total > listed && pos < size)
-        pos += snprintf(body + pos, size - pos, UI_HI "%sand %d more\n", gui_ellipsis(), total - listed);
-    return pos < size ? pos : size - 1;
+    // The card holds 10 body lines: a damaged save's statement and what to
+    // do come first, so a long list can never cut them off
+    SyncFailText worst = sync_fail_text(SYNC_ERR_RESTORE_FAILED, false);
+    char body[768];
+    int pos = 0;
+    if (damaged) pos += snprintf(body, sizeof(body), "%s\n%s\n", worst.safety, worst.next);
+    int cap = damaged ? 2 : 3, listed = 0;
+    for (int rank = 0; rank < 3; rank++) {
+        for (int i = 0; i < title_count && i < MAX_TITLES && listed < cap && pos < (int)sizeof(body); i++) {
+            if (!run_failed(i) || run_fail_rank(i) != rank) continue;
+            char name[GUI_WRAP_LINE], why[GUI_WRAP_LINE];
+            ui_body_line(titles[i].name, name, sizeof(name));
+            ui_body_line(titles[i].last_error[0] ? titles[i].last_error : "Sync failed", why, sizeof(why));
+            pos += snprintf(body + pos, sizeof(body) - pos, UI_HI "%s\n" UI_DIM "%s\n", name, why);
+            listed++;
+        }
+    }
+    if (total > listed && pos < (int)sizeof(body))
+        pos += snprintf(body + pos, sizeof(body) - pos, UI_HI "%sand %d more\n", gui_ellipsis(), total - listed);
+    if (pos < (int)sizeof(body) && !damaged) {
+        if (changed)
+            snprintf(body + pos, sizeof(body) - pos,
+                     UI_DIM "Nothing was lost: where a save couldn't be written, this console had none before.");
+        else
+            snprintf(body + pos, sizeof(body) - pos, UI_DIM "Nothing changed for these. %s", counts);
+    }
+    ui_dialog_ex(UI_TONE_ERR, title, body, (const UiButton[]){ { KEY_A | KEY_B, "A", "OK" } }, 1,
+                 &(UiDialogOpts){ 0, true });
 }
 
 static void do_batch_upload(int marked) {
@@ -536,6 +587,7 @@ static void do_batch_upload(int marked) {
     }
     int ok_count = 0, fail_count = 0;
     op_title = "Uploading marked saves";
+    memset(run_failures, 0, sizeof(run_failures));
     for (int i = 0; i < title_count; i++) {
         if (!titles[i].marked) continue;
         char msg[160];
@@ -550,20 +602,17 @@ static void do_batch_upload(int marked) {
         } else {
             fail_count++;
             set_title_failed(&titles[i], sync_result_str(res));
+            if (i < MAX_TITLES) run_failures[i] = (RunFailure){ (u8)res, true };
         }
     }
     clear_marks();
     last_details_idx = -1;
     if (fail_count > 0) {
         // Which ones, and why (the rest of the batch went through)
-        char fbody[640];
-        int fp = append_failures(fbody, sizeof(fbody), 0, fail_count);
-        snprintf(fbody + fp, sizeof(fbody) - fp, UI_DIM "%d uploaded. Nothing changed for the failed ones.",
-                 ok_count);
-        char ftitle[64];
+        char counts[32], ftitle[64];
+        snprintf(counts, sizeof(counts), "%d uploaded.", ok_count);
         snprintf(ftitle, sizeof(ftitle), "%d upload%s failed", fail_count, fail_count == 1 ? "" : "s");
-        ui_dialog_ex(UI_TONE_ERR, ftitle, fbody, (const UiButton[]){ { KEY_A | KEY_B, "A", "OK" } }, 1,
-                     &(UiDialogOpts){ 0, true });
+        run_failures_card(ftitle, fail_count, counts);
     }
     set_status(fail_count ? UI_TONE_WARN : UI_TONE_OK, "Batch upload: %d uploaded, %d failed", ok_count, fail_count);
 }
@@ -806,7 +855,7 @@ static void do_smart_sync(void) {
 
 static void do_sync_all(void) {
     static char title_errors[MAX_TITLES][TITLE_ERROR_LEN];
-    SyncSummary summary;
+    static SyncSummary summary;   // ~1 KB: off the main thread's stack
     for (;;) {
         // Clear all conflict flags before sync
         for (int i = 0; i < title_count; i++)
@@ -827,9 +876,15 @@ static void do_sync_all(void) {
             return;
         }
     }
+    memset(run_failures, 0, sizeof(run_failures));
     for (int i = 0; i < title_count && i < MAX_TITLES; i++) {
         set_title_state(&titles[i], summary.title_state[i]);
-        if (summary.title_state[i] == TSTATE_FAILED) set_title_failed(&titles[i], title_errors[i]);
+        if (summary.title_state[i] != TSTATE_FAILED) continue;
+        set_title_failed(&titles[i], title_errors[i]);
+        // A failure sync_all() didn't classify can't be called harmless
+        SyncResult r = summary.title_result[i] != SYNC_OK ? (SyncResult)summary.title_result[i]
+                                                           : SYNC_ERR_RESTORE_FAILED;
+        run_failures[i] = (RunFailure){ (u8)r, summary.title_upload[i] };
     }
 
     // Mark conflicting titles in our list
@@ -863,15 +918,11 @@ static void do_sync_all(void) {
     }
     if (summary.failed > 0) {
         // Which saves failed and why; the rest of the sync went through
-        char body[640];
-        int pos = append_failures(body, sizeof(body), 0, summary.failed);
-        snprintf(body + pos, sizeof(body) - pos,
-                 UI_DIM "Nothing changed for these. %d uploaded \xC2\xB7 %d downloaded \xC2\xB7 %d up to date",
+        char counts[96], title[64];
+        snprintf(counts, sizeof(counts), "%d uploaded \xC2\xB7 %d downloaded \xC2\xB7 %d up to date",
                  summary.uploaded, summary.downloaded, summary.up_to_date);
-        char title[64];
         snprintf(title, sizeof(title), "Sync all: %d failed", summary.failed);
-        ui_dialog_ex(UI_TONE_ERR, title, body, (const UiButton[]){ { KEY_A | KEY_B, "A", "OK" } }, 1,
-                     &(UiDialogOpts){ 0, true });
+        run_failures_card(title, summary.failed, counts);
     }
 
     if (summary.conflicts > 0 || summary.failed > 0) {

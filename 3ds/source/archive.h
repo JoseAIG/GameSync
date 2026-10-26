@@ -15,7 +15,7 @@ typedef struct {
 int archive_stat(u64 title_id, FS_MediaType media_type,
                  int *file_count, u32 *total_size);
 
-// Read all files from a title's save archive.
+// Read all files from a title's save archive, sorted by path.
 // Returns number of files read, fills files array (up to max_files).
 // Caller must call archive_free_files() when done.
 int archive_read(u64 title_id, FS_MediaType media_type,
@@ -25,6 +25,10 @@ int archive_read(u64 title_id, FS_MediaType media_type,
 // Returns true on success. Commits the save data.
 bool archive_write(u64 title_id, FS_MediaType media_type,
                    const ArchiveFile *files, int file_count);
+
+// Sort files by path (byte-wise, case-sensitive), the canonical order used
+// for save hashes and bundles across GameSync clients and the server.
+void archive_sort_files(ArchiveFile *files, int count);
 
 // Free all data buffers in a file array
 void archive_free_files(ArchiveFile *files, int count);

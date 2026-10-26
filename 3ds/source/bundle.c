@@ -216,7 +216,12 @@ int bundle_parse(const u8 *data, u32 data_size,
         payload_size = data_size - offset;
     }
 
-    return parse_payload(payload, payload_size, file_count, files, max_files);
+    int count = parse_payload(payload, payload_size, file_count, files, max_files);
+
+    // Canonical path order, so the hash of a downloaded save matches the hash
+    // computed later from the archive (archive_read also sorts by path).
+    if (count > 0) archive_sort_files(files, count);
+    return count;
 }
 
 void bundle_compute_save_hash(const ArchiveFile *files, int file_count,

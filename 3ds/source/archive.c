@@ -156,7 +156,23 @@ int archive_read(u64 title_id, FS_MediaType media_type,
     int count = read_dir(archive, "/", files, 0, max_files);
 
     FSUSER_CloseArchive(archive);
+
+    // FSDIR_Read order is filesystem-dependent; sort so hashes and bundles
+    // are identical to what the server and other clients compute.
+    archive_sort_files(files, count);
     return count;
+}
+
+static int compare_file_paths(const void *a, const void *b) {
+    // strcmp compares bytes as unsigned char: plain case-sensitive UTF-8
+    // byte order, the same as Python's sorted() on str (server) and
+    // Kotlin's sortedBy on the relative path (Android client).
+    return strcmp(((const ArchiveFile *)a)->path, ((const ArchiveFile *)b)->path);
+}
+
+void archive_sort_files(ArchiveFile *files, int count) {
+    if (count > 1)
+        qsort(files, (size_t)count, sizeof(ArchiveFile), compare_file_paths);
 }
 
 // Delete all files/dirs in a directory recursively

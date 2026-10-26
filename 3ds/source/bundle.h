@@ -29,7 +29,8 @@ int bundle_parse(const u8 *bundle_data, u32 bundle_size,
                  u8 **out_decompressed);
 
 // Compute SHA-256 hash of all save data (for sync comparison).
-// Hashes the concatenation of all file contents in order.
+// Hashes the concatenation of all file contents in array order; callers pass
+// files sorted by path (archive_read/bundle_parse already sort them).
 void bundle_compute_save_hash(const ArchiveFile *files, int file_count,
                               char *hex_out); // 65 bytes: 64 hex + null
 

@@ -3,6 +3,7 @@
 #include "config.h"
 #include "sync.h"
 #include "network.h"
+#include "nds.h"
 #include "title.h"
 
 // ---------------------------------------------------------------------------
@@ -1866,7 +1867,7 @@ static const CfgRow cfg_rows[CFG_ITEMS] = {
       "For https:// addresses: check the server's certificate. Off accepts any certificate. No effect on http://.",
       CFG_SWITCH },
     { "Saves & ROMs", "NDS ROM folder",
-      "Where your DS ROMs and .sav files live (TWiLight Menu++ / nds-bootstrap).",
+      "Where your DS ROMs and .sav files live (TWiLight Menu++ / nds-bootstrap). Browse the SD card to pick it.",
       CFG_CHOOSE },
     { "Saves & ROMs", "Local backups",
       "Copies of a save kept on the SD card before a download or a restore overwrites it. Off keeps none.",
@@ -1938,6 +1939,14 @@ static void mask_key(const char *key, char *out, size_t size) {
     if (len == 0) snprintf(out, size, "(not set)");
     else if (len > 4) snprintf(out, size, "%.4s\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2", key);
     else snprintf(out, size, "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2");
+}
+
+static void set_cfg_note(int row, UiTone tone, const char *text) {
+    snprintf(cfg_note, sizeof(cfg_note), "%s", text);
+    cfg_note_tone = tone;
+    cfg_note_ms = gui_clock_ms();
+    if (!cfg_note_ms) cfg_note_ms = 1;
+    cfg_note_row = row;
 }
 
 static void config_top(void *ctx) {
@@ -2145,6 +2154,27 @@ static void check_key(const AppConfig *config) {
     else cfg_probe[CFG_API_KEY][0] = '\0';   // some other answer: says nothing about the key
 }
 
+// Settings > NDS ROM folder: the folder picker. Saved straight away (it
+// isn't destructive); the help panel then says what the folder holds.
+static void choose_nds_dir(AppConfig *config) {
+    UiFolderRules rules = { "NDS ROM folder", nds_folder_rules.exts, NDS_ITEM_LABEL,
+                            nds_folder_rules.save_ext, nds_folder_rules.save_subdir, true };
+    char path[MAX_PATH_LEN];
+    FolderCount count;
+    if (!ui_pick_folder_ex(&rules, config->nds_dir, path, sizeof(path), &count)) return;
+    snprintf(config->nds_dir, sizeof(config->nds_dir), "%s", path);
+    save_settings(config);
+    char note[MAX_PATH_LEN + 64];
+    if (!path[0])
+        snprintf(note, sizeof(note), "None: DS games aren't scanned.");
+    else if (count.opened)
+        snprintf(note, sizeof(note), "%s \xC2\xB7 %d ROM%s, %d save%s", path, count.items,
+                 count.items == 1 ? "" : "s", count.saves, count.saves == 1 ? "" : "s");
+    else
+        snprintf(note, sizeof(note), "%s", path);
+    set_cfg_note(CFG_NDS_DIR, path[0] && count.opened && count.items > 0 ? UI_TONE_OK : UI_TONE_WARN, note);
+}
+
 // Settings > Local backups: opens on the current value
 static void choose_backups(AppConfig *config) {
     int values[UI_BACKUP_CHOICES_MAX], initial = 0;
@@ -2217,12 +2247,9 @@ static bool settings_activate(AppConfig *config, int selected, SettingsActionFn 
         case CFG_REDUCE_MOTION:
             toggle_switch(config, selected);
             break;
-        case CFG_NDS_DIR: {
-            // Empty = no DS ROM folder (the scan skips DS games)
-            UiTextField f = { "NDS ROM folder", "sdmc:/roms/nds", "OK", false, false, true };
-            if (ui_edit_text_ex(&f, config->nds_dir, MAX_PATH_LEN)) save_settings(config);
+        case CFG_NDS_DIR:
+            choose_nds_dir(config);
             break;
-        }
         case CFG_BACKUPS:
             choose_backups(config);
             break;

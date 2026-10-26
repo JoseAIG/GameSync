@@ -12,6 +12,7 @@
 #include "gui.h"
 #include "sync.h"
 #include "ui_format.h"
+#include "folder_scan.h"
 #include "ui_gesture.h"
 
 void ui_init(void);
@@ -345,6 +346,32 @@ typedef bool (*SettingsActionFn)(SettingsResult action);
 // they are confirmed. Returns SETTINGS_NAV_PREV / _NEXT / _EXIT when the
 // user leaves the tab.
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action);
+
+// ---------------------------------------------------------------------------
+// Folder picker
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    const char *title;              // "NDS ROM folder"
+    const char *const *exts;        // { ".nds", NULL }  (case-insensitive)
+    const char *item_label;         // ".nds ROMs"
+    const char *save_ext;           // ".sav", or NULL
+    const char *save_subdir;        // "saves", or NULL
+    bool allow_none;                // an empty typed path means "no folder" (*out = "")
+} UiFolderRules;
+
+// FBI-style folder browser over the SD card (folders only). Opens at
+// `start`, or its nearest existing parent, or sdmc:/. A opens the
+// highlighted folder, B goes up one level from anywhere (B at sdmc:/, or the
+// header's Cancel chip, cancels), X / START use the folder shown, Y types a
+// path. The top screen says what the folder holds by the same rules the
+// scanner uses. True = *out holds the chosen folder (no trailing '/', except
+// the root "sdmc:/").
+bool ui_pick_folder(const UiFolderRules *rules, const char *start, char *out, int out_size);
+// The same; *count_out (may be NULL) gets what the chosen folder holds
+// (opened = false when it wasn't counted, e.g. a typed path used anyway)
+bool ui_pick_folder_ex(const UiFolderRules *rules, const char *start, char *out, int out_size,
+                       FolderCount *count_out);
 
 // ---------------------------------------------------------------------------
 // Text entry

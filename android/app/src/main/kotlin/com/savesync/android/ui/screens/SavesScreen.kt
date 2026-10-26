@@ -239,7 +239,11 @@ fun SavesScreen(
     // game, or on the row now at its old index when the game left the list.
     LaunchedEffect(saves) {
         val i = resolveSelection(saves.map { it.titleId }, selectedTitleId, lastIndex)
-        if (i >= 0) select(i)
+        if (i < 0) return@LaunchedEffect
+        val moved = i != lastIndex
+        select(i)
+        // The game moved (rows arrived above it): keep it on screen.
+        if (moved) follower.follow(i, reduceMotion)
     }
 
     // Focus the search field as soon as it opens, without waiting for the

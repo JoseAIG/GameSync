@@ -21,4 +21,10 @@ fi
 gcc $CFLAGS -o "$out/test_catalog_data" tests/test_catalog_data.c source/catalog_data.c
 "$out/test_catalog_data" "$out" ${CATALOG_JSON:+"$CATALOG_JSON"}
 
+# Modules that include common.h build against tests/host/3ds.h (types only)
+HOST_INC="-Itests/host -Iinclude"
+
+gcc $CFLAGS $HOST_INC -o "$out/test_history_parse" tests/test_history_parse.c source/history_parse.c
+"$out/test_history_parse"
+
 rm -rf "$out"

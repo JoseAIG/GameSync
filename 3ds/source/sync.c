@@ -917,67 +917,9 @@ int sync_get_history(const AppConfig *config, const char *title_id_hex,
         return -1;
     }
     resp_str[resp_size] = '\0';
-    char *json = (char *)resp_str;
-
-    // Find versions array
-    const char *arr = json_find_key(json, "versions");
-    if (!arr || *arr != '[') {
-        free(resp_str);
-        return 0;
-    }
-    arr++; // skip '['
-
-    int count = 0;
-    while (*arr && *arr != ']' && count < max_versions) {
-        // Find next object
-        const char *obj = strchr(arr, '{');
-        if (!obj) break;
-        obj++;
-        const char *obj_end = strchr(obj, '}');
-        if (!obj_end) break;
-
-        // Extract timestamp and size from this object
-        char timestamp[32] = "";
-        int size = 0, file_count = 0;
-
-        // Quick parse: find "timestamp":"value"
-        const char *ts_start = strstr(obj, "\"timestamp\":\"");
-        if (ts_start && ts_start < obj_end) {
-            ts_start += 12; // skip "timestamp":"
-            const char *ts_end = strchr(ts_start, '"');
-            if (ts_end && ts_end < obj_end) {
-                int len = (int)(ts_end - ts_start);
-                if (len < (int)sizeof(timestamp)) {
-                    memcpy(timestamp, ts_start, len);
-                    timestamp[len] = '\0';
-                }
-            }
-        }
-
-        // Find "size":value
-        const char *sz_start = strstr(obj, "\"size\":");
-        if (sz_start && sz_start < obj_end) {
-            sz_start += 7;
-            size = atoi(sz_start);
-        }
-
-        // Find "file_count":value
-        const char *fc_start = strstr(obj, "\"file_count\":");
-        if (fc_start && fc_start < obj_end) {
-            fc_start += 12;
-            file_count = atoi(fc_start);
-        }
-
-        if (timestamp[0]) {
-            strncpy(versions[count].timestamp, timestamp, sizeof(versions[count].timestamp) - 1);
-            versions[count].timestamp[sizeof(versions[count].timestamp) - 1] = '\0';
-            versions[count].size = (u32)size;
-            versions[count].file_count = file_count;
-            count++;
-        }
-
-        arr = obj_end + 1;
-    }
+    // The server lists each version's "timestamp" as Unix seconds (a JSON
+    // number), the key GET /saves/{id}/history/{timestamp} takes back
+    int count = history_parse_versions((const char *)resp_str, versions, max_versions);
 
     free(resp_str);
     return count;

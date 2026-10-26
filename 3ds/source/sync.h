@@ -102,14 +102,8 @@ bool sync_get_save_details(const AppConfig *config, const TitleInfo *title,
 // Returns the suggested action (upload/download/up_to_date/conflict).
 SyncAction sync_decide(const SaveDetails *details);
 
-// History version info
-#define MAX_HISTORY_VERSIONS 20
-
-typedef struct {
-    char timestamp[32];  // ISO 8601 timestamp
-    u32 size;
-    int file_count;
-} HistoryVersion;
+// History version info: HistoryVersion and MAX_HISTORY_VERSIONS
+#include "history_parse.h"
 
 // Get list of history versions for a title.
 // Returns number of versions found, or -1 on error.

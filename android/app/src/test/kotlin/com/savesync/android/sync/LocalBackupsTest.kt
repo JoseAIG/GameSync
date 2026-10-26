@@ -1,0 +1,155 @@
+package com.savesync.android.sync
+
+import com.savesync.android.storage.SyncStateDao
+import com.savesync.android.storage.SyncStateEntity
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertArrayEquals
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
+import org.junit.Rule
+import org.junit.Test
+import org.junit.rules.TemporaryFolder
+import java.io.File
+
+class LocalBackupsTest {
+
+    @get:Rule
+    val tmp = TemporaryFolder()
+
+    /** In-memory sync-state table. */
+    private class FakeDao : SyncStateDao {
+        val rows = mutableMapOf<String, SyncStateEntity>()
+        override fun getAll(): Flow<List<SyncStateEntity>> = flowOf(rows.values.toList())
+        override suspend fun getById(titleId: String) = rows[titleId]
+        override suspend fun upsert(entity: SyncStateEntity) { rows[entity.titleId] = entity }
+        override suspend fun deleteById(titleId: String) { rows.remove(titleId) }
+        override suspend fun canonicalizeGamecodeTitleIds(): Int = 0
+    }
+
+    /** A clock that moves a minute per call, so every snapshot gets its own name. */
+    private fun steppingClock(): () -> Long {
+        var t = 1_700_000_000_000L
+        return { t += 60_000L; t }
+    }
+
+    private fun store() = LocalBackupStore(File(tmp.root, "local_backups"), clock = steppingClock())
+
+    @Test
+    fun `six snapshots leave the newest five, the oldest removed`() {
+        val s = store()
+        val save = tmp.newFile("game.srm")
+        val taken = (1..6).map { i ->
+            save.writeText("v$i")
+            s.snapshot("GBA_game", save, "download", previousLastSyncedHash = "h$i")!!
+        }
+        val kept = s.list("GBA_game")
+        assertEquals(5, kept.size)
+        assertFalse("oldest pruned", taken.first().exists())
+        assertEquals(taken.drop(1).reversed(), kept.map { it.dir })
+        assertEquals("v6", s.latest("GBA_game")!!.payload.readText())
+        assertEquals("h6", s.latest("GBA_game")!!.previousLastSyncedHash)
+    }
+
+    @Test
+    fun `nothing is copied before the first download`() {
+        val s = store()
+        assertNull(s.snapshot("T", File(tmp.root, "missing.sav"), "download", null))
+        val emptyDir = tmp.newFolder("emptyslot")
+        assertNull(s.snapshot("T", emptyDir, "download", null))
+        assertTrue(s.list("T").isEmpty())
+    }
+
+    @Test
+    fun `a failed snapshot blocks the write`() {
+        // The backup root is a file, so no snapshot folder can be made.
+        val badRoot = tmp.newFile("not-a-dir")
+        val s = LocalBackupStore(badRoot)
+        val save = tmp.newFile("card.mcd").apply { writeText("precious") }
+        var wrote = false
+        try {
+            backedUpWrite(s, "PS1_x", save, "h", null) {
+                wrote = true
+                AtomicSaveWriter.replaceFile(save, "server".toByteArray())
+            }
+            fail("expected BackupFailedException")
+        } catch (e: BackupFailedException) {
+            assertEquals("Couldn't back up the current save — not overwritten", e.message)
+        }
+        assertFalse(wrote)
+        assertEquals("precious", save.readText())
+    }
+
+    @Test
+    fun `restore puts the file back and the previous base hash, not the restored hash`() = runBlocking {
+        val s = store()
+        val dao = FakeDao()
+        val save = tmp.newFile("zelda.srm").apply { writeText("mine") }
+        dao.upsert(SyncStateEntity("GBA_zelda", "base", 10L, "Zelda", "GBA"))
+        // A download: snapshot, then the server's copy replaces it and the
+        // sync state records the server hash.
+        backedUpWrite(s, "GBA_zelda", save, "base", 10L) {
+            AtomicSaveWriter.replaceFile(save, "server".toByteArray())
+        }
+        dao.upsert(SyncStateEntity("GBA_zelda", "serverhash", 20L, "Zelda", "GBA"))
+
+        assertTrue(s.restore("GBA_zelda", save, dao))
+
+        assertEquals("mine", save.readText())
+        assertEquals("base", dao.rows["GBA_zelda"]!!.lastSyncedHash)
+        assertEquals(10L, dao.rows["GBA_zelda"]!!.lastSyncedAt)
+        // The replaced copy was kept too, so the restore can be undone.
+        assertEquals("server", s.latest("GBA_zelda")!!.payload.readText())
+        assertEquals("serverhash", s.latest("GBA_zelda")!!.previousLastSyncedHash)
+    }
+
+    @Test
+    fun `restore deletes the sync row when there was none`() = runBlocking {
+        val s = store()
+        val dao = FakeDao()
+        val save = tmp.newFile("first.sav").apply { writeText("local") }
+        s.snapshot("T", save, "download", previousLastSyncedHash = null)
+        save.writeText("server")
+        dao.upsert(SyncStateEntity("T", "serverhash", 5L, "T", "GBA"))
+
+        assertTrue(s.restore("T", save, dao))
+
+        assertEquals("local", save.readText())
+        assertNull(dao.rows["T"])
+    }
+
+    @Test
+    fun `restore of a folder save is exact`() = runBlocking {
+        val s = store()
+        val dao = FakeDao()
+        val dir = tmp.newFolder("00000001")
+        File(dir, "a.bin").writeBytes(byteArrayOf(1, 2, 3))
+        File(dir, "sub").mkdirs()
+        File(dir, "sub/b.bin").writeBytes(byteArrayOf(4))
+        assertNotNull(s.snapshot("3DS", dir, "download", "base"))
+        // The download replaced the tree with different files.
+        dir.deleteRecursively(); dir.mkdirs()
+        File(dir, "c.bin").writeBytes(byteArrayOf(9))
+
+        assertTrue(s.restore("3DS", dir, dao))
+
+        assertArrayEquals(byteArrayOf(1, 2, 3), File(dir, "a.bin").readBytes())
+        assertArrayEquals(byteArrayOf(4), File(dir, "sub/b.bin").readBytes())
+        assertFalse("files of the replaced save are gone", File(dir, "c.bin").exists())
+        assertEquals("base", dao.rows["3DS"]!!.lastSyncedHash)
+    }
+
+    @Test
+    fun `nothing to restore returns false and touches nothing`() = runBlocking {
+        val s = store()
+        val dao = FakeDao()
+        val save = tmp.newFile("x.sav").apply { writeText("keep") }
+        assertFalse(s.restore("none", save, dao))
+        assertEquals("keep", save.readText())
+    }
+}

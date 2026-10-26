@@ -1,18 +1,26 @@
 package com.savesync.android.sync
 
 import android.util.Log
+import com.savesync.android.api.ConflictInfo
 import com.savesync.android.api.NormalizeRequest
 import com.savesync.android.api.NormalizeRomEntry
 import com.savesync.android.api.SaveSyncApi
 import com.savesync.android.api.SaturnArchiveLookupRequest
 import com.savesync.android.api.SaturnArchiveLookupResult
+import com.savesync.android.api.SaveMeta
 import com.savesync.android.api.SyncRequest
 import com.savesync.android.api.SyncTitle
 import com.savesync.android.emulators.SaveEntry
 import com.savesync.android.installed.InstalledRomsScanner
 import com.savesync.android.storage.AppDatabase
+import com.savesync.android.storage.SyncStateDao
 import com.savesync.android.storage.SyncStateEntity
 import com.savesync.android.systems.SystemAliases
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import java.io.File
@@ -37,17 +45,47 @@ private data class SaturnCanonicalSnapshot(
 data class SyncResult(
     val uploaded: Int,
     val downloaded: Int,
+    /** Display names of the conflicting titles. */
     val conflicts: List<String>,
-    val errors: List<String>
+    val errors: List<String>,
+    /** Title ids of [conflicts], so the UI can keep them findable. */
+    val conflictTitleIds: List<String> = emptyList(),
+    /** Titles this sync left in agreement with the server (uploaded, downloaded, up to date). */
+    val resolvedTitleIds: List<String> = emptyList(),
+    /** The server's details for each conflicting title id. */
+    val conflictInfo: Map<String, com.savesync.android.api.ConflictInfo> = emptyMap(),
+    /** Uploads held back because they look like a rollback (display names). */
+    val skippedSuspects: List<String> = emptyList(),
+    /** Titles skipped because they changed after the preview was made (display names). */
+    val changedSincePreview: List<String> = emptyList(),
 )
 
 class SyncEngine(
     private val api: SaveSyncApi,
-    private val db: AppDatabase,
+    /** Each title's last synced hash (the three-way base). */
+    private val dao: SyncStateDao,
     private val consoleId: String,
-    private val saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN
+    private val saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN,
+    /** Where saves are copied before a download replaces them (default: the app's). */
+    backupStore: LocalBackupStore? = null,
 ) {
-    private val dao = db.syncStateDao()
+    constructor(
+        api: SaveSyncApi,
+        db: AppDatabase,
+        consoleId: String,
+        saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN,
+        backupStore: LocalBackupStore? = null,
+    ) : this(api, db.syncStateDao(), consoleId, saturnSyncFormat, backupStore)
+
+    /**
+     * Every download path snapshots the current save here before
+     * [AtomicSaveWriter] replaces it.  Resolved lazily; if it can't be had,
+     * the download fails rather than overwrite without a copy.
+     */
+    private val backups: LocalBackupStore by lazy { backupStore ?: LocalBackups.store }
+
+    /** The title's sync state now, recorded in the snapshot (see [LocalBackup]). */
+    private suspend fun syncStateForBackup(entry: SaveEntry): SyncStateEntity? = dao.getById(entry.titleId)
 
     private suspend fun autoResolveSharedSaturnArchives(entry: SaveEntry): List<String> {
         if (!isSharedYabaSanshiroContainer(entry)) return emptyList()
@@ -91,32 +129,41 @@ class SyncEngine(
         return selected
     }
 
-    suspend fun sync(saves: List<SaveEntry>): SyncResult {
+    /**
+     * Sync [saves] in one go: [plan] then [execute] with nothing excluded.
+     * Uploads that look like a rollback are still held back (see
+     * [RollbackCheck]); [SyncResult.skippedSuspects] names them.
+     */
+    suspend fun sync(saves: List<SaveEntry>): SyncResult = execute(plan(saves), emptySet())
+
+    /**
+     * Work out what a sync of [saves] would do, moving no save bytes: hash
+     * each save, ask the server (POST /sync; card meta for memory cards),
+     * and check planned uploads against the server's size and file count.
+     */
+    suspend fun plan(saves: List<SaveEntry>): SyncPreview {
         // The list may predate a download or an emulator session: a "server-only"
         // row whose predicted file now exists is a local save with possibly newer
         // play on it, and must go through the three-way check, not a blind download.
         val resolvedSaves = normalizeCanonicalSlugEntries(saves.map { it.reconcileWithDisk() })
         val errors = mutableListOf<String>()
-        var uploaded = 0
-        var downloaded = 0
-        val conflicts = mutableListOf<String>()
-
-        // Build a map for quick lookup
+        val titles = mutableListOf<PlannedTitle>()
         val saveMap = resolvedSaves.associateBy { it.titleId }
+        // Card meta already fetched for a raw-card upload: its size check is free.
+        val rawCardMeta = mutableMapOf<String, SaveMeta>()
+        // What each SyncTitle sent, for the rollback check.
+        val sentSize = mutableMapOf<String, Long>()
 
         val (rawCardEntries, otherEntries) = resolvedSaves.partition {
             isPs1RawEntry(it) || isPs2RawEntry(it) || isGcRawEntry(it)
         }
         for (entry in rawCardEntries) {
             try {
-                when (syncRawCardEntry(entry)) {
-                    RawCardSyncOutcome.UPLOADED -> uploaded++
-                    RawCardSyncOutcome.DOWNLOADED -> downloaded++
-                    RawCardSyncOutcome.CONFLICT -> conflicts.add(entry.displayName)
-                    RawCardSyncOutcome.UP_TO_DATE, RawCardSyncOutcome.SKIPPED -> Unit
-                }
+                val (action, meta) = planRawCard(entry)
+                if (action != null) titles += PlannedTitle(entry.titleId, entry.displayName, action, PlanRoute.RAW_CARD)
+                if (meta != null) rawCardMeta[entry.titleId] = meta
             } catch (e: Exception) {
-                Log.e(TAG, "Raw-card sync failed for ${entry.titleId}", e)
+                Log.e(TAG, "Raw-card check failed for ${entry.titleId}", e)
                 errors.add("Sync error: ${entry.displayName}: ${e.message}")
             }
         }
@@ -141,119 +188,329 @@ class SyncEngine(
                 Log.i(TAG, "Skipping server-only entry without local target: ${entry.titleId}")
                 continue
             }
-            try {
-                val success = downloadSave(entry, entry.titleId)
-                if (success) {
-                    downloaded++
-                    // Record sync state using the freshly-written file, not the entry
-                    // (which still has isServerOnly=true and would return hash="")
-                    updateSyncStateFromFile(entry)
-                } else {
-                    errors.add("Download failed: ${entry.displayName}")
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Server-only download failed for ${entry.titleId}", e)
-                errors.add("Download error: ${entry.displayName}: ${e.message}")
-            }
+            titles += PlannedTitle(entry.titleId, entry.displayName, PlannedAction.DOWNLOAD_NEW, PlanRoute.SERVER_ONLY)
         }
 
         // Build sync request titles for entries that have a local save file
         val syncTitles = localEntries.mapNotNull { entry ->
-            val lastSyncState = syncStateByTitle[entry.titleId]
-            if (!hasLocalSyncSource(entry, lastSyncState)) return@mapNotNull null
-            try {
-                val hash = canonicalHash(entry, lastSyncState)
-                val timestamp = localTimestamp(entry) / 1000L  // convert ms to seconds
-                val size = canonicalSize(entry, lastSyncState)
-                SyncTitle(
-                    title_id = entry.titleId,
-                    save_hash = hash,
-                    timestamp = timestamp,
-                    size = size,
-                    last_synced_hash = lastSyncState?.lastSyncedHash,
-                    console_id = consoleId
-                )
+            buildSyncTitle(entry, syncStateByTitle[entry.titleId], errors)
+        }
+        syncTitles.forEach { sentSize[it.title_id] = it.size }
+
+        var conflictInfo: Map<String, ConflictInfo> = emptyMap()
+        if (syncTitles.isNotEmpty()) {
+            val syncResponse = try {
+                api.sync(SyncRequest(titles = syncTitles, console_id = consoleId))
             } catch (e: Exception) {
-                Log.e(TAG, "Error computing hash for ${entry.titleId}", e)
-                errors.add("Hash error: ${entry.displayName}")
+                Log.e(TAG, "Sync API call failed", e)
+                errors.add("Sync failed: ${e.message}")
                 null
             }
-        }
-
-        if (syncTitles.isEmpty()) {
-            return SyncResult(0, 0, emptyList(), errors)
-        }
-
-        val syncResponse = try {
-            api.sync(SyncRequest(titles = syncTitles, console_id = consoleId))
-        } catch (e: Exception) {
-            Log.e(TAG, "Sync API call failed", e)
-            return SyncResult(0, 0, emptyList(), listOf("Sync failed: ${e.message}"))
-        }
-
-        // Process uploads
-        for (titleId in syncResponse.upload) {
-            val entry = saveMap[titleId] ?: continue
-            try {
-                val success = uploadSave(entry)
-                if (success) {
-                    uploaded++
-                    updateSyncState(entry)
-                } else {
-                    errors.add("Upload failed: ${entry.displayName}")
+            if (syncResponse != null) {
+                val planned = titles.mapTo(HashSet()) { it.titleId }
+                fun add(titleId: String, action: PlannedAction, route: PlanRoute = PlanRoute.SYNC) {
+                    if (!planned.add(titleId)) return
+                    val entry = saveMap[titleId]
+                    titles += PlannedTitle(titleId, entry?.displayName ?: titleId, action, route)
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Upload failed for $titleId", e)
-                errors.add("Upload error: ${entry.displayName}: ${e.message}")
+                syncResponse.upload.filter { it in saveMap }.forEach { add(it, PlannedAction.UPLOAD) }
+                syncResponse.download.filter { it in saveMap }.forEach { add(it, PlannedAction.DOWNLOAD) }
+                // Saves the server holds that weren't in the request.  One already
+                // planned as a server-only download is not downloaded twice (the
+                // second copy would push a real backup out of the five kept).
+                syncResponse.server_only.forEach { titleId ->
+                    val entry = saveMap[titleId] ?: return@forEach
+                    if (!hasLocalSaveTarget(entry)) return@forEach
+                    val action = if (entry.exists()) PlannedAction.DOWNLOAD else PlannedAction.DOWNLOAD_NEW
+                    add(titleId, action, PlanRoute.SERVER_ONLY)
+                }
+                syncResponse.conflict.forEach { add(it, PlannedAction.CONFLICT) }
+                syncResponse.up_to_date.forEach { add(it, PlannedAction.UP_TO_DATE) }
+                conflictInfo = syncResponse.conflict_info.orEmpty().associateBy { it.title_id }
             }
         }
 
-        // Process downloads
-        for (titleId in syncResponse.download) {
-            val entry = saveMap[titleId] ?: continue
+        val (suspects, sizeCheckSkipped) = findSuspectUploads(titles, saveMap, syncStateByTitle, sentSize, rawCardMeta)
+
+        return SyncPreview(
+            titles = titles,
+            suspects = suspects,
+            sizeCheckSkipped = sizeCheckSkipped,
+            errors = errors,
+            createdAtMs = System.currentTimeMillis(),
+            entries = saveMap,
+            conflictInfo = conflictInfo,
+        )
+    }
+
+    /**
+     * Carry out [preview].  Titles in [excluded] are left alone, and so is
+     * every suspect upload not in [includeSuspects].  A preview older than
+     * [FRESH_PREVIEW_MS] (the user read the dialog) is re-checked first: a
+     * title whose decision changed since — new play, another device's
+     * upload — is skipped and named in [SyncResult.changedSincePreview].
+     */
+    suspend fun execute(
+        preview: SyncPreview,
+        excluded: Set<String>,
+        includeSuspects: Set<String> = emptySet(),
+    ): SyncResult {
+        val skip = RollbackCheck.skippedTitles(preview.suspectIds, excluded, includeSuspects)
+        val errors = preview.errors.toMutableList()
+        var uploaded = 0
+        var downloaded = 0
+        val conflicts = mutableListOf<String>()
+        val conflictIds = mutableListOf<String>()
+        val resolvedIds = mutableListOf<String>()
+        val skippedSuspects = mutableListOf<String>()
+        val changed = mutableListOf<String>()
+
+        val moving = preview.titles.filter { it.action in SyncPreview.MOVING_ACTIONS && it.titleId !in skip }
+        val stale = System.currentTimeMillis() - preview.createdAtMs > FRESH_PREVIEW_MS
+        val fresh: FreshDecisions? = if (stale && moving.isNotEmpty()) recheck(moving, preview.entries) else null
+        fresh?.errors?.let { errors.addAll(it) }
+
+        for (title in preview.titles) {
+            val entry = preview.entries[title.titleId]
+            when (title.action) {
+                PlannedAction.CONFLICT -> {
+                    conflicts.add(entry?.displayName ?: title.titleId)
+                    conflictIds.add(title.titleId)
+                    continue
+                }
+                PlannedAction.UP_TO_DATE -> {
+                    resolvedIds.add(title.titleId)
+                    continue
+                }
+                else -> Unit
+            }
+            if (title.titleId in skip) {
+                if (title.titleId in preview.suspectIds) skippedSuspects.add(title.displayName)
+                continue
+            }
+            if (entry == null) continue
+            if (fresh != null) {
+                // The re-check couldn't be made (server unreachable): its
+                // error is reported, and the title doesn't run.
+                if (title.titleId in fresh.failedIds) continue
+                if (!stillPlanned(title.action, fresh.actions[title.titleId])) {
+                    changed.add(title.displayName)
+                    continue
+                }
+            }
             try {
-                val success = downloadSave(entry, titleId)
-                if (success) {
-                    downloaded++
-                    updateSyncState(entry)
+                val ok = runPlanned(title, entry)
+                if (ok) {
+                    if (title.action == PlannedAction.UPLOAD) uploaded++ else downloaded++
+                    resolvedIds.add(title.titleId)
                 } else {
-                    errors.add("Download failed: ${entry.displayName}")
+                    errors.add(
+                        if (title.action == PlannedAction.UPLOAD) "Upload failed: ${entry.displayName}"
+                        else "Download failed: ${entry.displayName}"
+                    )
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Download failed for $titleId", e)
-                errors.add("Download error: ${entry.displayName}: ${e.message}")
-            }
-        }
-
-        // Process server_only (download saves that only exist on server)
-        for (titleId in syncResponse.server_only) {
-            val entry = saveMap[titleId]
-            if (entry != null) {
-                try {
-                    val success = downloadSave(entry, titleId)
-                    if (success) {
-                        downloaded++
-                        updateSyncState(entry)
+                Log.e(TAG, "${title.action} failed for ${title.titleId}", e)
+                errors.add(
+                    when {
+                        title.route == PlanRoute.RAW_CARD -> "Sync error: ${entry.displayName}: ${e.message}"
+                        title.action == PlannedAction.UPLOAD -> "Upload error: ${entry.displayName}: ${e.message}"
+                        else -> "Download error: ${entry.displayName}: ${e.message}"
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Server-only download failed for $titleId", e)
-                    errors.add("Download error: $titleId: ${e.message}")
-                }
+                )
             }
         }
-
-        // Record conflicts
-        for (titleId in syncResponse.conflict) {
-            val entry = saveMap[titleId]
-            conflicts.add(entry?.displayName ?: titleId)
-        }
+        // Held-back uploads are named in the result; the caller reports them
+        // (SyncWorker logs them and leaves a note for the next app open).
 
         return SyncResult(
             uploaded = uploaded,
             downloaded = downloaded,
             conflicts = conflicts,
-            errors = errors
+            errors = errors,
+            conflictTitleIds = conflictIds,
+            resolvedTitleIds = resolvedIds,
+            conflictInfo = preview.conflictInfo,
+            skippedSuspects = skippedSuspects,
+            changedSincePreview = changed,
         )
+    }
+
+    /** Upload or download one planned title; true when it landed. */
+    private suspend fun runPlanned(title: PlannedTitle, entry: SaveEntry): Boolean = when (title.route) {
+        PlanRoute.RAW_CARD -> {
+            val ok = when (title.action) {
+                PlannedAction.UPLOAD -> uploadRawCard(entry)
+                else -> downloadRawCard(entry)
+            }
+            if (!ok) throw IOException(if (title.action == PlannedAction.UPLOAD) "Upload failed" else "Download failed")
+            if (title.action == PlannedAction.UPLOAD) updateSyncState(entry) else updateSyncStateFromFile(entry)
+            true
+        }
+        PlanRoute.SERVER_ONLY -> {
+            val ok = downloadSave(entry, entry.titleId)
+            if (ok) {
+                // A "server only" entry is hashed from the file just written
+                // (its own hash would be empty); a local entry the request
+                // left out is recorded the way the old server_only pass did.
+                if (entry.isServerOnly) updateSyncStateFromFile(entry) else updateSyncState(entry)
+            }
+            ok
+        }
+        PlanRoute.SYNC -> {
+            val ok = if (title.action == PlannedAction.UPLOAD) uploadSave(entry) else downloadSave(entry, entry.titleId)
+            if (ok) updateSyncState(entry)
+            ok
+        }
+    }
+
+    /** The decisions a re-check made, and the routes it couldn't re-check. */
+    private class FreshDecisions(
+        val actions: Map<String, PlannedAction>,
+        /** Titles the re-check couldn't decide (server unreachable): they don't run. */
+        val failedIds: Set<String>,
+        val errors: List<String>,
+    )
+
+    /**
+     * Decide [titles] again from what is on disk and on the server now.  The
+     * /sync request is the same one plan() made, for these titles only
+     * (POST /sync changes nothing on the server).
+     */
+    private suspend fun recheck(titles: List<PlannedTitle>, entries: Map<String, SaveEntry>): FreshDecisions {
+        val actions = mutableMapOf<String, PlannedAction>()
+        val failed = mutableSetOf<String>()
+        val errors = mutableListOf<String>()
+
+        val syncRoute = titles.filter { it.route == PlanRoute.SYNC }
+        if (syncRoute.isNotEmpty()) {
+            val ignored = mutableListOf<String>()
+            val request = syncRoute.mapNotNull { t ->
+                val entry = entries[t.titleId]?.reconcileWithDisk() ?: return@mapNotNull null
+                buildSyncTitle(entry, dao.getById(t.titleId), ignored)
+            }
+            try {
+                if (request.isNotEmpty()) {
+                    val r = api.sync(SyncRequest(titles = request, console_id = consoleId))
+                    r.upload.forEach { actions[it] = PlannedAction.UPLOAD }
+                    r.download.forEach { actions[it] = PlannedAction.DOWNLOAD }
+                    r.conflict.forEach { actions[it] = PlannedAction.CONFLICT }
+                    r.up_to_date.forEach { actions[it] = PlannedAction.UP_TO_DATE }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Sync re-check failed", e)
+                syncRoute.mapTo(failed) { it.titleId }
+                errors.add("Sync failed: ${e.message}")
+            }
+        }
+        for (t in titles.filter { it.route == PlanRoute.SERVER_ONLY }) {
+            val entry = entries[t.titleId]?.reconcileWithDisk() ?: continue
+            // A save that appeared since the preview may hold new play: it
+            // is no longer a plain "new from the server" download.
+            actions[t.titleId] = if (entry.exists()) PlannedAction.DOWNLOAD else PlannedAction.DOWNLOAD_NEW
+        }
+        for (t in titles.filter { it.route == PlanRoute.RAW_CARD }) {
+            val entry = entries[t.titleId] ?: continue
+            try {
+                planRawCard(entry).first?.let { actions[t.titleId] = it }
+            } catch (e: Exception) {
+                Log.e(TAG, "Raw-card re-check failed for ${t.titleId}", e)
+                failed.add(t.titleId)
+                errors.add("Sync error: ${entry.displayName}: ${e.message}")
+            }
+        }
+        return FreshDecisions(actions, failed, errors)
+    }
+
+    /** The /sync request line for [entry], or null (no local save, or unreadable: noted in [errors]). */
+    private fun buildSyncTitle(entry: SaveEntry, lastSyncState: SyncStateEntity?, errors: MutableList<String>): SyncTitle? {
+        if (!hasLocalSyncSource(entry, lastSyncState)) return null
+        return try {
+            SyncTitle(
+                title_id = entry.titleId,
+                save_hash = canonicalHash(entry, lastSyncState),
+                timestamp = localTimestamp(entry) / 1000L,  // convert ms to seconds
+                size = canonicalSize(entry, lastSyncState),
+                last_synced_hash = lastSyncState?.lastSyncedHash,
+                console_id = consoleId
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Error computing hash for ${entry.titleId}", e)
+            errors.add("Hash error: ${entry.displayName}")
+            null
+        }
+    }
+
+    /**
+     * The planned uploads that look like a rollback (see [RollbackCheck]),
+     * and how many could not be checked.  Memory cards use the card meta
+     * the plan already fetched; the rest ask GET /saves/{id}/meta for at
+     * most [RollbackCheck.MAX_SIZE_CHECKS] uploads, a few at a time.  No
+     * server copy (404) is never a suspect.
+     */
+    private suspend fun findSuspectUploads(
+        titles: List<PlannedTitle>,
+        saveMap: Map<String, SaveEntry>,
+        syncStates: Map<String, SyncStateEntity?>,
+        sentSize: Map<String, Long>,
+        rawCardMeta: Map<String, SaveMeta>,
+    ): Pair<List<SuspectUpload>, Int> {
+        val uploads = titles.filter { it.action == PlannedAction.UPLOAD }
+        if (uploads.isEmpty()) return emptyList<SuspectUpload>() to 0
+        fun suspectOf(t: PlannedTitle, meta: SaveMeta): SuspectUpload? {
+            val entry = saveMap[t.titleId] ?: return null
+            val size = sentSize[t.titleId] ?: runCatching { canonicalSize(entry, syncStates[t.titleId]) }.getOrNull() ?: return null
+            val files = localFileCount(entry)
+            if (!RollbackCheck.isSuspect(size, files, meta.save_size, meta.file_count)) return null
+            return SuspectUpload(t.titleId, t.displayName, size, meta.save_size, files, meta.file_count)
+        }
+
+        val suspects = mutableListOf<SuspectUpload>()
+        val (rawUploads, syncUploads) = uploads.partition { it.route == PlanRoute.RAW_CARD }
+        rawUploads.forEach { t -> rawCardMeta[t.titleId]?.let { suspectOf(t, it) }?.let(suspects::add) }
+
+        val (checked, unchecked) = RollbackCheck.splitForChecks(syncUploads)
+        var skipped = unchecked.size
+        val gate = Semaphore(RollbackCheck.PARALLEL_CHECKS)
+        val results = coroutineScope {
+            checked.map { t ->
+                async {
+                    gate.withPermit {
+                        try {
+                            MetaCheck.Found(api.getSaveMeta(t.titleId))
+                        } catch (e: retrofit2.HttpException) {
+                            if (e.code() == 404) MetaCheck.NoServerCopy else MetaCheck.Failed
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Size check failed for ${t.titleId}", e)
+                            MetaCheck.Failed
+                        }
+                    }
+                }
+            }.awaitAll()
+        }
+        checked.zip(results).forEach { (t, r) ->
+            when (r) {
+                is MetaCheck.Found -> suspectOf(t, r.meta)?.let(suspects::add)
+                MetaCheck.NoServerCopy -> Unit
+                MetaCheck.Failed -> skipped++
+            }
+        }
+        // Keep the plan's order.
+        val order = uploads.withIndex().associate { (i, t) -> t.titleId to i }
+        return suspects.sortedBy { order[it.titleId] ?: Int.MAX_VALUE } to skipped
+    }
+
+    private sealed class MetaCheck {
+        class Found(val meta: SaveMeta) : MetaCheck()
+        object NoServerCopy : MetaCheck()
+        object Failed : MetaCheck()
+    }
+
+    /** Files in a save folder (what the server counts as `file_count`); null for single-file saves. */
+    private fun localFileCount(entry: SaveEntry): Int? {
+        val dir = entry.saveDir ?: return null
+        if (!dir.isDirectory) return null
+        return dir.walkTopDown().count { it.isFile }
     }
 
     private suspend fun normalizeCanonicalSlugEntries(saves: List<SaveEntry>): List<SaveEntry> {
@@ -287,35 +544,16 @@ class SyncEngine(
         }
     }
 
-    private fun isSaturnEntry(entry: SaveEntry): Boolean {
-        return entry.systemName == "SAT" && entry.saveFile != null && !entry.isMultiFile && !entry.isPspSlot
-    }
+    private fun isSaturnEntry(entry: SaveEntry): Boolean = isSaturnSaveEntry(entry)
 
-    private fun isSharedYabaSanshiroContainer(entry: SaveEntry): Boolean {
-        return isSaturnEntry(entry) &&
-            saturnSyncFormat == SaturnSyncFormat.YABASANSHIRO &&
-            entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
-    }
+    private fun isSharedYabaSanshiroContainer(entry: SaveEntry): Boolean =
+        isSharedYabaSanshiroSave(entry, saturnSyncFormat)
 
     private fun saturnCanonicalSnapshot(
         entry: SaveEntry,
         @Suppress("UNUSED_PARAMETER") syncState: SyncStateEntity? = null
     ): SaturnCanonicalSnapshot? {
-        if (!isSaturnEntry(entry)) return null
-
-        val saveFile = entry.saveFile ?: return null
-        val canonicalBytes = if (isSharedYabaSanshiroContainer(entry)) {
-            val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
-            if (archiveNames.isEmpty()) {
-                throw UnsupportedOperationException(
-                    "This YabaSanshiro save still needs Saturn archive selection metadata."
-                )
-            }
-            SaturnSaveFormatConverter.extractCanonical(saveFile.readBytes(), archiveNames)
-        } else {
-            SaturnSaveFormatConverter.toCanonical(saveFile.readBytes())
-        }
-
+        val canonicalBytes = saturnCanonicalBytes(entry, saturnSyncFormat) ?: return null
         return SaturnCanonicalSnapshot(
             bytes = canonicalBytes,
             archiveNames = SaturnSaveFormatConverter.archiveNames(canonicalBytes)
@@ -341,11 +579,8 @@ class SyncEngine(
 
     private fun canonicalHash(
         entry: SaveEntry,
-        syncState: SyncStateEntity? = null
-    ): String {
-        return saturnCanonicalSnapshot(entry, syncState)?.let { HashUtils.sha256Bytes(it.bytes) }
-            ?: entry.computeHash()
-    }
+        @Suppress("UNUSED_PARAMETER") syncState: SyncStateEntity? = null
+    ): String = localSyncHash(entry, saturnSyncFormat)
 
     private fun canonicalSize(
         entry: SaveEntry,
@@ -362,19 +597,16 @@ class SyncEngine(
         }
     }
 
-    private fun localTimestamp(entry: SaveEntry): Long {
-        return when {
-            isSharedYabaSanshiroContainer(entry) && entry.saveFile?.exists() == true ->
-                entry.saveFile.lastModified()
-            else -> entry.getTimestamp()
-        }
-    }
+    private fun localTimestamp(entry: SaveEntry): Long = localSaveTimestamp(entry, saturnSyncFormat)
 
-    private fun writeDownloadedBytes(entry: SaveEntry, canonicalBytes: ByteArray): Boolean {
+    private suspend fun writeDownloadedBytes(entry: SaveEntry, canonicalBytes: ByteArray): Boolean {
+        val prev = syncStateForBackup(entry)
         return when {
             entry.isMultiFile && entry.saveDir != null -> {
-                AtomicSaveWriter.replaceDirectory(entry.saveDir, keepExisting = true) { staging ->
-                    unzipBytesToDirectory(canonicalBytes, staging)
+                backedUpWrite(backups, entry.titleId, entry.saveDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                    AtomicSaveWriter.replaceDirectory(entry.saveDir, keepExisting = true) { staging ->
+                        unzipBytesToDirectory(canonicalBytes, staging)
+                    }
                 }
                 true
             }
@@ -388,7 +620,9 @@ class SyncEngine(
                 } else {
                     canonicalBytes
                 }
-                AtomicSaveWriter.replaceFile(entry.saveFile, bytesToWrite)
+                backedUpWrite(backups, entry.titleId, entry.saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                    AtomicSaveWriter.replaceFile(entry.saveFile, bytesToWrite)
+                }
                 true
             }
             else -> false
@@ -683,8 +917,13 @@ class SyncEngine(
             }
             val body = response.body() ?: return false
             val bytes = body.bytes()
-            AtomicSaveWriter.replaceFile(saveFile, bytes)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceFile(saveFile, bytes)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadPs1Card failed for $titleId", e)
             false
@@ -703,8 +942,13 @@ class SyncEngine(
             }
             val body = response.body() ?: return false
             val bytes = body.bytes()
-            AtomicSaveWriter.replaceFile(saveFile, bytes)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceFile(saveFile, bytes)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadPs2Card failed for $titleId", e)
             false
@@ -730,6 +974,8 @@ class SyncEngine(
                 upsertKnownSyncState(entry, serverHash, archiveNames)
             }
             wrote
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadSaveRaw failed for $titleId", e)
             false
@@ -755,8 +1001,13 @@ class SyncEngine(
             if (files.isEmpty()) return false
             // Overlay onto the existing slot (files the bundle doesn't carry
             // are kept, as before), but swap the result in atomically.
-            AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, slotDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadPspBundle failed for $titleId", e)
             false
@@ -779,8 +1030,13 @@ class SyncEngine(
             // The bundle is the whole save: write it next to the current one,
             // verify it, then swap.  The old save is only removed once the new
             // one is in place, so a failure never leaves a half-written save.
-            AtomicSaveWriter.replaceDirectory(saveDir, files)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceDirectory(saveDir, files)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadTreeBundle failed for $titleId", e)
             false
@@ -952,15 +1208,24 @@ class SyncEngine(
                 return false
             }
             val bytes = response.body()?.bytes() ?: return false
-            AtomicSaveWriter.replaceFile(saveFile, bytes)
+            val prev = syncStateForBackup(entry)
+            backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                AtomicSaveWriter.replaceFile(saveFile, bytes)
+            }
             true
+        } catch (e: BackupFailedException) {
+            throw e
         } catch (e: Exception) {
             Log.e(TAG, "downloadGcCard failed for $titleId", e)
             false
         }
     }
 
-    private suspend fun syncRawCardEntry(entry: SaveEntry): RawCardSyncOutcome {
+    /**
+     * A memory card's plan from its card meta (see [decideRawCard]), with
+     * that meta (null when the server has no card) for the size check.
+     */
+    private suspend fun planRawCard(entry: SaveEntry): Pair<PlannedAction?, SaveMeta?> {
         val localExists = entry.exists()
         val localHash = if (localExists) canonicalHash(entry) else ""
         val lastSyncHash = dao.getById(entry.titleId)?.lastSyncedHash
@@ -975,81 +1240,91 @@ class SyncEngine(
         } catch (e: retrofit2.HttpException) {
             if (e.code() == 404) null else throw e
         }
+        return decideRawCard(
+            localExists = localExists,
+            localHash = localHash,
+            lastSyncedHash = lastSyncHash,
+            serverHash = serverMeta?.save_hash,
+            serverHasSave = serverMeta != null,
+        ) to serverMeta
+    }
 
-        if (serverMeta == null) {
-            if (!localExists) return RawCardSyncOutcome.SKIPPED
-            val ok = when (entry.systemName) {
-                "PS1" -> uploadPs1Card(entry)
-                "PS2" -> uploadPs2Card(entry)
-                "GC"  -> uploadGcCard(entry)
-                else -> false
-            }
-            if (ok) {
-                updateSyncState(entry)
-                return RawCardSyncOutcome.UPLOADED
-            }
-            throw IOException("Upload failed")
-        }
+    private suspend fun uploadRawCard(entry: SaveEntry): Boolean = when (entry.systemName) {
+        "PS1" -> uploadPs1Card(entry)
+        "PS2" -> uploadPs2Card(entry)
+        "GC"  -> uploadGcCard(entry)
+        else -> false
+    }
 
-        val serverHash = serverMeta.save_hash ?: ""
-        if (localExists && localHash == serverHash) {
-            return RawCardSyncOutcome.UP_TO_DATE
-        }
+    private suspend fun downloadRawCard(entry: SaveEntry): Boolean = when (entry.systemName) {
+        "PS1" -> downloadPs1Card(entry, entry.titleId)
+        "PS2" -> downloadPs2Card(entry, entry.titleId)
+        "GC"  -> downloadGcCard(entry, entry.titleId)
+        else -> false
+    }
 
-        if (!localExists) {
-            val ok = when (entry.systemName) {
-                "PS1" -> downloadPs1Card(entry, entry.titleId)
-                "PS2" -> downloadPs2Card(entry, entry.titleId)
-                "GC"  -> downloadGcCard(entry, entry.titleId)
-                else -> false
-            }
-            if (ok) {
-                updateSyncStateFromFile(entry)
-                return RawCardSyncOutcome.DOWNLOADED
-            }
-            throw IOException("Download failed")
-        }
-
-        return when {
-            lastSyncHash != null && lastSyncHash == serverHash -> {
-                val ok = when (entry.systemName) {
-                    "PS1" -> uploadPs1Card(entry)
-                    "PS2" -> uploadPs2Card(entry)
-                    "GC"  -> uploadGcCard(entry)
-                    else -> false
-                }
-                if (ok) {
-                    updateSyncState(entry)
-                    RawCardSyncOutcome.UPLOADED
-                } else {
-                    throw IOException("Upload failed")
-                }
-            }
-            lastSyncHash != null && lastSyncHash == localHash -> {
-                val ok = when (entry.systemName) {
-                    "PS1" -> downloadPs1Card(entry, entry.titleId)
-                    "PS2" -> downloadPs2Card(entry, entry.titleId)
-                    "GC"  -> downloadGcCard(entry, entry.titleId)
-                    else -> false
-                }
-                if (ok) {
-                    updateSyncStateFromFile(entry)
-                    RawCardSyncOutcome.DOWNLOADED
-                } else {
-                    throw IOException("Download failed")
-                }
-            }
-            else -> RawCardSyncOutcome.CONFLICT
-        }
+    companion object {
+        /**
+         * A preview older than this is re-checked before it runs: the user
+         * has been reading the dialog, and the saves may have moved on.
+         */
+        const val FRESH_PREVIEW_MS = 5_000L
     }
 }
 
-private enum class RawCardSyncOutcome {
-    UPLOADED,
-    DOWNLOADED,
-    CONFLICT,
-    UP_TO_DATE,
-    SKIPPED,
+/** A Saturn save held as one native backup file (not a PSP slot or a folder). */
+internal fun isSaturnSaveEntry(entry: SaveEntry): Boolean =
+    entry.systemName == "SAT" && entry.saveFile != null && !entry.isMultiFile && !entry.isPspSlot
+
+/** YabaSanshiro's shared `backup.bin`, which holds many games' saves at once. */
+internal fun isSharedYabaSanshiroSave(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): Boolean =
+    isSaturnSaveEntry(entry) &&
+        saturnSyncFormat == SaturnSyncFormat.YABASANSHIRO &&
+        entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+
+/**
+ * The canonical bytes sync sends for a Saturn save, or null when [entry] is
+ * not one.  A shared YabaSanshiro container yields only the archives chosen
+ * for this title and throws until that choice exists.
+ */
+internal fun saturnCanonicalBytes(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): ByteArray? {
+    if (!isSaturnSaveEntry(entry)) return null
+    val saveFile = entry.saveFile ?: return null
+    return if (isSharedYabaSanshiroSave(entry, saturnSyncFormat)) {
+        val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
+        if (archiveNames.isEmpty()) {
+            throw UnsupportedOperationException(
+                "This YabaSanshiro save still needs Saturn archive selection metadata."
+            )
+        }
+        SaturnSaveFormatConverter.extractCanonical(saveFile.readBytes(), archiveNames)
+    } else {
+        SaturnSaveFormatConverter.toCanonical(saveFile.readBytes())
+    }
 }
+
+/**
+ * When [entry] last changed, in ms: the `timestamp` sync sends.  The newest
+ * file of a PSP slot, of saveFile + extraFiles, or under a multi-file folder
+ * (for Azahar, the newest file under data/00000001/) — see
+ * [SaveEntry.getTimestamp] — except YabaSanshiro's shared container, whose
+ * own mtime is used.  Reads the disk.
+ */
+fun localSaveTimestamp(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): Long = when {
+    isSharedYabaSanshiroSave(entry, saturnSyncFormat) && entry.saveFile?.exists() == true ->
+        entry.saveFile.lastModified()
+    else -> entry.getTimestamp()
+}
+
+/**
+ * The hash sync compares for [entry]: what SyncEngine sends as `save_hash`
+ * and records as `lastSyncedHash`.  Saturn saves hash in canonical form, so a
+ * raw file hash would never match the recorded one.  Anything that shows a
+ * save's status must use this, or the status disagrees with what sync does.
+ * May throw (unreadable file, unparsable Saturn save).
+ */
+fun localSyncHash(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): String =
+    saturnCanonicalBytes(entry, saturnSyncFormat)?.let { HashUtils.sha256Bytes(it) }
+        ?: entry.computeHash()
 
 private const val ROM_BUFFER_SIZE = 8192

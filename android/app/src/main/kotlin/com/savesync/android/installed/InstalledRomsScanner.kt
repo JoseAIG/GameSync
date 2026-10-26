@@ -115,6 +115,17 @@ object InstalledRomsScanner {
         "cpc", "tzx", "tap", "sna", "z80",
     )
 
+    /**
+     * Emulator save extensions.  A per-game folder holding one of these is
+     * never removed whole: RetroArch (with "sort saves by content"), DuckStation,
+     * Beetle cores and others keep saves next to the ROM, and "Delete" means
+     * the ROM.  None of them are in [ROM_EXTENSIONS], so the file-by-file
+     * fallback (ROM + companions only) leaves them in place.
+     */
+    val SAVE_EXTENSIONS: Set<String> = setOf(
+        "srm", "sav", "brm", "bkr", "mcd", "mcr", "vmu", "dsv", "eep", "fla", "sra", "ps2", "gci",
+    )
+
     private val PRIMARY_PRIORITY: Map<String, Int> = mapOf(
         "cue" to 10, "gdi" to 10,
         "chd" to 9, "rvz" to 9,
@@ -310,6 +321,10 @@ object InstalledRomsScanner {
         return canRemoveWholeFolder(parent, rom.systemRoot, listOf(rom.path) + rom.companionFiles)
     }
 
+    /** Files a whole-folder delete of [rom] would remove (the confirm dialog shows it). */
+    fun wholeFolderFileCount(rom: InstalledRom): Int =
+        rom.path.parentFile?.let { countFilesRecursive(it) } ?: 0
+
     // ── Internals ──────────────────────────────────────────────────
 
     private fun scanFolder(folder: File, system: String): List<InstalledRom> {
@@ -429,6 +444,12 @@ object InstalledRomsScanner {
         parent.walkTopDown().forEach { f ->
             if (!allowed) return@forEach
             if (!f.isFile) return@forEach
+            // A save in the folder: never rmtree it.  The caller falls back
+            // to deleting the ROM and its companions, so the save stays.
+            if (f.extension.lowercase() in SAVE_EXTENSIONS) {
+                allowed = false
+                return@forEach
+            }
             // Only ROM files gate the rmtree — readmes, box art,
             // metadata caches get swept along with the folder.  That's
             // the point of the whole-folder delete.

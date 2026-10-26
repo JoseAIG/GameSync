@@ -1,5 +1,6 @@
 package com.savesync.android.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
@@ -21,7 +22,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
@@ -32,9 +32,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -76,21 +73,49 @@ import com.savesync.android.catalog.RomCatalogFilter
 import com.savesync.android.findComponentActivity
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.takeStep
+import com.savesync.android.ui.components.gsFilterNudge
+import com.savesync.android.ui.components.raNudgeSign
+import com.savesync.android.ui.components.filterNudgeSign
+import com.savesync.android.ui.components.NudgeOnChange
+import com.savesync.android.ui.components.rememberFilterNudge
+import com.savesync.android.ui.components.GsListScrollEdges
+import com.savesync.android.ui.components.gsEdgeBump
+import com.savesync.android.ui.components.AlphabetHud
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.GsBanner
 import com.savesync.android.ui.components.GsButton
 import com.savesync.android.ui.components.GsDialog
 import com.savesync.android.ui.components.GsDialogChoice
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsActionSlot
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
+import com.savesync.android.ui.components.GsSubTabRow
 import com.savesync.android.ui.components.GsHint
 import com.savesync.android.ui.components.GsListRow
-import com.savesync.android.ui.components.GsTopBar
 import com.savesync.android.ui.components.LocalShowButtonHints
 import com.savesync.android.ui.components.SystemFilterChip
 import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsExpandIn
+import com.savesync.android.ui.theme.gsShrinkOut
+import androidx.compose.runtime.withFrameNanos
+import com.savesync.android.ui.components.rememberListFollower
+import com.savesync.android.ui.theme.gsDim
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.LocalGsNotifier
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.ui.text.style.TextOverflow
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
 import com.savesync.android.ui.components.rememberHoldNavState
+import com.savesync.android.ui.components.LocalInputTracker
+import com.savesync.android.ui.components.isRevealGuarded
 import kotlinx.coroutines.launch
+import androidx.compose.runtime.produceState
 
 /**
  * Label the [SystemFilterChip] shows when no specific system is
@@ -122,8 +147,9 @@ fun RomCatalogScreen(
     val notice by viewModel.romCatalogNotice.collectAsState()
     val downloadState by viewModel.romDownloadState.collectAsState()
 
-    val snackbarHostState = remember { SnackbarHostState() }
+    val notifier = LocalGsNotifier.current
     val scope = rememberCoroutineScope()
+    val reduceMotion = LocalReduceMotion.current
 
     // Filter state uses rememberSaveable so the user's place in the catalog
     // (selected system + search query + whether the search bar is open)
@@ -148,8 +174,10 @@ fun RomCatalogScreen(
     // rom grid without focus leaking up to the search field.
     var selectedIndex by remember { mutableIntStateOf(0) }
     val listState = rememberLazyListState()
+    val follower = rememberListFollower(listState)
     // Hold-to-accelerate state for d-pad left/right (page → alphabet jump).
     val holdNav = rememberHoldNavState()
+    val inputTracker = LocalInputTracker.current
     val listFocusRequester = remember { FocusRequester() }
     val searchFocusRequester = remember { FocusRequester() }
 
@@ -190,10 +218,13 @@ fun RomCatalogScreen(
     // view keeps its own scroll positions: its rows are a different list.
     val systemKey = (activeSystem ?: "ALL") + if (raOnly) "|RA" else ""
 
-    // Lazy first-load when the tab is opened.
+    // Lazy first-load when the tab is opened; coming back to the tab while
+    // the load failed tries again by itself.
     LaunchedEffect(Unit) {
-        if (!loaded && !loading) viewModel.fetchRomCatalog()
+        if (!loading && (!loaded || error != null)) viewModel.fetchRomCatalog()
     }
+    val settings by viewModel.settings.collectAsState()
+    val serverConfigured by viewModel.serverConfigured.collectAsState()
 
     // Claim focus for the rom list on entry so the search OutlinedTextField
     // doesn't auto-focus and pop the keyboard. Search is only focused when
@@ -202,38 +233,62 @@ fun RomCatalogScreen(
         runCatching { listFocusRequester.requestFocus() }
     }
 
-    // Focus the search field whenever it becomes visible.
+    // Focus the search field as soon as it opens, without waiting for the
+    // expand: one frame lets AnimatedVisibility compose the field, so the
+    // requester is attached.
     LaunchedEffect(searchVisible) {
-        if (searchVisible) runCatching { searchFocusRequester.requestFocus() }
+        if (searchVisible) {
+            withFrameNanos { }
+            runCatching { searchFocusRequester.requestFocus() }
+        }
     }
 
-    // Surface enqueue outcomes as snackbars.  The Downloads tab now owns
-    // progress + final-status display; these snackbars only confirm that
-    // the request was accepted (or rejected before it left the device).
+    // Surface enqueue outcomes as notices.  The Downloads tab owns
+    // progress + final-status display; these only confirm that the request
+    // was accepted (or rejected before it left the device).
     LaunchedEffect(downloadState) {
         when (val s = downloadState) {
             is MainViewModel.RomDownloadState.Downloading -> {
-                scope.launch {
-                    snackbarHostState.showSnackbar(
-                        "Queued ${s.name} — see Downloads tab for progress"
+                // The one confirmation; ongoing status is the Downloads tab
+                // badge.  "View" is a touch shortcut (R1 reaches the tab).
+                notifier.show(
+                    GsNotice(
+                        GsNoticeKind.Success,
+                        "Queued ${s.name}",
+                        actionLabel = "View",
+                        onAction = { onNavigateToTab(DOWNLOADS_TAB) },
                     )
-                    viewModel.resetRomDownloadState()
-                }
+                )
+                viewModel.resetRomDownloadState()
             }
             is MainViewModel.RomDownloadState.Success -> {
                 // Legacy state — preserved for any caller that still uses
                 // the synchronous path (e.g. unit tests).  The DownloadManager
                 // never emits this directly.
-                scope.launch {
-                    snackbarHostState.showSnackbar("Downloaded ${s.file.name}")
-                    viewModel.resetRomDownloadState()
-                }
+                notifier.show(GsNotice(GsNoticeKind.Success, "Downloaded ${s.file.name}"))
+                viewModel.resetRomDownloadState()
             }
             is MainViewModel.RomDownloadState.Error -> {
-                scope.launch {
-                    snackbarHostState.showSnackbar("Download failed: ${s.message}")
-                    viewModel.resetRomDownloadState()
-                }
+                val retry = s.retry
+                notifier.show(
+                    when {
+                        retry != null -> GsNotice(
+                            GsNoticeKind.Error,
+                            "Download failed: ${s.message}",
+                            actionLabel = "Retry",
+                            onAction = retry,
+                        )
+                        // "Server URL / ROM directory not configured": fixed in Settings.
+                        s.message.contains("not configured", ignoreCase = true) -> GsNotice(
+                            GsNoticeKind.Error,
+                            s.message,
+                            actionLabel = "Settings",
+                            onAction = { onNavigateToTab(SETTINGS_TAB) },
+                        )
+                        else -> GsNotice(GsNoticeKind.Error, "Download failed: ${s.message}")
+                    }
+                )
+                viewModel.resetRomDownloadState()
             }
             else -> Unit
         }
@@ -251,10 +306,8 @@ fun RomCatalogScreen(
         } else {
             "Showing all games"
         }
-        scope.launch {
-            snackbarHostState.currentSnackbarData?.dismiss()
-            snackbarHostState.showSnackbar(message)
-        }
+        // A filter echo, not an outcome: no haptic.
+        notifier.show(GsNotice(GsNoticeKind.Info, message), haptic = false)
     }
 
     // Keep the cursor in range when filters/search change the list size.
@@ -302,13 +355,21 @@ fun RomCatalogScreen(
 
     // Helper that cycles the system filter (null = all systems), driven by
     // SELECT (activity-level systemCycleEvents flow).
+    val filterNudge = rememberFilterNudge()
+    val pendingSystemStep = remember { intArrayOf(0) }
     fun cycleSystem(delta: Int) {
         if (systems.isEmpty()) return
         val all = listOf<String?>(null) + systems
         val idx = all.indexOf(activeSystem).let { if (it < 0) 0 else it }
         val next = (idx + delta + all.size) % all.size
+        pendingSystemStep[0] = delta
         systemFilter = all[next]
     }
+    // A filter change slides the list in from the way it moved (M5-7).
+    NudgeOnChange(filterNudge, activeSystem) { old, new ->
+        filterNudgeSign(listOf<String?>(null) + systems, old, new, pendingSystemStep.takeStep())
+    }
+    NudgeOnChange(filterNudge, raOnly) { _, on -> raNudgeSign(on) }
 
     // SELECT cycles the system filter (the sub-tab chip) — the Activity
     // emits on systemCycleEvents and we apply it here so the chip stays in
@@ -318,71 +379,65 @@ fun RomCatalogScreen(
         activity?.systemCycleEvents?.collect { delta -> cycleSystem(delta) }
     }
 
-    Scaffold(
-        topBar = {
-            GsTopBar(
-                activeTabIndex = 1,
-                onTabClick = onNavigateToTab,
-                actions = {
-                    if (loading && catalog.isNotEmpty()) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = GsColors.Accent,
-                        )
-                    }
-                    IconButton(onClick = {
-                        searchVisible = !searchVisible
-                        if (!searchVisible) query = ""
-                    }) {
-                        Icon(Icons.Filled.Search, contentDescription = "Search (Y)", tint = GsColors.Text)
-                    }
-                },
-                subTabs = {
-                    SystemFilterChip(
-                        label = activeSystem ?: ALL_SYSTEMS_LABEL,
-                        options = listOf(ALL_SYSTEMS_LABEL) + systems,
-                        onSelect = { choice ->
-                            systemFilter = choice.takeIf { it != ALL_SYSTEMS_LABEL }
-                        },
-                    )
-                    FilterChip(
-                        selected = raOnly,
-                        onClick = { toggleRaOnly() },
-                        label = { Text("RetroAchievements") },
-                        leadingIcon = if (LocalShowButtonHints.current) {
-                            { ButtonGlyph(GsButton.X) }
-                        } else null,
-                        colors = FilterChipDefaults.filterChipColors(
-                            containerColor = GsColors.Panel,
-                            labelColor = GsColors.Dim,
-                            selectedContainerColor = GsColors.Ra,
-                            selectedLabelColor = GsColors.Ink,
-                        ),
-                    )
-                },
-            )
-        },
-        bottomBar = {
-            GsFooterHints(
+    // Header actions and footer hints, drawn by MainApp's persistent chrome.
+    val showSpinner = loading && catalog.isNotEmpty()
+    val clearSearchHint = searchVisible || query.isNotEmpty()
+    val chromeSpec = remember(showSpinner, raOnly, clearSearchHint) {
+        GsChromeSpec(
+            actions = {
+                // A refresh behind a cached list spins here; the slot is
+                // always reserved so the search button never moves.
+                GsActionSlot(busy = showSpinner) {}
+                IconButton(onClick = {
+                    searchVisible = !searchVisible
+                    if (!searchVisible) query = ""
+                }) {
+                    Icon(Icons.Filled.Search, contentDescription = "Search (Y)", tint = GsColors.Text)
+                }
+            },
+            hints = listOf(
+                GsHint(GsButton.A, "Install"),
+                GsHint(GsButton.X, if (raOnly) "All games" else "RA only"),
+                GsHint(GsButton.Y, "Search"),
+            ) + (if (clearSearchHint) listOf(GsHint(GsButton.B, "Clear search")) else emptyList()) +
                 listOf(
-                    GsHint(GsButton.A, "Install"),
-                    GsHint(GsButton.X, if (raOnly) "All games" else "RA only"),
-                    GsHint(GsButton.Y, "Search"),
-                ) + (if (searchVisible || query.isNotEmpty()) listOf(GsHint(GsButton.B, "Clear search")) else emptyList()) +
-                    listOf(
-                        GsHint(GsButton.SELECT, "System"),
-                        GsHint(GsButton.L1, "Tabs"),
-                        GsHint(GsButton.START, "Exit"),
-                    )
+                    GsHint(GsButton.SELECT, "System"),
+                    GsHint(GsButton.L1, "Tabs"),
+                    GsHint(GsButton.START, "Exit"),
+                ),
+        )
+    }
+    GsScreenChrome("catalog", chromeSpec)
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Sub-tab chips move with their list (SELECT / X step them).
+        GsSubTabRow {
+            SystemFilterChip(
+                label = activeSystem ?: ALL_SYSTEMS_LABEL,
+                options = listOf(ALL_SYSTEMS_LABEL) + systems,
+                onSelect = { choice ->
+                    systemFilter = choice.takeIf { it != ALL_SYSTEMS_LABEL }
+                },
             )
-        },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
-    ) { padding ->
+            FilterChip(
+                selected = raOnly,
+                onClick = { toggleRaOnly() },
+                label = { Text("RetroAchievements") },
+                leadingIcon = if (LocalShowButtonHints.current) {
+                    { ButtonGlyph(GsButton.X) }
+                } else null,
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = GsColors.Panel,
+                    labelColor = GsColors.Dim,
+                    selectedContainerColor = GsColors.Ra,
+                    selectedLabelColor = GsColors.Ink,
+                ),
+            )
+        }
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
+                .fillMaxWidth()
+                .weight(1f)
                 .focusRequester(listFocusRequester)
                 .focusable()
                 .onPreviewKeyEvent { event ->
@@ -395,7 +450,7 @@ fun RomCatalogScreen(
                                         .coerceAtLeast(1)
                                     selectedIndex = (selectedIndex + d * page)
                                         .coerceIn(0, filtered.size - 1)
-                                    scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                             onAlphabet = { d ->
@@ -414,30 +469,44 @@ fun RomCatalogScreen(
                                     }
                                     selectedIndex = if (found >= 0) found
                                         else if (d > 0) filtered.size - 1 else 0
-                                    scope.launch { listState.animateScrollToItem(selectedIndex) }
+                                    holdNav.announceLetter(firstLetter(filtered[selectedIndex].name))
+                                    follower.follow(selectedIndex, reduceMotion)
                                 }
                             },
                         )
                     ) return@onPreviewKeyEvent true
                     if (event.type != KeyEventType.KeyDown) return@onPreviewKeyEvent false
+                    // First key after touch on a device without a gamepad: it only
+                    // reveals the cursor, so nothing acts on a row that wasn't lit.
+                    if (inputTracker?.isRevealPress == true && isRevealGuarded(event.key)) {
+                        return@onPreviewKeyEvent true
+                    }
                     when (event.key) {
+                        // Re-anchors first if a fling left the cursor
+                        // off-screen; otherwise steps and the list follows.
                         Key.DirectionDown -> {
-                            if (filtered.isNotEmpty()) {
-                                selectedIndex = (selectedIndex + 1).coerceAtMost(filtered.size - 1)
-                                scope.launch { listState.animateScrollToItem(selectedIndex) }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, 1, filtered.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
                         Key.DirectionUp -> {
-                            if (filtered.isNotEmpty()) {
-                                selectedIndex = (selectedIndex - 1).coerceAtLeast(0)
-                                scope.launch { listState.animateScrollToItem(selectedIndex) }
-                            }
+                            selectedIndex = follower.step(
+                                selectedIndex, -1, filtered.size,
+                                reveal = inputTracker?.isRevealPress == true,
+                                reduce = reduceMotion,
+                            )
                             true
                         }
-                        // A / Enter → open the download-confirm dialog
+                        // A / Enter → open the download-confirm dialog.  A
+                        // held A's repeats are ignored, so it can't open the
+                        // dialog and confirm it in one press.
                         Key.ButtonA, Key.Enter -> {
-                            filtered.getOrNull(selectedIndex)?.let { confirmTarget = it }
+                            if (event.nativeKeyEvent.repeatCount == 0) {
+                                filtered.getOrNull(selectedIndex)?.let { confirmTarget = it }
+                            }
                             true
                         }
                         // X (Square) → RetroAchievements games only / all
@@ -473,9 +542,14 @@ fun RomCatalogScreen(
                     }
                 }
         ) {
-            // Search bar is only rendered when explicitly opened so there's
+            // Search bar is only composed when explicitly opened so there's
             // nothing for Android's default focus system to grab on entry.
-            if (searchVisible) {
+            // Grows down from the header and shrinks back into it.
+            AnimatedVisibility(
+                visible = searchVisible,
+                enter = gsExpandIn(reduceMotion),
+                exit = gsShrinkOut(reduceMotion),
+            ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -506,10 +580,23 @@ fun RomCatalogScreen(
                     loading && catalog.isEmpty() -> {
                         CenterLoader(text = "Loading catalog…")
                     }
-                    error != null && catalog.isEmpty() -> {
+                    error != null && catalog.isEmpty() && serverConfigured == false -> {
                         CenterMessage(
-                            title = "Couldn't load catalog",
-                            detail = error ?: "",
+                            title = "No server set",
+                            detail = "Add your GameSync server in Settings to browse its games.",
+                            action = "Open Settings" to { onNavigateToTab(SETTINGS_TAB) },
+                        )
+                    }
+                    error != null && catalog.isEmpty() -> {
+                        // A stays "download the selected row" here (a no-op on
+                        // an empty list), so Retry is touch-only and carries no
+                        // A glyph; a pad user waits for the automatic retry or
+                        // uses Settings → Refresh catalog.
+                        CenterMessage(
+                            title = "Couldn't reach ${serverHostOf(settings.serverUrl)}",
+                            detail = "Check the server is running and on the same network.",
+                            footnotes = listOf(error ?: "", "Retrying when the server comes back"),
+                            action = "Retry" to { viewModel.fetchRomCatalog() },
                         )
                     }
                     filtered.isEmpty() && catalog.isEmpty() -> {
@@ -532,46 +619,39 @@ fun RomCatalogScreen(
                         )
                     }
                     else -> {
-                        LazyColumn(
-                            state = listState,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                            verticalArrangement = Arrangement.spacedBy(4.dp)
-                        ) {
-                            itemsIndexed(
-                                filtered,
-                                key = { _, rom -> "${rom.system}:${rom.rom_id ?: rom.filename}" }
-                            ) { index, rom ->
-                                CatalogRomCard(
-                                    rom = rom,
-                                    isSelected = index == selectedIndex,
-                                    onClick = {
-                                        selectedIndex = index
-                                        confirmTarget = rom
-                                    }
-                                )
-                            }
-                        }
+                        CatalogList(
+                            roms = filtered,
+                            listState = listState,
+                            selectedIndex = { selectedIndex },
+                            onRowClick = { index, rom ->
+                                selectedIndex = index
+                                confirmTarget = rom
+                            },
+                            modifier = Modifier
+                                .gsEdgeBump(follower)
+                                .gsFilterNudge(filterNudge),
+                        )
                     }
                 }
-
-                // Active download overlay (the existing download
-                // pipeline is fire-and-forget on the saves tab; show a
-                // small indicator so the user knows something is
-                // happening without blocking the list).
-                if (downloadState is MainViewModel.RomDownloadState.Downloading) {
-                    val name = (downloadState as MainViewModel.RomDownloadState.Downloading).name
-                    DownloadBanner(name)
-                }
+                if (filtered.isNotEmpty()) GsListScrollEdges(listState)
+                // Over the list while a hold jumps by letter.
+                AlphabetHud(holdNav)
             }
 
             CatalogFooter(total = catalog.size, shown = filtered.size, raOnly = raOnly)
         }
     }
 
-    confirmTarget?.let { rom ->
+    GsDialogHost(confirmTarget) { rom, _ ->
         // A Wii U game's update and DLC are separate titles that are useless
         // apart, so one tap queues the whole set in install order.
         val group = rom.withRelated(catalog)
+        // The real destination and the space left there (read off the main thread).
+        val destination by produceState<MainViewModel.RomDestination?>(null, rom.system) {
+            value = viewModel.romDestination(rom.system)
+        }
+        val totalSize = group.sumOf { it.size }
+        val tooBig = destination?.freeBytes?.let { free -> totalSize > 0 && totalSize > free } == true
         GsDialog(
             title = if (group.size > 1) "Download ${group.size} titles?" else "Download ROM?",
             onDismiss = { confirmTarget = null },
@@ -579,7 +659,7 @@ fun RomCatalogScreen(
                 GsDialogChoice(GsButton.B, "Cancel", { confirmTarget = null }),
                 GsDialogChoice(
                     GsButton.A,
-                    "Download",
+                    if (tooBig) "Download anyway" else "Download",
                     {
                         group.forEach { part ->
                             val extract = part.preferredDownloadExtractFormat()
@@ -623,11 +703,53 @@ fun RomCatalogScreen(
                 if (rom.size > 0) Text("Size: ${formatBytes(rom.size)}", color = GsColors.Dim)
             }
             Spacer(Modifier.height(8.dp))
+            val dest = destination
             Text(
-                "Saves into the ROM folder configured in Settings " +
-                    "(or the system-specific override, if set).",
+                if (dest != null) "To: ${dest.dir.absolutePath}" else "To: the ROM folder set in Settings",
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Muted,
+                color = gsTextMuted(),
+            )
+            dest?.freeBytes?.let { free ->
+                Text(
+                    if (tooBig) "Free: ${formatBytes(free).ifEmpty { "0 B" }} — not enough for ${formatBytes(totalSize)}"
+                    else "Free: ${formatBytes(free).ifEmpty { "0 B" }}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (tooBig) GsColors.WarnText else gsTextMuted(),
+                    fontWeight = if (tooBig) FontWeight.Medium else null,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The catalog rows.  [selectedIndex] is read lazily inside each row's
+ * derivedStateOf, so a D-pad step recomposes only the two rows whose
+ * highlight changes.
+ */
+@Composable
+private fun CatalogList(
+    roms: List<RomEntry>,
+    listState: LazyListState,
+    selectedIndex: () -> Int,
+    onRowClick: (Int, RomEntry) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    LazyColumn(
+        state = listState,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        itemsIndexed(
+            roms,
+            key = { _, rom -> "${rom.system}:${rom.rom_id ?: rom.filename}" }
+        ) { index, rom ->
+            val isSelected by remember(index) { derivedStateOf { selectedIndex() == index } }
+            CatalogRomCard(
+                rom = rom,
+                isSelected = isSelected,
+                onClick = { onRowClick(index, rom) },
             )
         }
     }
@@ -639,7 +761,7 @@ private fun CatalogRomCard(
     isSelected: Boolean,
     onClick: () -> Unit,
 ) {
-    GsListRow(isSelected = isSelected, onClick = onClick) {
+    GsListRow(isSelected = isSelected, onClick = onClick, clickLabel = "Download") {
         SystemBadge(rom.system)
         Column(modifier = Modifier.weight(1f)) {
             Row(
@@ -651,6 +773,7 @@ private fun CatalogRomCard(
                     fontWeight = FontWeight.SemiBold,
                     color = GsColors.Text,
                     maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f, fill = false),
                 )
                 if (rom.hasRa) RaBadge(rom.raIsTitleOnly)
@@ -660,11 +783,13 @@ private fun CatalogRomCard(
                 if (rom.size > 0) append("  ·  ${formatBytes(rom.size)}")
                 append("  ·  ${rom.title_id}")
             }
+            // TextMuted, not Dim: this row may be lifted onto PanelHi.
             Text(
                 subtitle,
                 style = MaterialTheme.typography.bodySmall,
-                color = GsColors.Dim,
+                color = gsTextMuted(),
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Icon(
@@ -673,22 +798,6 @@ private fun CatalogRomCard(
             modifier = Modifier.size(20.dp),
             tint = if (isSelected) GsColors.Accent else GsColors.Muted,
         )
-    }
-}
-
-@Composable
-private fun DownloadBanner(name: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        CircularProgressIndicator(modifier = Modifier.size(18.dp), color = GsColors.Accent)
-        // Now an enqueue confirmation — the actual transfer is running on
-        // the Downloads tab via DownloadManager.
-        Text("Queued $name — open Downloads tab", style = MaterialTheme.typography.bodyMedium)
     }
 }
 
@@ -704,7 +813,15 @@ private fun CatalogFooter(total: Int, shown: Int, raOnly: Boolean = false) {
             text = (if (shown == total) "$total ROMs" else "$shown / $total ROMs") +
                 if (raOnly) "  ·  RA only (X)" else "",
             style = MaterialTheme.typography.labelSmall,
-            color = GsColors.Muted,
+            color = gsTextMuted(),
         )
     }
 }
+
+/** The Downloads tab's index. */
+internal const val DOWNLOADS_TAB = 3
+
+/** The host part of a server URL, for messages ("192.168.1.100"); the URL itself if it has none. */
+internal fun serverHostOf(serverUrl: String): String =
+    runCatching { java.net.URI(serverUrl.trim()).host }.getOrNull()?.takeIf { it.isNotBlank() }
+        ?: serverUrl.trim().ifEmpty { "the server" }

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Android 12+ system splash: the same dark background as the app. -->
+    <style name="Theme.GameSync" parent="Theme.AppCompat.NoActionBar">
+        <item name="android:windowBackground">@color/gs_bg</item>
+        <item name="android:statusBarColor">@color/gs_bg</item>
+        <item name="android:navigationBarColor">@color/gs_bg</item>
+        <item name="android:dialogTheme">@style/Theme.GameSync.Dialog</item>
+        <item name="android:windowSplashScreenBackground">@color/gs_bg</item>
+    </style>
+
+    <!--
+      Dialog windows don't animate: each GsDialog card scales and fades in
+      and out itself (GsDialogMotion), and a window animation would play on
+      top of it.  The window's dim is kept (see GsDialogMotion).  The parent
+      is what Theme.AppCompat inherits for android:dialogTheme.
+    -->
+    <style name="Theme.GameSync.Dialog" parent="android:Theme.Holo.Dialog">
+        <item name="android:windowAnimationStyle">@null</item>
+    </style>
+</resources>

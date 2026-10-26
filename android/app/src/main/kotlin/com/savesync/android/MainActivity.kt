@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -33,7 +34,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,6 +47,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
@@ -51,7 +58,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import androidx.navigation.NavType
+import androidx.navigation.navArgument
 import com.savesync.android.ui.MainViewModel
+import com.savesync.android.ui.SaveDetailState
+import com.savesync.android.ui.SyncState
 import com.savesync.android.ui.screens.DownloadsScreen
 import com.savesync.android.ui.screens.EmulatorsScreen
 import com.savesync.android.ui.screens.InstalledGamesScreen
@@ -60,10 +71,47 @@ import com.savesync.android.ui.screens.SaveDetailScreen
 import com.savesync.android.ui.screens.SavesScreen
 import com.savesync.android.ui.screens.SettingsScreen
 import com.savesync.android.ui.components.GsConfirmDialog
+import com.savesync.android.ui.components.GsDialogHost
 import com.savesync.android.ui.components.LocalServerOnline
+import com.savesync.android.ui.components.LocalServerConfigured
+import com.savesync.android.ui.components.GsNotice
+import com.savesync.android.ui.components.GsNoticeKind
+import com.savesync.android.ui.components.serverCheckMessage
 import com.savesync.android.ui.components.LocalShowButtonHints
-import com.savesync.android.ui.components.rememberShowButtonHints
 import com.savesync.android.ui.theme.SaveSyncTheme
+import com.savesync.android.ui.NAV_TAB_ROUTES
+import com.savesync.android.ui.enter
+import com.savesync.android.ui.exit
+import com.savesync.android.ui.navMotionFor
+import com.savesync.android.sync.heldBackNoticeText
+import com.savesync.android.ui.components.GsChromeFooter
+import androidx.compose.foundation.layout.Box
+import com.savesync.android.ui.components.GsChromeScrollEdges
+import com.savesync.android.ui.components.GsChromeHeader
+import com.savesync.android.ui.components.GsChromeState
+import com.savesync.android.ui.components.GsCountBadge
+import com.savesync.android.ui.components.GsDotBadge
+import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.components.GsTabBadge
+import com.savesync.android.ui.components.LocalGsChrome
+import com.savesync.android.ui.components.chromeKeyFor
+import com.savesync.android.ui.components.GsNotifier
+import com.savesync.android.ui.components.GsSnackbarHost
+import com.savesync.android.ui.components.LocalGsHaptics
+import com.savesync.android.ui.components.LocalGsNotifier
+import com.savesync.android.ui.components.rememberGsHaptics
+import com.savesync.android.ui.components.GsInputMode
+import com.savesync.android.ui.components.GsInputTracker
+import com.savesync.android.ui.components.LocalInputMode
+import com.savesync.android.ui.components.LocalInputTracker
+import com.savesync.android.ui.components.isPhysicalPadKey
+import com.savesync.android.ui.components.rememberGamepadConnected
+import com.savesync.android.ui.theme.LocalHighContrast
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.rememberHighContrast
+import com.savesync.android.ui.theme.rememberReduceMotion
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.runtime.rememberCoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -102,6 +150,9 @@ class MainActivity : ComponentActivity() {
 
     private val _exitRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val exitRequests: SharedFlow<Unit> = _exitRequests
+
+    /** Touch vs pad input (see InputMode.kt); read by MainApp. */
+    val inputTracker = GsInputTracker()
 
     /** Kept current by MainApp: true while a top-level tab is showing. */
     @Volatile
@@ -169,6 +220,27 @@ class MainActivity : ComponentActivity() {
      * keys, which is how its A/B/START work.
      */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Input mode only: which input the user is on decides whether list
+        // rows draw the pad cursor.  The bindings below are unchanged.
+        val reveal = event.action == KeyEvent.ACTION_DOWN &&
+            isPhysicalPadKey(
+                deviceIsVirtual = event.device?.isVirtual,
+                deviceId = event.deviceId,
+                source = event.source,
+                keyCode = event.keyCode,
+                flags = event.flags,
+            ) &&
+            inputTracker.onPadKey()
+        return inputTracker.dispatching(reveal) { dispatchBoundKeyEvent(event) }
+    }
+
+    /** Touch switches the input mode back to Touch; the touch itself is untouched. */
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) inputTracker.onTouchDown()
+        return super.dispatchTouchEvent(ev)
+    }
+
+    private fun dispatchBoundKeyEvent(event: KeyEvent): Boolean {
         val globalDelta: Pair<MutableSharedFlow<Int>, Int>? = when (event.keyCode) {
             KeyEvent.KEYCODE_BUTTON_L1 -> _tabCycleEvents to -1
             KeyEvent.KEYCODE_BUTTON_R1 -> _tabCycleEvents to 1
@@ -308,6 +380,8 @@ class MainActivity : ComponentActivity() {
         axisRepeatJob?.cancel()
         axisRepeatJob = null
         if (dirX == 0 && dirY == 0) return
+        // A stick or HAT means a pad is in hand: show the cursor.
+        inputTracker.onStick()
         // Fire the edge press immediately, then keep pulsing while held.
         emitDpadPulse(dirX, dirY)
         axisRepeatJob = lifecycleScope.launch {
@@ -363,7 +437,7 @@ class MainActivity : ComponentActivity() {
  * Ordered list of top-level tab routes. The index is what [TabSwitchBar]
  * binds to, so any reorder here automatically shifts the selected indicator.
  */
-internal val TAB_ROUTES: List<String> = listOf("saves", "catalog", "installed", "downloads", "settings")
+internal val TAB_ROUTES: List<String> = NAV_TAB_ROUTES
 
 /** The top-level tab a pushed route belongs to, for L1/R1 from inside it. */
 private fun parentTabIndex(route: String?): Int = when {
@@ -417,6 +491,22 @@ private fun MainApp() {
         }
     }
 
+    // Coming back to the app (e.g. after creating the folder in a file
+    // manager) re-checks the emulator save-folder overrides.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    // Bumped on each return to the app: background-sync reports are read then.
+    var resumeTick by remember { mutableIntStateOf(0) }
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshOverrideWarnings()
+                resumeTick++
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
     // START → exit, after asking (A / START again exits, B stays).
     var showExitDialog by remember { mutableStateOf(false) }
     LaunchedEffect(activity) {
@@ -433,27 +523,129 @@ private fun MainApp() {
         navigateToTab(navController, TAB_ROUTES[idx])
     }
 
-    val showHints = rememberShowButtonHints()
+    // One gamepad listener feeds both the hint footer and the input mode.
+    val gamepad = rememberGamepadConnected()
+    val landscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val showHints = gamepad || landscape
+    val inputTracker = activity?.inputTracker
+    SideEffect { inputTracker?.gamepadConnected = gamepad }
+    // Always Pad while a gamepad is connected: touching a handheld's screen
+    // must never hide the cursor the next A press acts on.
+    val inputMode = if (gamepad) GsInputMode.Pad else inputTracker?.lastInput ?: GsInputMode.Touch
+    val reduceMotion = rememberReduceMotion()
+    val highContrast = rememberHighContrast()
+    val haptics = rememberGsHaptics()
+
+    // One snackbar host for the whole app, on MainApp's scope, so a notice
+    // outlives the screen that raised it and never queues behind another.
+    val snackbarHostState = remember { SnackbarHostState() }
+    val appScope = rememberCoroutineScope()
+    val notifier = remember(snackbarHostState, haptics) {
+        GsNotifier(snackbarHostState, appScope, haptics)
+    }
+    // Uploads auto sync held back as suspected rollbacks (SyncWorker): said
+    // once, the next time the app opens.
+    LaunchedEffect(resumeTick, notifier) {
+        val heldBack = viewModel.takeHeldBackUploads()
+        if (heldBack.isNotEmpty()) {
+            notifier.show(GsNotice(GsNoticeKind.Warning, heldBackNoticeText(heldBack)))
+        }
+    }
+    // Unknown (null) until the stored settings are read: treat as configured.
+    val serverConfigured = viewModel.serverConfigured.collectAsState().value != false
+    // Tapping the header's status dot re-checks the server and says what it found.
+    val onServerDotClick: () -> Unit = remember(viewModel, notifier, appScope) {
+        {
+            appScope.launch {
+                val check = viewModel.checkServer()
+                notifier.show(GsNotice(GsNoticeKind.Info, serverCheckMessage(check.serverUrl, check.online)))
+            }
+        }
+    }
+    // The one header and footer (GsChrome.kt): screens publish what they
+    // want in them, keyed by destination.
+    val chrome = remember { GsChromeState() }
+    val chromeKey = chromeKeyFor(currentRoute, backStackEntry?.arguments?.getString("titleId"))
 
     CompositionLocalProvider(
         LocalServerOnline provides serverOnline,
+        LocalServerConfigured provides serverConfigured,
         LocalShowButtonHints provides showHints,
+        LocalInputMode provides inputMode,
+        LocalInputTracker provides inputTracker,
+        LocalReduceMotion provides reduceMotion,
+        LocalHighContrast provides highContrast,
+        LocalGsHaptics provides haptics,
+        LocalGsNotifier provides notifier,
+        LocalGsChrome provides chrome,
     ) {
-        // No Scaffold bars here — each screen draws its own GsTopBar (header
-        // + tab strip + sub-tab chips) and GsFooterHints, so the hints can
-        // follow the screen's state.
-        Scaffold(containerColor = MaterialTheme.colorScheme.background) { padding ->
+        // Persistent chrome: one header and one footer for every screen, so
+        // a transition moves content only and the tab highlight can travel.
+        // The footer follows the screen's own state through its spec; the
+        // Scaffold keeps the snackbar above it.
+        Scaffold(
+            containerColor = MaterialTheme.colorScheme.background,
+            topBar = {
+                // Collected here, so a count change recomposes the header only.
+                val activeDownloads by viewModel.activeDownloadCount.collectAsState()
+                val conflicts by viewModel.conflictTitleIds.collectAsState()
+                val conflictCount = conflicts.size
+                val badges = remember(activeDownloads, conflictCount) { tabBadges(activeDownloads, conflictCount) }
+                GsChromeHeader(
+                    routePattern = currentRoute,
+                    key = chromeKey,
+                    onTabClick = onNavigateToTab,
+                    onBack = { navController.popBackStack() },
+                    badges = badges,
+                    onServerDotClick = onServerDotClick,
+                )
+            },
+            bottomBar = { GsChromeFooter(chromeKey) },
+            snackbarHost = {
+                GsSnackbarHost(
+                    host = snackbarHostState,
+                    onOccludedChange = notifier::setOccludedBottom,
+                )
+            },
+        ) { padding ->
+            // Transitions come from the route pair alone (see NavMotion.kt):
+            // tab content slides the way L1/R1 point (fade on a wrap), push
+            // and pop slide, fade-only under reduced motion.  Enter and
+            // pop-enter share one rule, as do the exits.
+            // Scroll edges sit over the content, under the header and over
+            // the footer, only while the screen says content is under them.
+            Box(Modifier.padding(padding).fillMaxSize()) {
             NavHost(
                 navController = navController,
                 startDestination = TAB_ROUTES[0],
-                modifier = Modifier.padding(padding),
+                modifier = Modifier.fillMaxSize(),
+                enterTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .enter(reduceMotion)
+                },
+                exitTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .exit(reduceMotion)
+                },
+                popEnterTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .enter(reduceMotion)
+                },
+                popExitTransition = {
+                    navMotionFor(initialState.destination.route, targetState.destination.route, reduceMotion)
+                        .exit(reduceMotion)
+                },
             ) {
                 composable(TAB_ROUTES[0]) {
                     SavesScreen(
                         viewModel = viewModel,
                         syncStateEntities = syncStateEntities,
                         onNavigateToDetail = { titleId -> navController.navigate("detail/$titleId") },
+                        // A smart sync that found a conflict opens the
+                        // detail with its conflict card.
+                        onNavigateToConflict = { titleId -> navController.navigate("detail/$titleId?reason=conflict") },
                         onNavigateToTab = onNavigateToTab,
+                        onNavigateToEmulators = { navController.navigate("emulators") },
                     )
                 }
                 composable(TAB_ROUTES[1]) {
@@ -487,24 +679,43 @@ private fun MainApp() {
                         onNavigateBack = { navController.popBackStack() }
                     )
                 }
-                composable("detail/{titleId}") { backStackEntry ->
+                composable(
+                    "detail/{titleId}?reason={reason}",
+                    arguments = listOf(
+                        navArgument("reason") {
+                            type = NavType.StringType
+                            nullable = true
+                            defaultValue = null
+                        },
+                    ),
+                ) { backStackEntry ->
                     val titleId = backStackEntry.arguments?.getString("titleId") ?: return@composable
                     SaveDetailScreen(
                         titleId = titleId,
                         viewModel = viewModel,
                         syncStateEntities = syncStateEntities,
-                        onNavigateBack = { navController.popBackStack() }
+                        onNavigateBack = { navController.popBackStack() },
+                        onNavigateToTab = onNavigateToTab,
+                        openedFromConflict = backStackEntry.arguments?.getString("reason") == "conflict",
                     )
                 }
             }
+            GsChromeScrollEdges(chromeKey)
+            }
         }
 
-        if (showExitDialog) {
+        GsDialogHost(showExitDialog.takeIf { it }) { _, _ ->
+            // A save sync dies with the app (downloads don't): say so.
+            val syncState by viewModel.syncState.collectAsState()
+            val detailState by viewModel.saveDetailState.collectAsState()
+            val syncRunning = syncState is SyncState.Syncing || detailState is SaveDetailState.Working
             GsConfirmDialog(
                 title = "Exit GameSync?",
-                message = "Running downloads keep going in the background.",
-                confirmLabel = "Exit",
+                message = if (syncRunning) "A save sync is still running and will stop if you exit."
+                    else "Running downloads keep going in the background.",
+                confirmLabel = if (syncRunning) "Exit anyway" else "Exit",
                 dismissLabel = "Stay",
+                destructive = syncRunning,
                 startConfirms = true,
                 onConfirm = {
                     showExitDialog = false
@@ -514,6 +725,31 @@ private fun MainApp() {
             )
         }
     }
+}
+
+/**
+ * The tab strip's badges.  Downloads shows how many downloads are running or
+ * queued; the count shown last stays on the capsule while it pops out.
+ * Saves shows an Err dot while saves wait on a conflict decision.
+ */
+private fun tabBadges(activeDownloads: Int, conflicts: Int): Map<Int, GsTabBadge> = mapOf(
+    TAB_ROUTES.indexOf("saves") to GsTabBadge(
+        visible = conflicts > 0,
+        contentDescription = "Saves, $conflicts " + if (conflicts == 1) "conflict" else "conflicts",
+        content = { GsDotBadge(GsColors.Err) },
+    ),
+    TAB_ROUTES.indexOf("downloads") to GsTabBadge(
+        visible = activeDownloads > 0,
+        contentDescription = "Downloads, $activeDownloads active",
+        content = { LastPositiveCount(activeDownloads) },
+    ),
+)
+
+@Composable
+private fun LastPositiveCount(count: Int) {
+    val last = remember { intArrayOf(count) }
+    if (count > 0) last[0] = count
+    GsCountBadge(last[0])
 }
 
 private fun navigateToTab(navController: NavHostController, route: String) {

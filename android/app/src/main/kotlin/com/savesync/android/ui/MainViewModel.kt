@@ -50,10 +50,18 @@ import com.savesync.android.sync.SegaCdSyncFormat
 import com.savesync.android.sync.SaturnSaveFormatConverter
 import com.savesync.android.sync.SyncEngine
 import com.savesync.android.sync.SyncResult
+import com.savesync.android.sync.localSyncHash
+import com.savesync.android.sync.LocalBackup
+import com.savesync.android.sync.LocalBackupStore
+import com.savesync.android.sync.LocalBackups
+import com.savesync.android.sync.localSaveTimestamp
 import com.savesync.android.workers.SyncWorker
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.cancellation.CancellationException
@@ -63,6 +71,9 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -75,10 +86,31 @@ import java.util.concurrent.TimeUnit
 import com.savesync.android.emulators.impl.AetherSX2Emulator
 import com.savesync.android.emulators.Ps2EmulatorChoice
 
+/**
+ * Sync all's preview (SyncEngine.plan): the dialog shows "Checking with the
+ * server…" while [Planning], then the plan; nothing has moved until the
+ * user presses Sync.
+ */
+sealed class SyncPlanState {
+    object Idle : SyncPlanState()
+    /** Asking the server about [count] saves. */
+    data class Planning(val count: Int) : SyncPlanState()
+    data class Ready(val preview: com.savesync.android.sync.SyncPreview, val count: Int) : SyncPlanState()
+    data class Failed(val message: String, val count: Int) : SyncPlanState()
+}
+
 sealed class SyncState {
     object Idle : SyncState()
     object Syncing : SyncState()
-    data class Success(val result: SyncResult) : SyncState()
+    /**
+     * [overrideWarnings]: save-folder overrides that point nowhere, kept out
+     * of [SyncResult.errors] (they are a condition, shown as a banner), but
+     * still named in the Sync-all notice.
+     */
+    data class Success(
+        val result: SyncResult,
+        val overrideWarnings: List<String> = emptyList(),
+    ) : SyncState()
     data class Error(val message: String) : SyncState()
 }
 
@@ -89,8 +121,8 @@ sealed class SyncState {
 enum class SaveSyncStatus(val label: String) {
     /** Local hash matches server hash — fully synced. */
     SYNCED("Synced"),
-    /** Exists locally but never synced / no server copy. */
-    LOCAL_ONLY("Local Only"),
+    /** No last-synced hash on this device, whether or not the server has a copy. */
+    LOCAL_ONLY("Never synced"),
     /** Exists on server but not locally. */
     SERVER_ONLY("Server Only"),
     /** Local changed since last sync, server unchanged → needs upload. */
@@ -99,14 +131,23 @@ enum class SaveSyncStatus(val label: String) {
     SERVER_NEWER("Server Newer"),
     /** Both sides changed since last sync → conflict. */
     CONFLICT("Conflict"),
-    /** No sync state recorded and hashes differ — unknown relationship. */
-    UNKNOWN("Not Synced")
+    /** The save couldn't be hashed, or nothing is known on either side. */
+    UNKNOWN("Unknown")
 }
 
 sealed class SaveDetailState {
     object Idle : SaveDetailState()
-    data class Working(val action: String) : SaveDetailState()
-    data class Success(val message: String, val navigateBack: Boolean = false) : SaveDetailState()
+    /** [titleId]: the save being worked on (its row shows "Syncing…"). */
+    data class Working(val action: String, val titleId: String? = null) : SaveDetailState()
+    /**
+     * [undoTitleId]: a download replaced this title's save and a local copy
+     * was kept, so the notice offers Undo (see [MainViewModel.restoreLatestBackup]).
+     */
+    data class Success(
+        val message: String,
+        val navigateBack: Boolean = false,
+        val undoTitleId: String? = null,
+    ) : SaveDetailState()
     data class Error(val message: String) : SaveDetailState()
 }
 
@@ -147,8 +188,12 @@ sealed class ServerMetaState {
     data class Found(
         val hash: String,
         val sizeBytes: Long,
+        /** When the server's copy was saved (client time first), ms; 0 = unknown. */
         val timestamp: Long,
-        val source: String?
+        /** Which device it came from, as shown under "From". */
+        val source: String,
+        /** Files in the server's copy, when the server says. */
+        val fileCount: Int? = null,
     ) : ServerMetaState()
     object NotFound : ServerMetaState()
     data class Error(val message: String) : ServerMetaState()
@@ -169,6 +214,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val downloads: StateFlow<List<DownloadEntity>> =
         downloadManager.observeAll()
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** Downloads running or waiting to run: the Downloads tab badge. */
+    val activeDownloadCount: StateFlow<Int> =
+        downloads
+            .map { list ->
+                list.count {
+                    it.status == DownloadEntity.Status.DOWNLOADING ||
+                        it.status == DownloadEntity.Status.QUEUED
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
     /** Per-download throttled progress events.  Re-exposed verbatim so the
      *  Downloads screen can collect velocity / sub-second progress without
@@ -208,140 +264,182 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             .stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     /**
-     * Computes the sync status for a save entry by comparing local hash,
-     * server hash, and last-synced hash from the Room database.
-     *
-     * When [cheapOnly] is true, skip the expensive file-hash computation and
-     * only return statuses derivable from metadata (isServerOnly, presence of
-     * lastSyncedHash). Used during composition to avoid disk I/O on the main thread.
+     * Titles waiting on a conflict decision: filled from a Sync all's or a
+     * smart sync's conflicts, cleared by a force upload / download or a sync
+     * that resolves the title.  Their status is Conflict, so the L2/R2 cycle
+     * offers it and the Saves tab shows a dot.  In memory only: the server
+     * reports the conflict again on the next sync.
      */
-    fun computeSyncStatus(
-        entry: SaveEntry,
-        syncState: SyncStateEntity?,
-        cheapOnly: Boolean = false
-    ): SaveSyncStatus {
-        val isSharedYabaSanshiroEntry =
-            entry.systemName == "SAT" &&
-                entry.isServerOnly &&
-                entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+    private val _conflictTitleIds = MutableStateFlow<Set<String>>(emptySet())
+    val conflictTitleIds: StateFlow<Set<String>> = _conflictTitleIds
 
-        if (isSharedYabaSanshiroEntry && entry.saveFile?.exists() == true) {
-            if (syncState?.lastSyncedHash == null) {
-                return SaveSyncStatus.LOCAL_ONLY
-            }
-            if (cheapOnly) return SaveSyncStatus.SYNCED
+    /** The server's details per conflicting title (the conflict card reads them). */
+    private val _conflictInfo = MutableStateFlow<Map<String, com.savesync.android.api.ConflictInfo>>(emptyMap())
+    val conflictInfo: StateFlow<Map<String, com.savesync.android.api.ConflictInfo>> = _conflictInfo
 
-            val localHash = try {
-                val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
-                if (archiveNames.isEmpty() || entry.saveFile?.exists() != true) {
-                    ""
-                } else {
-                    val canonical = SaturnSaveFormatConverter.extractCanonical(
-                        entry.saveFile.readBytes(),
-                        archiveNames
-                    )
-                    HashUtils.sha256Bytes(canonical)
-                }
-            } catch (_: Exception) {
-                ""
-            }
-
-            return if (localHash.isNotEmpty() && localHash != syncState.lastSyncedHash) {
-                SaveSyncStatus.LOCAL_NEWER
-            } else {
-                SaveSyncStatus.SYNCED
-            }
-        }
-        if (entry.isServerOnly) return SaveSyncStatus.SERVER_ONLY
-
-        val lastSyncedHash = syncState?.lastSyncedHash
-        if (lastSyncedHash == null) {
-            // Never synced
-            return SaveSyncStatus.LOCAL_ONLY
-        }
-
-        if (cheapOnly) {
-            // Cheap mode: we know it was synced at least once; assume SYNCED
-            // unless background computation says otherwise.
-            return SaveSyncStatus.SYNCED
-        }
-
-        // Full mode (called from background coroutine in combine transform)
-        val localHash = try { entry.computeHash() } catch (_: Exception) { "" }
-        val localChanged = localHash.isNotEmpty() && localHash != lastSyncedHash
-
-        // Without eagerly fetching server meta for every entry, we can only
-        // tell "local changed since last sync" vs "matches last sync".
-        // The full three-way comparison happens during actual sync.
-        return when {
-            localChanged -> SaveSyncStatus.LOCAL_NEWER
-            else -> SaveSyncStatus.SYNCED
-        }
+    /** Folds a sync's outcome into the conflict set. */
+    private fun applyConflictOutcome(result: SyncResult) {
+        val resolved = result.resolvedTitleIds.toSet()
+        _conflictTitleIds.value = (_conflictTitleIds.value - resolved) + result.conflictTitleIds
+        _conflictInfo.value = (_conflictInfo.value - resolved) + result.conflictInfo
     }
 
-    // Filtered view of saves, derived from _allSaves + _selectedFilter + _searchQuery + _statusFilter + syncStateEntities
-    val saves: StateFlow<List<SaveEntry>> = combine(
+    /** A force upload / download settled [titleId]'s conflict. */
+    private fun clearConflict(titleId: String) {
+        _conflictTitleIds.value = _conflictTitleIds.value - titleId
+        _conflictInfo.value = _conflictInfo.value - titleId
+    }
+
+    /**
+     * Computed statuses, keyed by [StatusKey] (the save's files, its base
+     * hash and the hashing rules), so a filter or search change never
+     * re-hashes and a sync only re-hashes the titles it touched.
+     */
+    private val statusCache = java.util.concurrent.ConcurrentHashMap<StatusKey, SaveSyncStatus>()
+
+    /**
+     * Every save with its status, unfiltered.  Each change first emits what is
+     * known without hashing (server-only, never synced, cached results; the
+     * rest null = "Checking…"), then the hashed statuses — all off the main
+     * thread.  A status is the save's sync hash ([localSyncHash], the one
+     * SyncEngine sends) against its last-synced hash, so a row never says
+     * Synced while the L2/R2 filter would call it Local newer.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val allSaveRows: StateFlow<List<SaveRow>> = combine(
         _allSaves,
-        _selectedFilter,
-        _searchQuery,
-        _statusFilter,
         syncStateEntities,
-        _saturnArchiveSelectionVersion
-    ) { args: Array<*> ->
-        @Suppress("UNCHECKED_CAST")
-        val all = args[0] as List<SaveEntry>
-        val systemFilter = args[1] as String
-        val query = args[2] as String
-        val statusFilter = args[3] as SaveSyncStatus?
-        @Suppress("UNCHECKED_CAST")
-        val syncEntities = args[4] as List<SyncStateEntity>
-        args[5] as Int
-
-        var result = all
-
-        // System filter
-        if (systemFilter != "All") {
-            result = result.filter { it.systemName == systemFilter }
+        _saturnArchiveSelectionVersion,
+        settingsStore.settingsFlow.map { it.saturnSyncFormat }.distinctUntilChanged(),
+        _conflictTitleIds,
+    ) { all, syncEntities, saturnVersion, saturnFormat, conflicts ->
+        StatusInputs(all, syncEntities.associateBy { it.titleId }, "$saturnFormat#$saturnVersion", saturnFormat, conflicts)
+    }.transformLatest { inputs ->
+        val pending = ArrayList<Int>()
+        val keys = arrayOfNulls<StatusKey>(inputs.saves.size)
+        val first = inputs.saves.mapIndexed { i, entry ->
+            val sync = inputs.syncMap[entry.titleId]
+            val cheap = cheapStatusFor(entry, sync, entry.titleId in inputs.conflicts)
+            if (cheap != null) return@mapIndexed SaveRow(entry, cheap)
+            val (mtime, size) = runCatching { entry.statFingerprint() }.getOrDefault(0L to 0L)
+            val key = StatusKey(entry.titleId, mtime, size, sync?.lastSyncedHash, inputs.hashRules)
+            keys[i] = key
+            val cached = statusCache[key]
+            if (cached == null) pending += i
+            SaveRow(entry, cached)
         }
+        emit(first)
+        if (pending.isEmpty()) return@transformLatest
+        val full = first.toMutableList()
+        for (i in pending) {
+            // A newer input supersedes this run (transformLatest): stop
+            // between saves instead of hashing the rest for nothing.  What
+            // was hashed so far stays in the cache.
+            currentCoroutineContext().ensureActive()
+            val entry = inputs.saves[i]
+            val status = fullStatusFor(entry, inputs.syncMap[entry.titleId], inputs.saturnFormat)
+            keys[i]?.let { statusCache[it] = status }
+            full[i] = SaveRow(entry, status)
+        }
+        emit(full)
+    }.flowOn(Dispatchers.IO)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-        // Text search
-        if (query.isNotBlank()) {
-            val q = query.lowercase().trim()
-            result = result.filter { entry ->
-                entry.displayName.lowercase().contains(q) ||
-                entry.titleId.lowercase().contains(q) ||
-                (entry.canonicalName?.lowercase()?.contains(q) == true)
+    private data class StatusInputs(
+        val saves: List<SaveEntry>,
+        val syncMap: Map<String, SyncStateEntity>,
+        val hashRules: String,
+        val saturnFormat: SaturnSyncFormat,
+        val conflicts: Set<String>,
+    )
+
+    /** YabaSanshiro's shared backup.bin listed as a server-only row while it exists locally. */
+    private fun isSharedYabaRow(entry: SaveEntry): Boolean =
+        entry.systemName == "SAT" &&
+            entry.isServerOnly &&
+            entry.saveFile?.name.equals("backup.bin", ignoreCase = true) &&
+            entry.saveFile?.exists() == true
+
+    /** Status known without hashing, or null (see [cheapSyncStatus]). */
+    private fun cheapStatusFor(entry: SaveEntry, sync: SyncStateEntity?, conflict: Boolean): SaveSyncStatus? {
+        // A shared Saturn container is a local save even though it is listed
+        // server-only (SyncEngine syncs it through the archive selection).
+        val serverOnly = entry.isServerOnly && !isSharedYabaRow(entry)
+        return cheapSyncStatus(isServerOnly = serverOnly, lastSyncedHash = sync?.lastSyncedHash, conflict = conflict)
+    }
+
+    /** The hashed status ([localStatus]); runs on the IO dispatcher. */
+    private fun fullStatusFor(entry: SaveEntry, sync: SyncStateEntity?, saturnFormat: SaturnSyncFormat): SaveSyncStatus {
+        val localHash = try {
+            if (isSharedYabaRow(entry)) {
+                val archiveNames = SaturnArchiveStateStore.get(entry.titleId)
+                if (archiveNames.isEmpty()) ""
+                else HashUtils.sha256Bytes(
+                    SaturnSaveFormatConverter.extractCanonical(entry.saveFile!!.readBytes(), archiveNames)
+                )
+            } else {
+                localSyncHash(entry.reconcileWithDisk(), saturnFormat)
             }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            ""
         }
+        return localStatus(localHash, sync?.lastSyncedHash)
+    }
 
-        // Status filter
-        if (statusFilter != null) {
-            val syncMap = syncEntities.associateBy { it.titleId }
-            result = result.filter { entry ->
-                computeSyncStatus(entry, syncMap[entry.titleId]) == statusFilter
-            }
-        }
+    /** The Saves list: [allSaveRows] through the system, search and status filters. */
+    private val saveListView: StateFlow<SaveListView> = combine(
+        allSaveRows, _selectedFilter, _searchQuery, _statusFilter,
+    ) { rows, system, query, status ->
+        filterSaveRows(rows, system, query, status)
+    }.flowOn(Dispatchers.Default)
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SaveListView(emptyList(), 0))
 
-        result
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** Rows the Saves list shows, each with its status (null = still checking). */
+    val saveRows: StateFlow<List<SaveRow>> = saveListView
+        .map { it.rows }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /**
+     * Rows matching the system filter and search whose status is still being
+     * computed while a status filter hides them: the "Checking N saves…" line.
+     */
+    val savesChecking: StateFlow<Int> = saveListView
+        .map { it.checking }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
+    /** The entries of [saveRows]. */
+    val saves: StateFlow<List<SaveEntry>> = saveRows
+        .map { rows -> rows.map { it.entry } }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Every save, unfiltered (the detail screen looks its title up here). */
+    val allSaves: StateFlow<List<SaveEntry>> = _allSaves
+
+    /** Every save's row, unfiltered: the detail header falls back to it. */
+    val allRows: StateFlow<List<SaveRow>> = allSaveRows
 
     // "All" + distinct sorted system names present in _allSaves
     val availableFilters: StateFlow<List<String>> = _allSaves.map { saves ->
         listOf("All") + saves.map { it.systemName }.distinct().sorted()
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), listOf("All"))
 
-    // Status filter options that have at least one matching entry
-    val availableStatusFilters: StateFlow<List<SaveSyncStatus>> = combine(
-        _allSaves, syncStateEntities, _saturnArchiveSelectionVersion
-    ) { allSaves, syncEntities, _ ->
-        val syncMap = syncEntities.associateBy { it.titleId }
-        allSaves.map { computeSyncStatus(it, syncMap[it.titleId]) }
-            .distinct()
-            .sortedBy { it.ordinal }
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    /** Status filter options that at least one save has (computed statuses only). */
+    val availableStatusFilters: StateFlow<List<SaveSyncStatus>> = allSaveRows
+        .map { rows -> rows.mapNotNull { it.status }.distinct().sortedBy { it.ordinal } }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _syncState = MutableStateFlow<SyncState>(SyncState.Idle)
     val syncState: StateFlow<SyncState> = _syncState
+
+    private val _syncPlan = MutableStateFlow<SyncPlanState>(SyncPlanState.Idle)
+    /** Sync all's preview; Idle while its dialog is closed. */
+    val syncPlan: StateFlow<SyncPlanState> = _syncPlan
+    private var syncPlanJob: Job? = null
+    /** The engine that made the plan, so it runs with the same client and console id. */
+    private var syncPlanEngine: SyncEngine? = null
 
     private val _saveDetailState = MutableStateFlow<SaveDetailState>(SaveDetailState.Idle)
     val saveDetailState: StateFlow<SaveDetailState> = _saveDetailState
@@ -370,7 +468,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         object Idle : RomDownloadState()
         data class Downloading(val name: String) : RomDownloadState()
         data class Success(val file: java.io.File) : RomDownloadState()
-        data class Error(val message: String) : RomDownloadState()
+        /**
+         * [retry] re-issues the exact request that failed (null when retrying
+         * can't help, e.g. no server or ROM folder configured).
+         */
+        data class Error(val message: String, val retry: (() -> Unit)? = null) : RomDownloadState()
     }
 
     private val _romDownloadState = MutableStateFlow<RomDownloadState>(RomDownloadState.Idle)
@@ -418,6 +520,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _serverOnline = MutableStateFlow<Boolean?>(null)
     val serverOnline: StateFlow<Boolean?> = _serverOnline
 
+    /**
+     * Emulator key → message for every save-folder override that points
+     * nowhere usable (the fork's missing-override warning; no silent
+     * fallback).  Computed on the IO dispatcher whenever the overrides
+     * change, after each scan and on resume ([refreshOverrideWarnings]), so
+     * no screen reads the disk while composing.
+     */
+    private val _overrideWarnings = MutableStateFlow<Map<String, String>>(emptyMap())
+    val overrideWarnings: StateFlow<Map<String, String>> = _overrideWarnings
+
+    /** Re-checks the save-folder overrides (e.g. the user created the folder meanwhile). */
+    fun refreshOverrideWarnings() {
+        viewModelScope.launch {
+            val overrides = settingsStore.settingsFlow.first().saveDirOverrides
+            _overrideWarnings.value = withContext(Dispatchers.IO) {
+                EmulatorRegistry.saveDirOverrideWarningMap(overrides)
+            }
+        }
+    }
+
     // ── Installed Games tab ─────────────────────────────────────────
     private val _installedRoms = MutableStateFlow<List<InstalledRom>>(emptyList())
     val installedRoms: StateFlow<List<InstalledRom>> = _installedRoms
@@ -450,6 +572,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
 
     /**
+     * Whether a server URL is set: null until the stored settings have been
+     * read.  [settings] starts as an empty Settings(), so checking its URL
+     * would flash "No server set" on every launch.
+     */
+    val serverConfigured: StateFlow<Boolean?> = settingsStore.settingsFlow
+        .map { it.serverUrl.isNotBlank() }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
      * Auto-detected system → folder path, derived by scanning the romScanDir subfolders.
      * Not persisted — refreshed on demand via [detectSystemFolders].
      */
@@ -467,6 +599,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
         }
         scanSaves()
+        // A catalog that failed to load retries by itself once the server is
+        // back (the 30 s ping and the header dot's tap drive this), so a pad
+        // user never has to find a Retry button.
+        viewModelScope.launch {
+            var previous: Boolean? = _serverOnline.value
+            _serverOnline.collect { online ->
+                if (previous == false && online == true && _romCatalogError.value != null) {
+                    fetchRomCatalog()
+                }
+                previous = online
+            }
+        }
+        viewModelScope.launch {
+            settingsStore.settingsFlow
+                .map { it.saveDirOverrides }
+                .distinctUntilChanged()
+                .collect { overrides ->
+                    _overrideWarnings.value = withContext(Dispatchers.IO) {
+                        EmulatorRegistry.saveDirOverrideWarningMap(overrides)
+                    }
+                }
+        }
         // Keep the header's server dot honest: a cheap GET /status now and
         // every 30 s while the app is open.
         viewModelScope.launch {
@@ -479,21 +633,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** One GET /status for the header dot. */
     fun pingServer() {
-        viewModelScope.launch {
-            val current = settingsStore.settingsFlow.first()
-            if (current.serverUrl.isBlank()) {
-                _serverOnline.value = null
-                return@launch
-            }
-            _serverOnline.value = try {
-                ApiClient.create(current.serverUrl, current.apiKey).getStatus()
-                true
-            } catch (e: CancellationException) {
-                throw e
-            } catch (_: Exception) {
-                false
-            }
+        viewModelScope.launch { pingServerNow() }
+    }
+
+    /** What a server check found: the URL it used and the answer. */
+    data class ServerCheck(val serverUrl: String, val online: Boolean?)
+
+    /** [pingServerNow] plus the URL it checked, for the header dot's notice. */
+    suspend fun checkServer(): ServerCheck {
+        val online = pingServerNow()
+        return ServerCheck(settingsStore.settingsFlow.first().serverUrl, online)
+    }
+
+    /**
+     * GET /status now and return the answer: true = online, false = not,
+     * null = no server configured.  Updates the header dot too.
+     */
+    suspend fun pingServerNow(): Boolean? {
+        val current = settingsStore.settingsFlow.first()
+        if (current.serverUrl.isBlank()) {
+            _serverOnline.value = null
+            return null
         }
+        val online = try {
+            ApiClient.create(current.serverUrl, current.apiKey).getStatus()
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            false
+        }
+        _serverOnline.value = online
+        return online
     }
 
     fun setFilter(system: String) {
@@ -514,8 +685,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * True while any save scan runs (scans can overlap: they are counted).
+     * Saves shows a loader instead of "No saves found" while it is true.
+     */
+    private val _savesScanning = MutableStateFlow(false)
+    val savesScanning: StateFlow<Boolean> = _savesScanning
+    /** Scans in flight; only touched on the main thread (viewModelScope). */
+    private var activeSaveScans = 0
+
     fun scanSaves() {
         viewModelScope.launch {
+            activeSaveScans++
+            _savesScanning.value = true
             try {
                 // Use settingsFlow.first() — not settings.value — so we always read the
                 // real persisted DataStore value. settings.value returns the StateFlow's
@@ -528,7 +710,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val emudeckDir = currentSettings.emudeckDir
                 val romDirOverrides = currentSettings.romDirOverrides
                 val saveDirOverrides = currentSettings.saveDirOverrides
-                val rawLocalSaves = EmulatorRegistry.discoverAllSaves(
+                // Walking emulator folders blocks: keep it off the main thread
+                // so the scanning loader can draw.
+                val rawLocalSaves = withContext(Dispatchers.IO) { EmulatorRegistry.discoverAllSaves(
                     overrides = overrides,
                     romScanDir = romScanDir,
                     emudeckDir = emudeckDir,
@@ -539,12 +723,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ps2Emulator = currentSettings.ps2Emulator,
                     beetleSaturnPerCoreFolder = currentSettings.beetleSaturnPerCoreFolder,
                     cdGamesPerContentFolder = currentSettings.cdGamesPerContentFolder
-                )
+                ) }
                     .filterNot { entry -> isEmptyPs1Card(entry) }
                     .map { entry -> overridePs1TitleFromCard(entry) }
 
                 // Discover all ROMs the emulators know about (with expected save paths)
-                val allRomEntries = EmulatorRegistry.discoverAllRomEntries(
+                val allRomEntries = withContext(Dispatchers.IO) { EmulatorRegistry.discoverAllRomEntries(
                     romScanDir = romScanDir,
                     emudeckDir = emudeckDir,
                     romDirOverrides = romDirOverrides,
@@ -554,7 +738,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     ps2Emulator = currentSettings.ps2Emulator,
                     beetleSaturnPerCoreFolder = currentSettings.beetleSaturnPerCoreFolder,
                     cdGamesPerContentFolder = currentSettings.cdGamesPerContentFolder
-                )
+                ) }
 
                 val serverOnlySaves: List<SaveEntry>
                 val localSaves: List<SaveEntry>
@@ -940,8 +1124,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
 
                 _allSaves.value = sortSaves(dedupeAliasedEntries(localSaves + serverOnlySaves))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 _allSaves.value = emptyList()
+            } finally {
+                activeSaveScans--
+                _savesScanning.value = activeSaveScans > 0
+                // A scan is when a missing folder would have mattered.
+                refreshOverrideWarnings()
             }
         }
     }
@@ -2082,51 +2273,97 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun syncNow() {
-        viewModelScope.launch {
+    /**
+     * Sync all: plans a sync of exactly [entries], the local saves the Saves
+     * list shows (see [syncAllTargets]), so the count the dialog names is
+     * what runs.  It used to ignore the search and status filter and sync
+     * every local save of the system, which could download over saves the
+     * user never saw listed.  Nothing moves yet: [syncPlan] carries the
+     * preview the dialog shows, and [runSyncPlan] carries it out.
+     */
+    fun syncNow(entries: List<SaveEntry>) {
+        val localSaves = syncAllTargets(entries)
+        if (localSaves.isEmpty() || _syncState.value is SyncState.Syncing) return
+        syncPlanJob?.cancel()
+        syncPlanEngine = null
+        _syncPlan.value = SyncPlanState.Planning(localSaves.size)
+        syncPlanJob = viewModelScope.launch {
             val currentSettings = settingsStore.settingsFlow.first()
             if (currentSettings.serverUrl.isBlank()) {
+                _syncPlan.value = SyncPlanState.Idle
                 _syncState.value = SyncState.Error("Server URL not configured")
                 return@launch
             }
-
-            _syncState.value = SyncState.Syncing
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
-                // Only sync local saves (exclude server-only entries)
-                val romScanDir = effectiveRomScanDir(currentSettings)
-                val emudeckDir = currentSettings.emudeckDir
-                val romDirOverrides = currentSettings.romDirOverrides
-                val saveDirOverrides = currentSettings.saveDirOverrides
-                val allLocalSaves = _allSaves.value.filter { !it.isServerOnly }.ifEmpty {
-                    EmulatorRegistry.discoverAllSaves(
-                        romScanDir = romScanDir,
-                        emudeckDir = emudeckDir,
-                        romDirOverrides = romDirOverrides,
-                        saveDirOverrides = saveDirOverrides,
-                        saturnSyncFormat = currentSettings.saturnSyncFormat,
-                        segaCdSyncFormat = currentSettings.segaCdSyncFormat,
-                        ps2Emulator = currentSettings.ps2Emulator,
-                        beetleSaturnPerCoreFolder = currentSettings.beetleSaturnPerCoreFolder,
-                        cdGamesPerContentFolder = currentSettings.cdGamesPerContentFolder
-                    ).also { found ->
-                        _allSaves.value = found
-                    }
-                }
-                // Respect the active system filter — "All" syncs everything,
-                // any other filter scopes the sync to that system only.
-                val activeFilter = _selectedFilter.value
-                val localSaves = if (activeFilter == "All") allLocalSaves
-                                 else allLocalSaves.filter { it.systemName == activeFilter }
-                val result = engine.sync(localSaves)
-                // A broken save-folder override silently yields "nothing to
-                // sync" for that emulator; say so instead.
-                val overrideWarnings = EmulatorRegistry.saveDirOverrideWarnings(saveDirOverrides)
-                _syncState.value = SyncState.Success(
-                    result.copy(errors = overrideWarnings + result.errors)
+                // Hashing reads every save: off the main thread.
+                val preview = withContext(Dispatchers.IO) { engine.plan(localSaves) }
+                syncPlanEngine = engine
+                _syncPlan.value = SyncPlanState.Ready(preview, localSaves.size)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _syncPlan.value = SyncPlanState.Failed(e.message ?: "Couldn't check with the server", localSaves.size)
+            }
+        }
+    }
+
+    /** Closes Sync all's preview without syncing anything. */
+    fun cancelSyncPlan() {
+        syncPlanJob?.cancel()
+        syncPlanJob = null
+        syncPlanEngine = null
+        _syncPlan.value = SyncPlanState.Idle
+    }
+
+    /**
+     * Runs the plan the preview showed.  Suspected rollbacks stay out unless
+     * they are in [includeSuspects]; a plan the user sat on is re-checked
+     * by the engine first, so a save that changed meanwhile is skipped.
+     */
+    fun runSyncPlan(includeSuspects: Set<String>) {
+        val ready = _syncPlan.value as? SyncPlanState.Ready ?: return
+        val engine = syncPlanEngine ?: return
+        syncPlanJob = null
+        syncPlanEngine = null
+        _syncPlan.value = SyncPlanState.Idle
+        if (ready.preview.actionableCount(includeSuspects = includeSuspects) == 0) {
+            // "Done": nothing to move.  Conflicts the plan found still
+            // become findable (banner, tab dot, filter); no notice.
+            val conflicts = ready.preview.titles.filter { it.action == com.savesync.android.sync.PlannedAction.CONFLICT }
+            applyConflictOutcome(
+                SyncResult(
+                    uploaded = 0,
+                    downloaded = 0,
+                    conflicts = conflicts.map { it.displayName },
+                    errors = emptyList(),
+                    conflictTitleIds = conflicts.map { it.titleId },
+                    resolvedTitleIds = ready.preview.titles
+                        .filter { it.action == com.savesync.android.sync.PlannedAction.UP_TO_DATE }
+                        .map { it.titleId },
+                    conflictInfo = ready.preview.conflictInfo,
                 )
+            )
+            return
+        }
+        viewModelScope.launch {
+            _syncState.value = SyncState.Syncing
+            try {
+                val saveDirOverrides = settingsStore.settingsFlow.first().saveDirOverrides
+                val result = withContext(Dispatchers.IO) {
+                    engine.execute(ready.preview, emptySet(), includeSuspects)
+                }
+                applyConflictOutcome(result)
+                // A broken save-folder override silently yields "nothing to
+                // sync" for that emulator; say so — as a warning, not an error.
+                val overrideWarnings = withContext(Dispatchers.IO) {
+                    EmulatorRegistry.saveDirOverrideWarningMap(saveDirOverrides)
+                }
+                _overrideWarnings.value = overrideWarnings
+                if (result.downloaded > 0) _backupsVersion.value++
+                _syncState.value = SyncState.Success(result, overrideWarnings.values.toList())
                 // Refresh list so downloaded server-only entries drop the isServerOnly flag
                 // and status icons reflect the new sync state
                 scanSaves()
@@ -2136,78 +2373,120 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * Uploads the background worker held back since the app last looked
+     * (see SyncWorker), read once; empty when there were none.
+     */
+    suspend fun takeHeldBackUploads(): List<String> = withContext(Dispatchers.IO) {
+        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.take() }.getOrDefault(emptyList())
+    }
+
     /** Scans romScanDir subfolders and populates [detectedSystemFolders]. */
     fun detectSystemFolders() {
         viewModelScope.launch {
             val romScanDir = effectiveRomScanDir(settingsStore.settingsFlow.first())
-            _detectedSystemFolders.value = EmulatorRegistry.detectSystemFolders(romScanDir)
+            _detectedSystemFolders.value = withContext(Dispatchers.IO) {
+                EmulatorRegistry.detectSystemFolders(romScanDir)
+            }
         }
     }
 
     /** Persists a per-system ROM folder override and triggers a rescan. */
-    fun setRomDirOverride(system: String, path: String) {
+    fun setRomDirOverride(system: String, path: String): Job =
         viewModelScope.launch {
             settingsStore.setRomDirOverride(system, path)
             scanSaves()
         }
-    }
 
     /** Removes a per-system override (reverts to auto-detected folder) and triggers a rescan. */
-    fun clearRomDirOverride(system: String) {
+    fun clearRomDirOverride(system: String): Job =
         viewModelScope.launch {
             settingsStore.clearRomDirOverride(system)
             scanSaves()
         }
+
+    // ── Settings: each control commits on its own ──────────────────────────
+    //
+    // Every setter writes only its own field (SettingsStore.updateSettings
+    // takes partial params) and returns the Job, so the screen can show
+    // "Saved" once the write has landed.  Folder and format changes rescan;
+    // auto-sync changes reschedule the worker; connection changes rebuild the
+    // API client and ping the server, never a rescan.
+
+    /** The stored settings, read once (the [settings] StateFlow starts as defaults). */
+    suspend fun loadSettings(): Settings = settingsStore.settingsFlow.first()
+
+    /** Commits the server URL and/or API key: client rebuild + ping, no rescan. */
+    fun commitServerConnection(serverUrl: String? = null, apiKey: String? = null): Job =
+        viewModelScope.launch {
+            if (serverUrl == null && apiKey == null) return@launch
+            settingsStore.updateSettings(serverUrl = serverUrl, apiKey = apiKey)
+            ApiClient.invalidate()
+            pingServerNow()
+        }
+
+    /** Turns auto sync on or off and (re)schedules the background worker. */
+    fun setAutoSync(enabled: Boolean): Job = viewModelScope.launch {
+        settingsStore.updateSettings(autoSyncEnabled = enabled)
+        val current = settingsStore.settingsFlow.first()
+        scheduleOrCancelAutoSync(enabled, current.autoSyncIntervalMinutes)
     }
 
-    fun saveSettings(
-        serverUrl: String,
-        apiKey: String,
-        autoSync: Boolean,
-        intervalMinutes: Int,
-        romScanDir: String = "",
-        emudeckDir: String = "",
-        saturnSyncFormat: SaturnSyncFormat = SaturnSyncFormat.MEDNAFEN,
-        beetleSaturnPerCoreFolder: Boolean = true,
-        cdGamesPerContentFolder: Boolean = false,
-        segaCdSyncFormat: SegaCdSyncFormat = SegaCdSyncFormat.GENESIS_PLUS_GX,
-        ps2Emulator: Ps2EmulatorChoice = Ps2EmulatorChoice.AETHERSX2
-    ) {
-        viewModelScope.launch {
-            settingsStore.updateSettings(
-                serverUrl = serverUrl,
-                apiKey = apiKey,
-                autoSyncEnabled = autoSync,
-                autoSyncIntervalMinutes = intervalMinutes,
-                romScanDir = romScanDir,
-                emudeckDir = emudeckDir,
-                saturnSyncFormat = saturnSyncFormat,
-                beetleSaturnPerCoreFolder = beetleSaturnPerCoreFolder,
-                cdGamesPerContentFolder = cdGamesPerContentFolder,
-                segaCdSyncFormat = segaCdSyncFormat,
-                ps2Emulator = ps2Emulator
-            )
-            ApiClient.invalidate()
-            scheduleOrCancelAutoSync(autoSync, intervalMinutes)
-            scanSaves()
+    /** Changes the auto-sync interval; reschedules only while auto sync is on. */
+    fun setAutoSyncInterval(minutes: Int): Job = viewModelScope.launch {
+        settingsStore.updateSettings(autoSyncIntervalMinutes = minutes)
+        val current = settingsStore.settingsFlow.first()
+        if (current.autoSyncEnabled) scheduleOrCancelAutoSync(true, minutes)
+    }
+
+    /** ROM directory (blank clears it); rescans and re-detects system folders. */
+    fun setRomScanDir(path: String): Job = viewModelScope.launch {
+        settingsStore.updateSettings(romScanDir = path)
+        afterFolderChange()
+    }
+
+    /** Emudeck folder (blank clears it); rescans and re-detects system folders. */
+    fun setEmudeckDir(path: String): Job = viewModelScope.launch {
+        settingsStore.updateSettings(emudeckDir = path)
+        afterFolderChange()
+    }
+
+    fun setSaturnSyncFormat(format: SaturnSyncFormat): Job = viewModelScope.launch {
+        settingsStore.updateSettings(saturnSyncFormat = format)
+        scanSaves()
+    }
+
+    fun setSegaCdSyncFormat(format: SegaCdSyncFormat): Job = viewModelScope.launch {
+        settingsStore.updateSettings(segaCdSyncFormat = format)
+        scanSaves()
+    }
+
+    fun setPs2Emulator(choice: Ps2EmulatorChoice): Job = viewModelScope.launch {
+        settingsStore.updateSettings(ps2Emulator = choice)
+        scanSaves()
+    }
+
+    private suspend fun afterFolderChange() {
+        val romScanDir = effectiveRomScanDir(settingsStore.settingsFlow.first())
+        _detectedSystemFolders.value = withContext(Dispatchers.IO) {
+            EmulatorRegistry.detectSystemFolders(romScanDir)
         }
+        scanSaves()
     }
 
     /** Persists a per-emulator save folder override and triggers a rescan. */
-    fun setSaveDirOverride(emulatorKey: String, path: String) {
+    fun setSaveDirOverride(emulatorKey: String, path: String): Job =
         viewModelScope.launch {
             settingsStore.setSaveDirOverride(emulatorKey, path)
             scanSaves()
         }
-    }
 
     /** Removes a per-emulator save folder override and triggers a rescan. */
-    fun clearSaveDirOverride(emulatorKey: String) {
+    fun clearSaveDirOverride(emulatorKey: String): Job =
         viewModelScope.launch {
             settingsStore.clearSaveDirOverride(emulatorKey)
             scanSaves()
         }
-    }
 
     /**
      * Persists just the two RetroArch-specific toggles, used by
@@ -2274,7 +2553,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     hash = meta.save_hash ?: "—",
                     sizeBytes = meta.save_size ?: 0L,
                     timestamp = parseServerDisplayTimestamp(meta),
-                    source = meta.platform
+                    source = serverSourceLabel(meta.last_sync_source, meta.platform, meta.console_id),
+                    fileCount = meta.file_count,
                 )
             } catch (e: retrofit2.HttpException) {
                 _serverMeta.value = if (e.code() == 404) ServerMetaState.NotFound
@@ -2285,21 +2565,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * "Saved at": the client's timestamp (when the save was made on the
+     * device that uploaded it), falling back to when the server stored it.
+     */
     private fun parseServerDisplayTimestamp(meta: com.savesync.android.api.SaveMeta): Long {
+        val raw = meta.client_timestamp ?: 0L
+        val client = when {
+            raw <= 0L -> 0L
+            raw in 946684800000L..4102444800000L -> raw
+            raw in 946684800L..4102444800L -> raw * 1000L
+            else -> 0L
+        }
+        if (client > 0L) return client
         meta.server_timestamp?.let { iso ->
             try {
                 return OffsetDateTime.parse(iso).toInstant().toEpochMilli()
             } catch (_: DateTimeParseException) {
             }
         }
+        return 0L
+    }
 
-        val raw = meta.client_timestamp ?: return 0L
-        return when {
-            raw <= 0L -> 0L
-            raw in 946684800000L..4102444800000L -> raw
-            raw in 946684800L..4102444800L -> raw * 1000L
-            else -> 0L
-        }
+    /** When [entry] last changed on this device (the timestamp sync sends); off the main thread. */
+    suspend fun detailModifiedAt(entry: SaveEntry): Long = withContext(Dispatchers.IO) {
+        val format = settingsStore.settingsFlow.first().saturnSyncFormat
+        runCatching { localSaveTimestamp(entry, format) }.getOrDefault(0L)
     }
 
     fun clearServerMeta() {
@@ -2464,14 +2755,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             entry.saveFile?.exists() == true
     }
 
-    fun detailLocalHash(entry: SaveEntry): String? {
+    /**
+     * The save's sync hash for the detail screen — the same hash SyncEngine
+     * sends, so the header's three-way status matches what sync would do.
+     * Reads files: call off the main thread.
+     */
+    suspend fun detailLocalHash(entry: SaveEntry): String? = withContext(Dispatchers.IO) {
+        detailLocalHashBlocking(entry, settingsStore.settingsFlow.first().saturnSyncFormat)
+    }
+
+    private fun detailLocalHashBlocking(entry: SaveEntry, saturnFormat: SaturnSyncFormat): String? {
         val isSharedYabaSanshiroEntry =
             entry.systemName == "SAT" &&
                 entry.isServerOnly &&
                 entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
 
         if (!isSharedYabaSanshiroEntry) {
-            return try { entry.computeHash().ifBlank { null } } catch (_: Exception) { null }
+            return try { localSyncHash(entry, saturnFormat).ifBlank { null } } catch (_: Exception) { null }
         }
 
         if (entry.saveFile?.exists() != true) return null
@@ -2678,6 +2978,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * The title a single-save action (smart sync, force upload / download,
+     * restore) is working on, so its row shows "Syncing…"; null when idle.
+     * Derived from [saveDetailState], so every way an action ends clears it.
+     */
+    val syncingTitleId: StateFlow<String?> = _saveDetailState
+        .map { (it as? SaveDetailState.Working)?.titleId }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
     fun syncSave(entry: SaveEntry) {
         viewModelScope.launch {
             val currentSettings = settingsStore.settingsFlow.first()
@@ -2691,7 +3001,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("sync")
+            _saveDetailState.value = SaveDetailState.Working("sync", entry.titleId)
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
@@ -2702,14 +3012,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
+                val backupBefore = latestBackupDir(entry.titleId)
                 val result = engine.sync(listOf(entry))
+                applyConflictOutcome(result)
+                // A download that replaced an existing save kept a copy: offer Undo.
+                val backedUp = result.downloaded > 0 && latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
+                if (backedUp) _backupsVersion.value++
                 val msg = buildString {
                     if (result.uploaded > 0) append("↑ Uploaded to server. ")
-                    if (result.downloaded > 0) append("↓ Downloaded from server. ")
+                    if (result.downloaded > 0) {
+                        append(if (backedUp) "Replaced with the server's save · backup kept. " else "↓ Downloaded from server. ")
+                    }
                     if (result.conflicts.isNotEmpty()) append("⚠ Conflict detected — use Upload or Download to force. ")
                     if (result.errors.isNotEmpty()) append("✗ Error: ${result.errors.first()}. ")
+                    // Rollback protection: a much smaller save (or one with
+                    // fewer files) is never uploaded without being asked.
+                    if (result.skippedSuspects.isNotEmpty()) {
+                        append("Not uploaded: this save is much smaller than the server's copy. ")
+                        append("Use Force Upload if it is the one you want. ")
+                    }
                     if (result.uploaded == 0 && result.downloaded == 0
-                        && result.conflicts.isEmpty() && result.errors.isEmpty()) {
+                        && result.conflicts.isEmpty() && result.errors.isEmpty()
+                        && result.skippedSuspects.isEmpty()) {
                         append("Already in sync with server.")
                     }
                 }
@@ -2719,7 +3043,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 // rescan so the list stops treating it as "nothing local" — the
                 // stale flag is what made a later smart sync overwrite newer play.
                 if (result.uploaded > 0 || result.downloaded > 0) scanSaves()
-                _saveDetailState.value = SaveDetailState.Success(msg.trim())
+                _saveDetailState.value = SaveDetailState.Success(
+                    msg.trim(),
+                    undoTitleId = entry.titleId.takeIf { backedUp && result.errors.isEmpty() },
+                )
             } catch (e: Exception) {
                 _saveDetailState.value = SaveDetailState.Error(e.message ?: "Sync failed")
             }
@@ -2775,7 +3102,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _saveDetailState.value = SaveDetailState.Error("Server URL not configured")
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("upload")
+            _saveDetailState.value = SaveDetailState.Working("upload", entry.titleId)
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
@@ -2788,6 +3115,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val ok = engine.uploadSave(entry)
                 if (ok) {
+                    clearConflict(entry.titleId)
                     engine.recordSyncedState(entry)
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()  // refresh status icons in the list
@@ -2815,29 +3143,98 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 return@launch
             }
-            _saveDetailState.value = SaveDetailState.Working("download")
+            _saveDetailState.value = SaveDetailState.Working("download", entry.titleId)
             try {
                 val consoleId = settingsStore.ensureConsoleId()
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
+                val backupBefore = latestBackupDir(entry.titleId)
                 val ok = engine.downloadSave(entry, entry.titleId)
+                var backedUp = false
                 if (ok) {
+                    clearConflict(entry.titleId)
                     engine.recordSyncedStateFromFile(entry)
+                    backedUp = latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
+                    if (backedUp) _backupsVersion.value++
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()
                 }
+                // The RetroArch save-state caveat lives in the confirm dialog now.
                 _saveDetailState.value = if (ok)
                     SaveDetailState.Success(
-                        "↓ Downloaded successfully.\n\n" +
-                        "⚠ Make sure RetroArch is fully closed before opening the game — " +
-                        "if RetroArch auto-loaded a save state when you last closed it, " +
-                        "load the game once and use RetroArch's Load State menu to discard it, " +
-                        "or delete the .state file from the saves folder."
+                        if (backedUp) "Replaced with the server's save · backup kept" else "Downloaded the server's save",
+                        undoTitleId = entry.titleId.takeIf { backedUp },
                     )
                 else
                     SaveDetailState.Error("No save found on server")
             } catch (e: Exception) {
                 _saveDetailState.value = SaveDetailState.Error(e.message ?: "Download failed")
+            }
+        }
+    }
+
+    // ── Local backups (sync/LocalBackups.kt) ──────────────────────────
+
+    /** Bumped whenever a backup is taken or restored, so the detail re-reads its latest one. */
+    private val _backupsVersion = MutableStateFlow(0)
+    val backupsVersion: StateFlow<Int> = _backupsVersion
+
+    private suspend fun latestBackupDir(titleId: String): File? = withContext(Dispatchers.IO) {
+        runCatching { LocalBackups.store.latest(titleId)?.dir }.getOrNull()
+    }
+
+    /** The newest local copy of [titleId]'s save, or null; reads the disk off the main thread. */
+    suspend fun latestBackup(titleId: String): LocalBackup? = withContext(Dispatchers.IO) {
+        runCatching { LocalBackups.store.latest(titleId) }.getOrNull()
+    }
+
+    /** Whether [entry] is a RetroArch save (its auto-loaded save states can undo a download). */
+    fun isRetroArchEntry(entry: SaveEntry): Boolean {
+        val path = (entry.saveFile ?: entry.saveDir)?.absolutePath ?: return false
+        val override = settings.value.saveDirOverrides[RetroArchEmulator.EMULATOR_KEY]
+            ?.takeIf { it.isNotBlank() }
+        return path.contains("retroarch", ignoreCase = true) ||
+            (override != null && path.startsWith(File(override).absolutePath))
+    }
+
+    /**
+     * Undo of a download, and Save detail's "Restore previous copy": puts the
+     * newest local copy of [titleId]'s save back and restores the sync base it
+     * had then (never the restored file's hash — see [LocalBackupStore.restore]),
+     * so the next sync sees what the user had before.  The save it replaces is
+     * kept as a copy too.
+     */
+    fun restoreLatestBackup(titleId: String) {
+        viewModelScope.launch {
+            val entry = _allSaves.value.firstOrNull { it.titleId == titleId }?.reconcileWithDisk()
+            if (entry == null) {
+                _saveDetailState.value = SaveDetailState.Error("This save isn't listed any more — rescan, then try again")
+                return@launch
+            }
+            _saveDetailState.value = SaveDetailState.Working("restore", titleId)
+            try {
+                val restored = withContext(Dispatchers.IO) {
+                    val store = LocalBackups.store
+                    val backup = store.latest(titleId) ?: return@withContext null
+                    val target = (if (backup.isDirectory) entry.saveDir else entry.saveFile)
+                        ?: return@withContext null
+                    if (store.restore(titleId, target, db.syncStateDao(), backup, entry.displayName, entry.systemName)) backup
+                    else null
+                }
+                _backupsVersion.value++
+                if (restored == null) {
+                    _saveDetailState.value = SaveDetailState.Error("No local copy to put back")
+                } else {
+                    fetchServerMeta(entry.titleId, entry.systemName)
+                    scanSaves()
+                    _saveDetailState.value = SaveDetailState.Success(
+                        "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}"
+                    )
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _saveDetailState.value = SaveDetailState.Error(e.message ?: "Restore failed")
             }
         }
     }
@@ -2906,7 +3303,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 )
                 _romDownloadState.value = RomDownloadState.Downloading(displayName)
             } catch (e: Exception) {
-                _romDownloadState.value = RomDownloadState.Error(e.message ?: "Download failed")
+                _romDownloadState.value = RomDownloadState.Error(
+                    e.message ?: "Download failed",
+                    retry = { downloadRom(romId, system, filename, extractFormat, bundleKind) },
+                )
             }
         }
     }
@@ -2944,6 +3344,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearFinishedDownloads() {
         downloadManager.clearFinishedAsync()
+    }
+
+    /**
+     * Clears finished downloads and returns the removed rows, so the notice
+     * can offer Undo.  The rows live only in that Undo action; nothing on
+     * disk is deleted.
+     */
+    suspend fun clearFinishedDownloadsForUndo(): List<DownloadEntity> =
+        downloadManager.clearFinishedReturningAsync().await()
+
+    fun restoreDownloadRows(rows: List<DownloadEntity>) {
+        downloadManager.restoreRowsAsync(rows)
+    }
+
+    /** Where a catalog download for [system] will land, and the space free there. */
+    data class RomDestination(val dir: File, val freeBytes: Long?)
+
+    /** Resolves [system]'s ROM folder the way the download will (off the main thread). */
+    suspend fun romDestination(system: String): RomDestination? = withContext(Dispatchers.IO) {
+        val current = settingsStore.settingsFlow.first()
+        val scanDir = effectiveRomScanDir(current)
+        if (scanDir.isBlank()) return@withContext null
+        val dir = InstalledRomsScanner.resolveRomTargetDir(File(scanDir), system, current.romDirOverrides)
+        // The folder may not exist yet: measure the nearest one that does.
+        var probe: File? = dir
+        while (probe != null && !probe.isDirectory) probe = probe.parentFile
+        val free = probe?.let { runCatching { android.os.StatFs(it.absolutePath).availableBytes }.getOrNull() }
+        RomDestination(dir, free)
     }
 
     /**

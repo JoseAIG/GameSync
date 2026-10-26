@@ -62,6 +62,52 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.savesync.android.ui.theme.GsColors
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.material.ripple.rememberRipple
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material3.Icon
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.max
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
+import androidx.compose.foundation.ScrollState
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.DialogWindowProvider
+import kotlinx.coroutines.delay
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.runtime.State
+import androidx.compose.ui.graphics.graphicsLayer
+import com.savesync.android.ui.theme.GsElevation
+import com.savesync.android.ui.theme.GsMotion
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.GsShapes
+import com.savesync.android.ui.theme.LocalHighContrast
+import com.savesync.android.ui.theme.gsDim
+import com.savesync.android.ui.theme.gsTextMuted
+import com.savesync.android.ui.theme.textVariantOf
 
 // ── Controller glyphs ─────────────────────────────────────────────────────
 
@@ -77,15 +123,29 @@ enum class GsButton(val label: String, val color: Color?, val round: Boolean) {
     SELECT("SELECT", null, false),
     START("START", null, false),
     DPAD("D-pad", null, false),
+    ;
+
+    /** How TalkBack says this input in a hint ("A: Sync", "L2 or R2: Filter"). */
+    val spoken: String
+        get() = when (this) {
+            L2R2 -> "L2 or R2"
+            SELECT -> "Select"
+            START -> "Start"
+            else -> label
+        }
 }
 
 /** Coloured round A/B/X/Y glyph, or a grey rounded-rect shoulder/menu glyph. */
 @Composable
 fun ButtonGlyph(button: GsButton, modifier: Modifier = Modifier) {
     if (button.round) {
+        // Grows with the font scale so the letter never overflows the circle.
+        val diameter = max(20.dp, with(LocalDensity.current) { (11.sp * 1.8f).toDp() })
         Box(
             modifier = modifier
-                .size(20.dp)
+                // Decorative: the hint or choice it sits in carries the words.
+                .clearAndSetSemantics {}
+                .size(diameter)
                 .clip(CircleShape)
                 .background(button.color ?: GsColors.PanelHi),
             contentAlignment = Alignment.Center,
@@ -100,6 +160,8 @@ fun ButtonGlyph(button: GsButton, modifier: Modifier = Modifier) {
     } else {
         Box(
             modifier = modifier
+                .clearAndSetSemantics {}
+                .heightIn(min = 18.dp)
                 .clip(RoundedCornerShape(5.dp))
                 .background(GsColors.PanelHi)
                 .border(1.dp, GsColors.Line, RoundedCornerShape(5.dp))
@@ -165,18 +227,20 @@ private fun hasGamepad(): Boolean = try {
 
 /**
  * The controller-hint footer: coloured A/B/X/Y glyphs plus a label each,
- * changing per tab.  Draws nothing when [LocalShowButtonHints] is off.
+ * changing per screen.  Draws nothing when [LocalShowButtonHints] is off.
  */
 @Composable
 fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
+    // Drawn once, as MainApp's Scaffold bottomBar (GsChrome.kt), so the
+    // Scaffold already keeps the snackbar above it.
     if (!LocalShowButtonHints.current || hints.isEmpty()) return
-    Column(modifier = modifier.fillMaxWidth().background(GsColors.Bg2)) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(GsColors.Line)
-        )
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(GsColors.Bg2),
+    ) {
+        // No rule over the hints: content draws a scroll edge there while
+        // more of it is below (GsChromeScrollEdges / GsListScrollEdges).
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -186,14 +250,21 @@ fun GsFooterHints(hints: List<GsHint>, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             hints.forEach { hint ->
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                // One node per hint, read as "A: Sync".
+                Row(
+                    modifier = Modifier.clearAndSetSemantics {
+                        contentDescription = "${hint.button.spoken}: ${hint.label}"
+                    },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     ButtonGlyph(hint.button)
                     Spacer(Modifier.width(5.dp))
                     Text(
                         hint.label,
-                        color = GsColors.Dim,
+                        color = gsDim(),
                         style = MaterialTheme.typography.labelMedium,
                         maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -213,11 +284,66 @@ fun Modifier.gsFocusRing(shape: Shape = RoundedCornerShape(20.dp)): Modifier = c
         .border(2.dp, if (focused) GsColors.Accent2 else Color.Transparent, shape)
 }
 
+/**
+ * A small visual (a tab pill, a filter chip) inside a touch target at least
+ * 48×48dp, so it is easy to hit without looking bigger.  The ripple is drawn
+ * on the visual: [visual] must apply the modifier it is given.
+ */
+@Composable
+fun GsHitTarget(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    role: Role = Role.Button,
+    visual: @Composable (indication: Modifier) -> Unit,
+) {
+    val source = remember { MutableInteractionSource() }
+    Box(
+        modifier = modifier
+            .heightIn(min = 48.dp)
+            .widthIn(min = 48.dp)
+            .clickable(interactionSource = source, indication = null, role = role, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        visual(Modifier.indication(source, rememberRipple()))
+    }
+}
+
+/**
+ * A fixed 48dp header slot that shows a 20dp spinner while [busy], else
+ * [content] (normally an IconButton), cross-fading between the two.  Every
+ * header busy indicator lives in one, so nothing shifts under the finger.
+ */
+@Composable
+fun GsActionSlot(busy: Boolean, content: @Composable () -> Unit) {
+    Crossfade(
+        targetState = busy,
+        animationSpec = GsMotion.fade(),
+        modifier = Modifier.size(48.dp),
+        label = "actionSlot",
+    ) { showBusy ->
+        Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+            if (showBusy) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                    color = GsColors.Accent,
+                )
+            } else {
+                content()
+            }
+        }
+    }
+}
+
 // ── Rows, pills, banners ──────────────────────────────────────────────────
 
 /**
- * A list row on a panel.  The selected row (gamepad cursor) is lifted to
- * PANEL_HI with a teal selection bar down its left edge.
+ * A list row on a panel.  In Pad mode ([LocalInputMode]) the selected row
+ * (gamepad cursor) is lifted to PANEL_HI with a teal selection bar down its
+ * left edge, drawn instantly on the press that moved it.  In Touch mode
+ * [isSelected] is ignored, so a phone doesn't show row 0 permanently
+ * "selected".  Both modes show a press state — a handheld's screen is
+ * touched in Pad mode too: PANEL_HI on press-down and a slight scale.
  */
 @Composable
 fun GsListRow(
@@ -225,26 +351,52 @@ fun GsListRow(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     containerColor: Color = GsColors.Panel,
+    /** TalkBack's name for a tap on the row ("Download", "Manage", "Open details"). */
+    clickLabel: String? = null,
+    /** The row's state as TalkBack reads it — normally its status pill's text. */
+    stateDescription: String? = null,
     content: @Composable RowScope.() -> Unit,
 ) {
-    val shape = RoundedCornerShape(8.dp)
+    val shape = GsShapes.Row
+    val selected = isSelected && LocalInputMode.current == GsInputMode.Pad
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale = rememberPressScale(pressed, GS_ROW_PRESS_SCALE)
+    // High contrast: the selection border goes from Accent@55% to solid.
+    val selectedBorder = if (LocalHighContrast.current) GsColors.Accent else GsColors.Accent.copy(alpha = 0.55f)
+    val rowState = rowStateDescription(stateDescription, selected)
     Row(
         modifier = modifier
             .fillMaxWidth()
             .height(IntrinsicSize.Min)
+            .graphicsLayer {
+                val s = scale.value
+                scaleX = s
+                scaleY = s
+            }
             .clip(shape)
-            .background(if (isSelected) GsColors.PanelHi else containerColor)
+            .background(if (selected || pressed) GsColors.PanelHi else containerColor)
             .then(
-                if (isSelected) Modifier.border(1.dp, GsColors.Accent.copy(alpha = 0.55f), shape)
+                if (selected) Modifier.border(1.dp, selectedBorder, shape)
                 else Modifier
             )
-            .clickable(onClick = onClick),
+            // One TalkBack node per row: its texts, then its state ("Synced,
+            // selected"), then the named action.
+            .semantics(mergeDescendants = true) {
+                if (rowState != null) this.stateDescription = rowState
+            }
+            .clickable(
+                interactionSource = source,
+                indication = rememberRipple(),
+                onClickLabel = clickLabel,
+                onClick = onClick,
+            ),
     ) {
         Box(
             modifier = Modifier
                 .width(4.dp)
                 .fillMaxHeight()
-                .background(if (isSelected) GsColors.Accent else Color.Transparent)
+                .background(if (selected) GsColors.Accent else Color.Transparent)
         )
         Row(
             modifier = Modifier
@@ -257,36 +409,140 @@ fun GsListRow(
     }
 }
 
-/** Status pill: tinted fill with coloured text, or solid fill with ink text. */
+/**
+ * What TalkBack says for a row's state: its status, plus "selected" when it
+ * is the pad cursor.  Null when there is nothing to say.
+ */
+internal fun rowStateDescription(status: String?, selected: Boolean): String? =
+    listOfNotNull(status?.takeIf { it.isNotBlank() }, if (selected) "selected" else null)
+        .joinToString(", ")
+        .ifEmpty { null }
+
+/** Press scale of a list row. */
+const val GS_ROW_PRESS_SCALE = 0.98f
+/** Press scale of a button (dialog choice, detail action). */
+const val GS_BUTTON_PRESS_SCALE = 0.97f
+
+/**
+ * Scale for a pressable surface: down to [pressedScale] with the PRESS
+ * spring on press-down, back with QUICK on release.  animateFloatAsState
+ * re-targets with velocity, so a quick tap reverses mid-way instead of
+ * restarting.  Always 1 under reduced motion.  Read the returned State only
+ * inside `graphicsLayer {}` so the animation never recomposes.
+ */
 @Composable
-fun GsPill(text: String, color: Color, modifier: Modifier = Modifier, filled: Boolean = false) {
+fun rememberPressScale(pressed: Boolean, pressedScale: Float): State<Float> {
+    val reduce = LocalReduceMotion.current
+    return animateFloatAsState(
+        targetValue = if (pressed && !reduce) pressedScale else 1f,
+        animationSpec = if (pressed) GsMotion.press() else GsMotion.quick(),
+        label = "pressScale",
+    )
+}
+
+/**
+ * Status pill: a 16% tint of [color] with its legible text variant
+ * ([textVariantOf]), or a solid fill with ink text.  Under high contrast the
+ * tint becomes an opaque PanelHi fill with a 1dp border in the text colour.
+ */
+@Composable
+fun GsPill(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    filled: Boolean = false,
+    textColor: Color = textVariantOf(color),
+    /**
+     * Inside a merged row whose stateDescription already says it: hidden
+     * from TalkBack.  Standalone (the detail header) it stays a text node.
+     */
+    decorative: Boolean = false,
+    /** What TalkBack reads instead of [text] (e.g. without a leading glyph). */
+    spokenText: String? = null,
+    /**
+     * A 14dp icon before the text, tinted like it.  Decorative: the text
+     * beside it carries the meaning (and is what TalkBack reads).
+     */
+    icon: ImageVector? = null,
+) {
+    val high = LocalHighContrast.current
+    val shape = GsShapes.Pill
+    val contentColor = if (filled) GsColors.Ink else textColor
     Box(
         modifier = modifier
-            .clip(RoundedCornerShape(10.dp))
-            .background(if (filled) color else color.copy(alpha = 0.16f))
+            .then(
+                when {
+                    decorative -> Modifier.clearAndSetSemantics {}
+                    spokenText != null -> Modifier.clearAndSetSemantics { contentDescription = spokenText }
+                    else -> Modifier
+                }
+            )
+            .clip(shape)
+            .background(
+                when {
+                    filled -> color
+                    high -> GsColors.PanelHi
+                    else -> color.copy(alpha = 0.16f)
+                }
+            )
+            .then(if (high && !filled) Modifier.border(1.dp, textColor, shape) else Modifier)
             .padding(horizontal = 8.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Bold,
-            color = if (filled) GsColors.Ink else color,
-            maxLines = 1,
-        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (icon != null) {
+                Icon(icon, contentDescription = null, tint = contentColor, modifier = Modifier.size(14.dp))
+                Spacer(Modifier.width(4.dp))
+            }
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.Bold,
+                color = contentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
     }
 }
 
-/** One-line status banner on a panel with a coloured edge (offline notice etc.). */
+/**
+ * Status banner for an ongoing condition (offline, no server, conflicts):
+ * a panel with a 4dp edge bar in [color] and text in its legible variant.
+ * With [onClick] it is a button: 48dp minimum height and a trailing chevron.
+ * See GsBanners.kt for which banners may show at once.
+ */
 @Composable
-fun GsBanner(text: String, color: Color, modifier: Modifier = Modifier) {
+fun GsBanner(
+    text: String,
+    color: Color,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    /** A 16dp icon before the text, tinted like it (e.g. Warning). */
+    leadingIcon: ImageVector? = null,
+    /** TalkBack's name for the tap ("Review conflicts", "Fix emulator folder"). */
+    clickLabel: String? = null,
+) {
+    val high = LocalHighContrast.current
+    val textColor = textVariantOf(color)
+    val shape = GsShapes.Row
     Row(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 12.dp, vertical = 4.dp)
+            .then(if (onClick != null) Modifier.heightIn(min = 48.dp) else Modifier)
             .height(IntrinsicSize.Min)
-            .clip(RoundedCornerShape(8.dp))
-            .background(GsColors.Panel),
+            .clip(shape)
+            .background(GsColors.Panel)
+            .then(if (high) Modifier.border(1.dp, textColor, shape) else Modifier)
+            .then(
+                if (onClick != null) {
+                    Modifier.clickable(role = Role.Button, onClickLabel = clickLabel, onClick = onClick)
+                } else {
+                    // Read as one sentence, not word groups.
+                    Modifier.semantics(mergeDescendants = true) {}
+                }
+            ),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Box(
@@ -295,13 +551,35 @@ fun GsBanner(text: String, color: Color, modifier: Modifier = Modifier) {
                 .fillMaxHeight()
                 .background(color)
         )
+        if (leadingIcon != null) {
+            Icon(
+                leadingIcon,
+                contentDescription = null,
+                tint = textColor,
+                modifier = Modifier
+                    .padding(start = 12.dp)
+                    .size(16.dp),
+            )
+        }
         Text(
             text,
-            color = color,
+            color = textColor,
             style = MaterialTheme.typography.bodySmall,
             fontWeight = FontWeight.Medium,
-            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = if (leadingIcon != null) 8.dp else 12.dp, vertical = 8.dp),
         )
+        if (onClick != null) {
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = gsTextMuted(),
+                modifier = Modifier
+                    .padding(end = 12.dp)
+                    .size(16.dp),
+            )
+        }
     }
 }
 
@@ -317,14 +595,129 @@ data class GsDialogChoice(
 )
 
 /**
+ * The enter/exit state of the dialog a [GsDialogHost] is showing; null
+ * outside a host.  [GsDialog] animates its card with it.
+ */
+val LocalGsDialogTransition = compositionLocalOf<MutableTransitionState<Boolean>?> { null }
+
+/**
+ * Keeps a dialog composed while it leaves, so it can animate out.  Callers
+ * drop their dialog state in the same click that closes it, which would
+ * remove the window on that frame; the host remembers the last non-null
+ * [target] and keeps composing [content] for it until the exit transition
+ * is idle.  [content] gets `dismissing = true` during the exit (GsDialog
+ * already ignores input then).  Use it for every dialog:
+ * `GsDialogHost(show.takeIf { it }) { _, _ -> GsDialog(…) }`.
+ */
+@Composable
+fun <T : Any> GsDialogHost(target: T?, content: @Composable (T, dismissing: Boolean) -> Unit) {
+    val transition = remember { MutableTransitionState(false) }
+    val last = remember { arrayOfNulls<Any>(1) }
+    if (target != null) last[0] = target
+    if (transition.targetState != (target != null)) transition.targetState = target != null
+    // A content that never runs the transition (no GsDialog inside) must not
+    // stay on screen: give the exit a generous ceiling.
+    var expired by remember { mutableStateOf(false) }
+    LaunchedEffect(target == null) {
+        expired = false
+        if (target == null) {
+            delay(DIALOG_EXIT_CEILING_MS)
+            expired = true
+        }
+    }
+    @Suppress("UNCHECKED_CAST")
+    val shown = last[0] as T?
+    val leaving = target == null
+    val stillVisible = dialogHostShows(
+        hasTarget = !leaving,
+        currentlyVisible = transition.currentState,
+        idle = transition.isIdle,
+        expired = expired,
+    )
+    if (shown != null && stillVisible) {
+        CompositionLocalProvider(LocalGsDialogTransition provides transition) {
+            content(shown, leaving)
+        }
+    } else if (leaving) {
+        last[0] = null
+    }
+}
+
+private const val DIALOG_EXIT_CEILING_MS = 1_000L
+
+/**
+ * Whether a [GsDialogHost] still composes its dialog: always while it has a
+ * target; after that only until the exit transition has finished (or the
+ * exit ceiling passed).
+ */
+internal fun dialogHostShows(hasTarget: Boolean, currentlyVisible: Boolean, idle: Boolean, expired: Boolean): Boolean =
+    hasTarget || (!expired && (currentlyVisible || !idle))
+
+/** Card enter: a slight grow from the centre and a fade (fade only under reduced motion). */
+internal fun gsDialogEnter(reduce: Boolean): EnterTransition =
+    if (reduce) fadeIn(GsMotion.fade())
+    else scaleIn(GsMotion.quick(), initialScale = GS_DIALOG_SCALE) + fadeIn(GsMotion.quick())
+
+/** Card exit: the mirror of [gsDialogEnter]. */
+internal fun gsDialogExit(reduce: Boolean): ExitTransition =
+    if (reduce) fadeOut(GsMotion.fade())
+    else scaleOut(GsMotion.quick(), targetScale = GS_DIALOG_SCALE) + fadeOut(GsMotion.fadeOut())
+
+/** Scale a dialog card enters from and leaves to (centre origin). */
+const val GS_DIALOG_SCALE = 0.94f
+
+/**
+ * A dialog card that materializes and leaves the same way: inside a
+ * [GsDialogHost] it follows the host's transition (enter and exit); alone it
+ * still animates in.  Must be called inside the Dialog's own content.
+ *
+ * The window itself doesn't animate (Theme.GameSync.Dialog has no window
+ * animation, and it is cleared here too).  The platform dim is kept: in
+ * Compose 1.6 a dialog window is sized to Configuration.screenWidthDp /
+ * screenHeightDp, which leave out the system bars, so a scrim of our own
+ * would leave the bars undimmed — worse than an instant dim.
+ */
+@Composable
+fun GsDialogMotion(content: @Composable () -> Unit) {
+    val reduce = LocalReduceMotion.current
+    val host = LocalGsDialogTransition.current
+    val standalone = remember { MutableTransitionState(false).apply { targetState = true } }
+    val transition = host ?: standalone
+    val view = LocalView.current
+    SideEffect { (view.parent as? DialogWindowProvider)?.window?.setWindowAnimations(0) }
+    AnimatedVisibility(
+        visibleState = transition,
+        enter = gsDialogEnter(reduce),
+        exit = gsDialogExit(reduce),
+        label = "gsDialog",
+    ) {
+        content()
+    }
+}
+
+/** True while the dialog this is called in is leaving (input is ignored then). */
+@Composable
+fun gsDialogDismissing(): Boolean = LocalGsDialogTransition.current?.targetState == false
+
+/**
  * Card dialog over the dimmed backdrop, driven by the controller like the
  * console clients: each choice answers to its own button glyph, B (and the
  * system Back gesture) cancels via [onDismiss] unless a choice claims B,
  * and START presses the A choice when [startConfirms].  Touch users get the
- * same choices as buttons.
+ * same choices as buttons.  Show it through a [GsDialogHost] so it can
+ * leave the way it came.
  *
  * A Dialog is its own window, so its keys never reach MainActivity's
  * dispatchKeyEvent or the screen behind it — they are handled here.
+ *
+ * Input safety: the choice buttons never take D-pad focus (so a focus ring
+ * can't sit on "Cancel" while A runs "Delete"), key repeats of a held
+ * A/X/Y/START/Enter are ignored (a held A can't open and confirm in one
+ * press), and the D-pad is consumed so focus can't wander.  A body with its
+ * own cursor passes [onNavigate], which receives Up/Down as -1/+1; it draws
+ * its rows with `GsListRow(isSelected = …)` and brings the selected row into
+ * view itself.  While the dialog leaves, every input is ignored, so a second
+ * press can't act twice.
  */
 @Composable
 fun GsDialog(
@@ -333,72 +726,108 @@ fun GsDialog(
     choices: List<GsDialogChoice>,
     message: String = "",
     startConfirms: Boolean = false,
+    onNavigate: ((dy: Int) -> Unit)? = null,
+    /**
+     * X with no X choice: a dialog-internal action on the body's cursor
+     * (Sync all's "Include/skip").  Repeats are ignored like the choices'.
+     */
+    onButtonX: (() -> Unit)? = null,
+    /** The body's scroll position, so the body can scroll itself (e.g. with the D-pad). */
+    bodyScrollState: ScrollState? = null,
     body: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     val focusRequester = remember { FocusRequester() }
+    val dismissing = gsDialogDismissing()
+    val currentDismissing by rememberUpdatedState(dismissing)
     fun choiceFor(button: GsButton): GsDialogChoice? = choices.firstOrNull { it.button == button }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = RoundedCornerShape(14.dp),
-            color = GsColors.Panel,
-            modifier = Modifier
-                .widthIn(min = 280.dp, max = 520.dp)
-                .border(1.dp, GsColors.Line, RoundedCornerShape(14.dp))
-                .focusRequester(focusRequester)
-                .focusable()
-                .onPreviewKeyEvent { event ->
-                    if (event.type != KeyEventType.KeyDown) {
-                        return@onPreviewKeyEvent false
-                    }
-                    when (event.key) {
-                        Key.ButtonA, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
-                            choiceFor(GsButton.A)?.onClick?.invoke(); true
+    Dialog(onDismissRequest = { if (!currentDismissing) onDismiss() }) {
+        GsDialogMotion {
+            Surface(
+                shape = GsShapes.Dialog,
+                color = GsColors.Panel,
+                shadowElevation = GsElevation.DialogShadow,
+                tonalElevation = GsElevation.DialogTonal,
+                modifier = Modifier
+                    .widthIn(min = 280.dp, max = 520.dp)
+                    .border(1.dp, GsColors.Line, GsShapes.Dialog)
+                    .focusRequester(focusRequester)
+                    .focusable()
+                    .onPreviewKeyEvent { event ->
+                        if (event.type != KeyEventType.KeyDown) {
+                            return@onPreviewKeyEvent false
                         }
-                        Key.ButtonX -> { choiceFor(GsButton.X)?.onClick?.invoke(); true }
-                        Key.ButtonY -> { choiceFor(GsButton.Y)?.onClick?.invoke(); true }
-                        Key.ButtonStart -> {
-                            if (startConfirms) choiceFor(GsButton.A)?.onClick?.invoke()
-                            true
+                        // Leaving: the choice already ran; swallow the rest.
+                        if (currentDismissing) return@onPreviewKeyEvent true
+                        val repeat = event.nativeKeyEvent.repeatCount > 0
+                        when (event.key) {
+                            Key.ButtonA, Key.Enter, Key.NumPadEnter, Key.DirectionCenter -> {
+                                if (!repeat) choiceFor(GsButton.A)?.onClick?.invoke()
+                                true
+                            }
+                            Key.ButtonX -> {
+                                if (!repeat) (choiceFor(GsButton.X)?.onClick ?: onButtonX)?.invoke()
+                                true
+                            }
+                            Key.ButtonY -> {
+                                if (!repeat) choiceFor(GsButton.Y)?.onClick?.invoke()
+                                true
+                            }
+                            Key.ButtonStart -> {
+                                if (!repeat && startConfirms) choiceFor(GsButton.A)?.onClick?.invoke()
+                                true
+                            }
+                            Key.ButtonB, Key.Escape -> {
+                                val b = choiceFor(GsButton.B)
+                                if (b != null) b.onClick() else onDismiss()
+                                true
+                            }
+                            Key.DirectionUp -> { onNavigate?.invoke(-1); true }
+                            Key.DirectionDown -> { onNavigate?.invoke(1); true }
+                            // Nothing in a dialog moves sideways; keep focus put.
+                            Key.DirectionLeft, Key.DirectionRight -> true
+                            else -> false
                         }
-                        Key.ButtonB, Key.Escape -> {
-                            val b = choiceFor(GsButton.B)
-                            if (b != null) b.onClick() else onDismiss()
-                            true
-                        }
-                        else -> false
-                    }
-                },
-        ) {
-            Column(modifier = Modifier.padding(20.dp)) {
-                Text(
-                    title,
-                    color = GsColors.Text,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                if (message.isNotBlank()) {
-                    Spacer(Modifier.height(8.dp))
+                    },
+            ) {
+                Column(modifier = Modifier.padding(20.dp)) {
                     Text(
-                        message,
-                        color = GsColors.Dim,
-                        style = MaterialTheme.typography.bodyMedium,
+                        title,
+                        color = GsColors.Text,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
                     )
+                    if (message.isNotBlank()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            message,
+                            color = gsDim(),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
+                    if (body != null) {
+                        Spacer(Modifier.height(8.dp))
+                        // weight(fill = false): the title, message and choices
+                        // are measured first, so on a short window the body
+                        // shrinks and scrolls instead of pushing the buttons
+                        // out of the dialog.
+                        Column(
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .heightIn(max = 360.dp)
+                                .verticalScroll(bodyScrollState ?: rememberScrollState()),
+                            content = body,
+                        )
+                    }
+                    Spacer(Modifier.height(18.dp))
+                    FlowRowChoices(choices.map { c ->
+                        // A tap during the exit is ignored like a key.
+                        c.copy(onClick = { if (!currentDismissing) c.onClick() })
+                    })
                 }
-                if (body != null) {
-                    Spacer(Modifier.height(8.dp))
-                    Column(
-                        modifier = Modifier
-                            .heightIn(max = 360.dp)
-                            .verticalScroll(rememberScrollState()),
-                        content = body,
-                    )
-                }
-                Spacer(Modifier.height(18.dp))
-                FlowRowChoices(choices)
             }
+            // Inside the Dialog's own composition: the requester lives there.
+            LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
         }
-        // Inside the Dialog's own composition: the requester lives there.
-        LaunchedEffect(Unit) { runCatching { focusRequester.requestFocus() } }
     }
 }
 
@@ -441,12 +870,24 @@ fun GsConfirmDialog(
     dismissLabel: String = "Cancel",
     startConfirms: Boolean = false,
     destructive: Boolean = false,
+    /** An irreversibility line ("This can't be undone."), drawn in ErrText. */
+    warning: String? = null,
 ) {
     GsDialog(
         title = title,
         message = message,
         onDismiss = onDismiss,
         startConfirms = startConfirms,
+        body = warning?.let { w ->
+            {
+                Text(
+                    w,
+                    color = GsColors.ErrText,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        },
         choices = listOf(
             GsDialogChoice(GsButton.B, dismissLabel, onDismiss),
             GsDialogChoice(
@@ -468,12 +909,29 @@ private fun DialogChoice(
     textColor: Color,
     onClick: () -> Unit,
 ) {
+    val source = remember { MutableInteractionSource() }
+    val pressed by source.collectIsPressedAsState()
+    val scale = rememberPressScale(pressed, GS_BUTTON_PRESS_SCALE)
     Row(
         modifier = Modifier
-            .heightIn(min = 40.dp)
-            .clip(RoundedCornerShape(20.dp))
+            // Pressed by its button or tapped, never focused by the D-pad:
+            // canFocus only affects key focus, not touch or TalkBack.
+            .focusProperties { canFocus = false }
+            .heightIn(min = 48.dp)
+            .graphicsLayer {
+                val s = scale.value
+                scaleX = s
+                scaleY = s
+            }
+            .clip(GsShapes.Choice)
             .background(background)
-            .clickable(onClick = onClick)
+            // Read as its label with Role.Button (the glyph is decorative).
+            .clickable(
+                interactionSource = source,
+                indication = rememberRipple(),
+                role = Role.Button,
+                onClick = onClick,
+            )
             .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {

@@ -14,6 +14,20 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.semantics.Role
+import com.savesync.android.ui.components.ButtonGlyph
+import com.savesync.android.ui.components.GsButton
+import com.savesync.android.ui.components.LocalShowButtonHints
+import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.GsShapes
+import com.savesync.android.ui.theme.gsTextMuted
 
 /** Centered spinner with an optional label. Shared by the ROM Catalog
  *  and Installed Games tabs. */
@@ -36,9 +50,20 @@ fun CenterLoader(text: String? = null) {
     }
 }
 
-/** Centered two-line message: bold title, optional detail paragraph. */
+/**
+ * Centered message: bold title, optional detail paragraph, quieter
+ * [footnotes] (TextMuted), and an optional [action] drawn as a filled Accent
+ * pill.  [actionGlyph] puts a controller glyph on it while hints show — only
+ * pass one when that button really triggers the action on this screen.
+ */
 @Composable
-fun CenterMessage(title: String, detail: String = "") {
+fun CenterMessage(
+    title: String,
+    detail: String = "",
+    footnotes: List<String> = emptyList(),
+    action: Pair<String, () -> Unit>? = null,
+    actionGlyph: GsButton? = null,
+) {
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -60,6 +85,57 @@ fun CenterMessage(title: String, detail: String = "") {
                 textAlign = TextAlign.Center,
             )
         }
+        footnotes.filter { it.isNotBlank() }.forEach { note ->
+            Spacer(Modifier.height(6.dp))
+            Text(
+                note,
+                style = MaterialTheme.typography.bodySmall,
+                color = gsTextMuted(),
+                textAlign = TextAlign.Center,
+            )
+        }
+        if (action != null) {
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .clip(GsShapes.Choice)
+                    .background(GsColors.Accent)
+                    .focusProperties { canFocus = false }
+                    .clickable(role = Role.Button, onClick = action.second)
+                    .padding(horizontal = 20.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (actionGlyph != null && LocalShowButtonHints.current) {
+                    ButtonGlyph(actionGlyph)
+                    Spacer(Modifier.width(8.dp))
+                }
+                Text(action.first, color = GsColors.Ink, style = MaterialTheme.typography.labelLarge)
+            }
+        }
+    }
+}
+
+/**
+ * A time as relative-plus-absolute text: "Today 21:14 · 26 Oct 2026",
+ * "Yesterday 08:02 · 25 Oct 2026", else "19 Oct 2026 · 21:14".  "Never"
+ * for 0 or less.  [now] and [zone] are parameters for tests.
+ */
+fun formatWhen(
+    ms: Long,
+    now: Long = System.currentTimeMillis(),
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    if (ms <= 0L) return "Never"
+    val at = java.time.Instant.ofEpochMilli(ms).atZone(zone)
+    val today = java.time.Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+    val time = java.time.format.DateTimeFormatter.ofPattern("HH:mm", locale).format(at)
+    val date = java.time.format.DateTimeFormatter.ofPattern("d MMM yyyy", locale).format(at)
+    return when (at.toLocalDate()) {
+        today -> "Today $time · $date"
+        today.minusDays(1) -> "Yesterday $time · $date"
+        else -> "$date · $time"
     }
 }
 

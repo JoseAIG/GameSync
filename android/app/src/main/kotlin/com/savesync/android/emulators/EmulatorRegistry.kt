@@ -187,9 +187,34 @@ object EmulatorRegistry {
             else -> null
         }
 
+    /**
+     * What the folder picker's contents line says for [dir] when it is
+     * picked as [emulatorKey]'s save folder: that emulator's own check where
+     * it has one (Azahar: the title saves found), else the generic one-level
+     * count of [FolderScan].  Reads the disk: call it off the main thread.
+     */
+    fun describeSaveDir(emulatorKey: String, dir: File): DirCheck =
+        when (emulatorKey) {
+            AzaharEmulator.EMULATOR_KEY -> AzaharEmulator.describeOverride(dir)
+            else -> FolderScan.describe(dir)
+        }
+
     /** [saveDirOverrideWarning] for every configured override. */
     fun saveDirOverrideWarnings(saveDirOverrides: Map<String, String>): List<String> =
-        saveDirOverrides.mapNotNull { (key, path) -> saveDirOverrideWarning(key, path) }
+        saveDirOverrideWarningMap(saveDirOverrides).values.toList()
+
+    /**
+     * Emulator key → warning for every configured override that points
+     * nowhere usable, in [EmulatorCatalog.ALL] order.  Reads the disk: call
+     * it off the main thread.
+     */
+    fun saveDirOverrideWarningMap(saveDirOverrides: Map<String, String>): Map<String, String> {
+        val order = EmulatorCatalog.ALL.map { it.key }
+        return saveDirOverrides.entries
+            .sortedBy { (key, _) -> order.indexOf(key).let { if (it < 0) Int.MAX_VALUE else it } }
+            .mapNotNull { (key, path) -> saveDirOverrideWarning(key, path)?.let { key to it } }
+            .toMap()
+    }
 
     /**
      * Discover all saves, applying user-chosen system overrides where present.

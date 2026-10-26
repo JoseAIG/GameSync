@@ -24,12 +24,12 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -46,10 +46,22 @@ import com.savesync.android.emulators.EmulatorRegistry
 import com.savesync.android.emulators.impl.RetroArchEmulator
 import com.savesync.android.ui.MainViewModel
 import com.savesync.android.ui.components.GsButton
-import com.savesync.android.ui.components.GsFooterHints
+import com.savesync.android.ui.components.GsDialogHost
+import com.savesync.android.ui.components.GsChromeSpec
+import com.savesync.android.ui.components.GsScreenChrome
 import com.savesync.android.ui.components.GsHint
-import com.savesync.android.ui.components.GsSubScreenBar
 import com.savesync.android.ui.components.FolderPickerDialog
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import com.savesync.android.ui.components.GsBanner
+import com.savesync.android.ui.components.gsFocusRing
+import androidx.compose.foundation.shape.CircleShape
+import com.savesync.android.ui.theme.GsColors
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.gsExpandIn
+import com.savesync.android.ui.theme.gsShrinkOut
 
 /**
  * Per-emulator save folder configuration screen, reachable from
@@ -69,78 +81,82 @@ fun EmulatorsScreen(
     onNavigateBack: () -> Unit,
 ) {
     val settings by viewModel.settings.collectAsState()
+    // Computed off the main thread by the view model; composition reads no files.
+    val overrideWarnings by viewModel.overrideWarnings.collectAsState()
 
     var folderPickerForEmulator by remember { mutableStateOf<String?>(null) }
 
-    Scaffold(
-        topBar = {
-            GsSubScreenBar(title = "Emulator Configuration", onBack = onNavigateBack)
-        },
-        bottomBar = {
-            GsFooterHints(
-                listOf(
-                    GsHint(GsButton.DPAD, "Move"),
-                    GsHint(GsButton.A, "Select"),
-                    GsHint(GsButton.B, "Back"),
-                )
-            )
-        },
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text(
-                text = "Set a custom save folder for each emulator. Existing " +
-                       "auto-detection (Emudeck root, retroarch.cfg, etc.) " +
-                       "is used when no override is configured. Existing " +
-                       "saves on disk are still discovered regardless.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+    // Sub-screen header and hints, drawn by MainApp's persistent chrome.
+    val pageScroll = rememberScrollState()
+    val scrolledTop by remember { derivedStateOf { pageScroll.canScrollBackward } }
+    val scrolledBottom by remember { derivedStateOf { pageScroll.canScrollForward } }
+    val chromeSpec = remember(onNavigateBack, scrolledTop, scrolledBottom) {
+        GsChromeSpec(
+            title = "Emulator Configuration",
+            onBack = onNavigateBack,
+            scrolledUnderTop = scrolledTop,
+            scrolledUnderBottom = scrolledBottom,
+            hints = listOf(
+                GsHint(GsButton.DPAD, "Move"),
+                GsHint(GsButton.A, "Select"),
+                GsHint(GsButton.B, "Back"),
+            ),
+        )
+    }
+    GsScreenChrome("emulators", chromeSpec)
 
-            EmulatorCatalog.ALL.forEach { descriptor ->
-                EmulatorCard(
-                    descriptor = descriptor,
-                    overridePath = settings.saveDirOverrides[descriptor.key],
-                    overrideWarning = EmulatorRegistry.saveDirOverrideWarning(
-                        descriptor.key, settings.saveDirOverrides[descriptor.key]
-                    ),
-                    onBrowse = { folderPickerForEmulator = descriptor.key },
-                    onClear = { viewModel.clearSaveDirOverride(descriptor.key) },
-                    extras = if (descriptor.key == RetroArchEmulator.EMULATOR_KEY) {
-                        {
-                            RetroArchExtras(
-                                beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
-                                cdGamesPerContentFolder = settings.cdGamesPerContentFolder,
-                                onBeetleChange = { newBeetle ->
-                                    viewModel.saveRetroArchToggles(
-                                        beetleSaturnPerCoreFolder = newBeetle,
-                                        cdGamesPerContentFolder = settings.cdGamesPerContentFolder
-                                    )
-                                },
-                                onPerContentChange = { newPerContent ->
-                                    viewModel.saveRetroArchToggles(
-                                        beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
-                                        cdGamesPerContentFolder = newPerContent
-                                    )
-                                },
-                            )
-                        }
-                    } else null,
-                )
-            }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(pageScroll)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = "Set a custom save folder for each emulator. Existing " +
+                   "auto-detection (Emudeck root, retroarch.cfg, etc.) " +
+                   "is used when no override is configured. Existing " +
+                   "saves on disk are still discovered regardless.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        EmulatorCatalog.ALL.forEach { descriptor ->
+            EmulatorCard(
+                descriptor = descriptor,
+                overridePath = settings.saveDirOverrides[descriptor.key],
+                overrideWarning = overrideWarnings[descriptor.key],
+                onBrowse = { folderPickerForEmulator = descriptor.key },
+                onClear = { viewModel.clearSaveDirOverride(descriptor.key) },
+                extras = if (descriptor.key == RetroArchEmulator.EMULATOR_KEY) {
+                    {
+                        RetroArchExtras(
+                            beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
+                            cdGamesPerContentFolder = settings.cdGamesPerContentFolder,
+                            onBeetleChange = { newBeetle ->
+                                viewModel.saveRetroArchToggles(
+                                    beetleSaturnPerCoreFolder = newBeetle,
+                                    cdGamesPerContentFolder = settings.cdGamesPerContentFolder
+                                )
+                            },
+                            onPerContentChange = { newPerContent ->
+                                viewModel.saveRetroArchToggles(
+                                    beetleSaturnPerCoreFolder = settings.beetleSaturnPerCoreFolder,
+                                    cdGamesPerContentFolder = newPerContent
+                                )
+                            },
+                        )
+                    }
+                } else null,
+            )
         }
     }
 
-    val pickerKey = folderPickerForEmulator
-    if (pickerKey != null) {
+    GsDialogHost(folderPickerForEmulator) { pickerKey, _ ->
         FolderPickerDialog(
             initialPath = settings.saveDirOverrides[pickerKey] ?: "",
+            // The contents line runs this emulator's own folder check.
+            emulatorKey = pickerKey,
             onDismiss = { folderPickerForEmulator = null },
             onFolderSelected = { path ->
                 viewModel.setSaveDirOverride(pickerKey, path)
@@ -206,11 +222,21 @@ private fun EmulatorCard(
                 )
             }
 
-            if (overrideWarning != null) {
-                Text(
-                    text = overrideWarning,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+            // The fork's missing-folder warning: a Warn row right above the
+            // buttons that fix it, staying until the folder exists or the
+            // override is cleared.  The message is kept as it was.
+            val reduce = LocalReduceMotion.current
+            val lastWarning = remember { arrayOf("") }
+            if (overrideWarning != null) lastWarning[0] = overrideWarning
+            AnimatedVisibility(
+                visible = overrideWarning != null,
+                enter = gsExpandIn(reduce),
+                exit = gsShrinkOut(reduce),
+            ) {
+                GsBanner(
+                    text = lastWarning[0],
+                    color = GsColors.Warn,
+                    leadingIcon = Icons.Filled.Warning,
                 )
             }
 
@@ -220,20 +246,34 @@ private fun EmulatorCard(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                OutlinedButton(
-                    onClick = onBrowse,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(
-                        Icons.Default.FolderOpen,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text(if (isOverridden) "Change" else "Set Override")
+                // While the override points nowhere, Change is the way out:
+                // promoted to the filled Accent button.
+                val browseLabel = if (isOverridden) "Change" else "Set Override"
+                if (overrideWarning != null) {
+                    Button(
+                        onClick = onBrowse,
+                        modifier = Modifier.weight(1f).gsFocusRing(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = GsColors.Accent,
+                            contentColor = GsColors.Ink,
+                        ),
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(browseLabel)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onBrowse,
+                        modifier = Modifier.weight(1f).gsFocusRing(),
+                    ) {
+                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text(browseLabel)
+                    }
                 }
                 if (isOverridden) {
-                    OutlinedButton(onClick = onClear) {
+                    OutlinedButton(onClick = onClear, modifier = Modifier.gsFocusRing()) {
                         Icon(
                             Icons.Default.Close,
                             contentDescription = "Clear override",
@@ -282,6 +322,7 @@ private fun RetroArchExtras(
         Switch(
             checked = beetleSaturnPerCoreFolder,
             onCheckedChange = onBeetleChange,
+            modifier = Modifier.gsFocusRing(CircleShape),
         )
     }
 
@@ -304,6 +345,7 @@ private fun RetroArchExtras(
         Switch(
             checked = cdGamesPerContentFolder,
             onCheckedChange = onPerContentChange,
+            modifier = Modifier.gsFocusRing(CircleShape),
         )
     }
 }

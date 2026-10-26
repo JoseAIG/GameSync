@@ -1,5 +1,11 @@
 package com.savesync.android.ui.components
 
+import androidx.compose.material.icons.filled.Check
+import com.savesync.android.ui.theme.LocalReduceMotion
+import com.savesync.android.ui.theme.GsMotion
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.VisibilityThreshold
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -51,38 +57,43 @@ fun SystemFilterChip(
 ) {
     var expanded by remember { mutableStateOf(false) }
     val color = GsColors.Text
+    val reduce = LocalReduceMotion.current
     Box(modifier = modifier) {
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(GsColors.PanelHi)
-                .border(
-                    width = 1.dp,
-                    color = GsColors.Accent.copy(alpha = 0.7f),
-                    shape = RoundedCornerShape(16.dp),
+        GsHitTarget(onClick = { expanded = true }) { indication ->
+            Row(
+                modifier = Modifier
+                    // The chip grows or shrinks to its new label.
+                    .then(if (reduce) Modifier else Modifier.animateContentSize(GsMotion.quick(IntSize.VisibilityThreshold)))
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(GsColors.PanelHi)
+                    .border(
+                        width = 1.dp,
+                        color = GsColors.Accent.copy(alpha = 0.7f),
+                        shape = RoundedCornerShape(16.dp),
+                    )
+                    .then(indication)
+                    .padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (LocalShowButtonHints.current) {
+                    ButtonGlyph(GsButton.SELECT)
+                    Spacer(Modifier.width(4.dp))
+                }
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = color,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                .clickable { expanded = true }
-                .padding(start = 8.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            if (LocalShowButtonHints.current) {
-                ButtonGlyph(GsButton.SELECT)
-                Spacer(Modifier.width(4.dp))
+                Icon(
+                    Icons.Filled.ArrowDropDown,
+                    contentDescription = "Choose system",
+                    tint = GsColors.Accent,
+                    modifier = Modifier.size(20.dp),
+                )
             }
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelLarge,
-                color = color,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Icon(
-                Icons.Filled.ArrowDropDown,
-                contentDescription = "Choose system",
-                tint = GsColors.Accent,
-                modifier = Modifier.size(20.dp),
-            )
         }
         DropdownMenu(
             expanded = expanded,
@@ -100,8 +111,8 @@ fun SystemFilterChip(
                         onSelect(option)
                         expanded = false
                     },
-                    leadingIcon = if (option == label) {
-                        { Text("✓", fontWeight = FontWeight.Bold) }
+                    trailingIcon = if (option == label) {
+                        { Icon(Icons.Filled.Check, contentDescription = "Selected", modifier = Modifier.size(18.dp)) }
                     } else null,
                 )
             }

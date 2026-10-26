@@ -612,3 +612,28 @@ class TestHistoryByTimestamp:
         _upload(client, auth_headers, _bundle([("main", b"v2")], timestamp=2))
         r = client.get(f"/api/v1/saves/{TITLE_HEX}/history/12345", headers=auth_headers)
         assert r.status_code == 404
+
+
+# ── Startup key validation ──────────────────────────────────────────────────
+
+
+class TestApiKeyValidation:
+    @pytest.mark.parametrize(
+        "key",
+        ["", "anything", "dev-key-change-me", "DEV-KEY-CHANGE-ME", "your-secret-key", "short-key-123"],
+    )
+    def test_weak_keys_refused(self, key):
+        from app.config import Settings
+
+        with pytest.raises(RuntimeError):
+            Settings(api_key=key, allow_weak_key=False).validate_security()
+
+    def test_weak_key_override(self):
+        from app.config import Settings
+
+        Settings(api_key="dev-key-change-me", allow_weak_key=True).validate_security()
+
+    def test_strong_key_accepted(self):
+        from app.config import Settings
+
+        Settings(api_key="0123456789abcdef", allow_weak_key=False).validate_security()

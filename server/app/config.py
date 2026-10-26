@@ -1,6 +1,9 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
+# Shortest SYNC_API_KEY accepted at startup (unless SYNC_ALLOW_WEAK_KEY=true).
+MIN_API_KEY_LENGTH = 16
+
 
 class Settings(BaseSettings):
     save_dir: Path = Path(__file__).parent.parent / "saves"
@@ -199,13 +202,27 @@ class Settings(BaseSettings):
 
     def validate_security(self) -> None:
         """Fail fast on an insecure key unless the operator opted out."""
-        weak = {"", "anything", "changeme", "password", "secret"}
-        if self.api_key.strip().lower() in weak and not self.allow_weak_key:
+        # Placeholders and the example values from the README/docs.
+        weak = {
+            "", "anything", "changeme", "password", "secret",
+            "dev-key-change-me", "your-secret-key", "your-key",
+        }
+        key = self.api_key.strip()
+        if self.allow_weak_key:
+            return
+        if key.lower() in weak:
             raise RuntimeError(
-                "Refusing to start: SYNC_API_KEY is unset or weak "
+                "Refusing to start: SYNC_API_KEY is unset or a placeholder "
                 f"({self.api_key!r}). Set a strong SYNC_API_KEY in the "
-                "environment / .env, or set SYNC_ALLOW_WEAK_KEY=true to "
-                "override (NOT recommended)."
+                "environment / .env (e.g. `openssl rand -hex 32`), or set "
+                "SYNC_ALLOW_WEAK_KEY=true to override (NOT recommended)."
+            )
+        if len(key) < MIN_API_KEY_LENGTH:
+            raise RuntimeError(
+                f"Refusing to start: SYNC_API_KEY is shorter than "
+                f"{MIN_API_KEY_LENGTH} characters. Use a longer random key "
+                "(e.g. `openssl rand -hex 32`), or set SYNC_ALLOW_WEAK_KEY=true "
+                "to override (NOT recommended)."
             )
 
     model_config = {

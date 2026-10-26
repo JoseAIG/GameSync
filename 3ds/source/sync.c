@@ -407,8 +407,10 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     if (!files) { free(hash_cache); return false; }
 
     // Build JSON for sync request
-    // Estimate: ~230 bytes per title (with last_synced_hash) + overhead
-    int json_cap = title_count * 230 + 64;
+    // Largest entry: 73 bytes of keys/punctuation + 16 (title id) + 2 * 64
+    // (hashes) + 2 * 10 (timestamp, size) = 237, plus the separating comma.
+    // Header and "]}" are under 64 bytes.
+    int json_cap = title_count * 256 + 64;
     char *json = (char *)malloc(json_cap);
     if (!json) { free(files); free(hash_cache); return false; }
 

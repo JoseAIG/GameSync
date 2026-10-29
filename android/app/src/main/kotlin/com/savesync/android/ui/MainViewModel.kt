@@ -3018,7 +3018,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val backupBefore = latestBackupDir(entry.titleId)
-                val result = engine.sync(listOf(entry))
+                // Hashing, the local backup copy and the fsynced write are
+                // disk work: keep them off the main thread.
+                val result = withContext(Dispatchers.IO) { engine.sync(listOf(entry)) }
                 applyConflictOutcome(result)
                 // A download that replaced an existing save kept a copy: offer Undo.
                 val backedUp = result.downloaded > 0 && latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
@@ -3118,10 +3120,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
-                val ok = engine.uploadSave(entry)
+                val ok = withContext(Dispatchers.IO) { engine.uploadSave(entry) }
                 if (ok) {
                     clearConflict(entry.titleId)
-                    engine.recordSyncedState(entry)
+                    withContext(Dispatchers.IO) { engine.recordSyncedState(entry) }
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()  // refresh status icons in the list
                 }
@@ -3154,11 +3156,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val backupBefore = latestBackupDir(entry.titleId)
-                val ok = engine.downloadSave(entry, entry.titleId)
+                val ok = withContext(Dispatchers.IO) { engine.downloadSave(entry, entry.titleId) }
                 var backedUp = false
                 if (ok) {
                     clearConflict(entry.titleId)
-                    engine.recordSyncedStateFromFile(entry)
+                    withContext(Dispatchers.IO) { engine.recordSyncedStateFromFile(entry) }
                     backedUp = latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
                     if (backedUp) _backupsVersion.value++
                     fetchServerMeta(entry.titleId, entry.systemName)

@@ -393,6 +393,11 @@ static SyncFailText sync_fail_text(SyncResult r, bool upload) {
             f.safety = "Your current save couldn't be backed up, so nothing was written.";
             f.next = "Free some SD space, or turn Local backups off.";
             break;
+        case SYNC_ERR_LOCAL_UNREADABLE:
+            f.safety = "This console's save can't be read completely, so it was left untouched.";
+            f.next = "Check the save with a save manager such as Checkpoint.";
+            f.retry = false;
+            break;
         case SYNC_ERR_RESTORED:
             f.safety = "Writing failed; your previous save was put back.";
             break;
@@ -476,6 +481,7 @@ typedef struct {
     XferKind kind;
     const TitleInfo *title;
     const char *timestamp;   // XFER_HISTORY
+    const char *server_hash; // XFER_HISTORY: the server's current copy ("" = none / unknown)
     SyncResult res;
 } XferJob;
 
@@ -484,14 +490,16 @@ static bool xfer_job(void *ctx) {
     switch (j->kind) {
         case XFER_UPLOAD:   j->res = sync_title(&config, j->title, sync_progress); break;
         case XFER_DOWNLOAD: j->res = sync_download_title(&config, j->title, sync_progress); break;
-        case XFER_HISTORY:  j->res = sync_download_history(&config, j->title, j->timestamp, sync_progress); break;
+        case XFER_HISTORY:  j->res = sync_download_history(&config, j->title, j->timestamp,
+                                                           j->server_hash, sync_progress); break;
     }
     return j->res == SYNC_OK;
 }
 
 // `first` = the card shown until the transfer reports its own progress
-static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timestamp, const char *first) {
-    XferJob j = { kind, t, timestamp, SYNC_ERR_NETWORK };
+static SyncResult run_xfer_ex(XferKind kind, const TitleInfo *t, const char *timestamp,
+                              const char *server_hash, const char *first) {
+    XferJob j = { kind, t, timestamp, server_hash, SYNC_ERR_NETWORK };
     UiProgress p = { 0 };
     p.title = op_title;
     p.name = t->name;
@@ -499,6 +507,10 @@ static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timest
     p.frac = -1;
     ui_run_job(xfer_job, &j, &p, false, NULL);
     return j.res;
+}
+
+static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timestamp, const char *first) {
+    return run_xfer_ex(kind, t, timestamp, NULL, first);
 }
 
 static void do_history(void) {
@@ -545,7 +557,26 @@ static void do_history(void) {
             free(selected_ts);
             return;
         }
+        if (last_details.local_exists && last_details.local_file_count == 0 &&
+            strncmp(last_details.local_hash, "ERROR", 5) == 0) {
+            // A save is there but can't be read completely: it can't be backed
+            // up or put back, so the restore would be refused anyway
+            SyncFailText f = sync_fail_text(SYNC_ERR_LOCAL_UNREADABLE, false);
+            char why[96];
+            snprintf(why, sizeof(why), "This console's save can't be read (%.40s).",
+                     last_details.local_hash + (strncmp(last_details.local_hash, "ERROR: ", 7) == 0 ? 7 : 0));
+            ui_error_card("Can't restore this version", why, f.safety, f.next, false);
+            set_status(UI_TONE_ERR, "Restore not started, nothing changed");
+            last_details_idx = -1;
+            free(selected_ts);
+            return;
+        }
         bool had_save = last_details.local_exists && last_details.local_file_count > 0;
+        // The server's current copy: the restore is recorded as a change
+        // made here since it, so the next sync uploads the restored version
+        char server_hash[65] = "";
+        if (last_details.server_exists && !last_details.server_error)
+            snprintf(server_hash, sizeof(server_hash), "%s", last_details.server_hash);
         if (!ui_confirm_restore(&titles[idx], &last_details, &versions[vi], vi, count, config.local_backups)) {
             set_status(UI_TONE_ACCENT, "Restore cancelled");
             free(selected_ts);
@@ -553,7 +584,8 @@ static void do_history(void) {
         }
         for (;;) {
             op_title = "Restoring";
-            SyncResult res = run_xfer(XFER_HISTORY, &titles[idx], selected_ts, "Downloading history version...");
+            SyncResult res = run_xfer_ex(XFER_HISTORY, &titles[idx], selected_ts, server_hash,
+                                         "Downloading history version...");
             if (res == SYNC_OK) {
                 set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
                            had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");
@@ -1074,10 +1106,13 @@ static void do_sync_all(void) {
         run_failures[i] = (RunFailure){ (u8)r, summary.title_upload[i] };
     }
 
-    // Mark conflicting titles in our list
+    // Mark conflicting titles in our list. Only an entry that took part in
+    // the sync: a cartridge sharing the title ID of an installed copy in
+    // conflict must never be marked (and so batch-uploaded) with it.
     for (int i = 0; i < summary.conflicts && i < MAX_CONFLICT_DISPLAY; i++) {
-        for (int j = 0; j < title_count; j++) {
-            if (strcmp(titles[j].title_id_hex, summary.conflict_titles[i]) == 0) {
+        for (int j = 0; j < title_count && j < MAX_TITLES; j++) {
+            if (summary.title_state[j] == TSTATE_CONFLICT &&
+                strcmp(titles[j].title_id_hex, summary.conflict_titles[i]) == 0) {
                 titles[j].in_conflict = true;
                 break;
             }
@@ -1157,7 +1192,10 @@ static bool do_update(void) {
         p.status = "Checking for updates...";
         p.frac = -1;
         checked = ui_run_job(update_job, j, &p, true, &cancelled);
-        if (cancelled) return false;   // nothing changed
+        if (cancelled) {
+            ui_settings_action_note(SETTINGS_UPDATE, UI_TONE_ACCENT, "Update check cancelled, nothing changed.");
+            return false;
+        }
         update_info = j->info;
         ui_job_release(j);
     } else {
@@ -1166,6 +1204,15 @@ static bool do_update(void) {
     }
     if (!checked) {
         ui_message(UI_TONE_ERR, "Update", "Update check failed.\n\n" UI_DIM "Check WiFi and the server URL.");
+        return false;
+    }
+    if (!update_info.available && !update_info.latest_version[0]) {
+        // No release named: the server didn't look one up (its update check
+        // is off, or GitHub didn't answer), so this says nothing about
+        // whether this version is the latest
+        ui_message(UI_TONE_INFO, "Update",
+                   "The server couldn't look up the latest release.\n\n"
+                   UI_DIM "Its update check may be turned off, or GitHub didn't answer.");
         return false;
     }
     if (!update_info.available) {
@@ -1430,25 +1477,77 @@ static bool settings_action(SettingsResult action) {
 // First-run setup
 // ---------------------------------------------------------------------------
 
+// The setup probe, on the worker (the card animates and offers Cancel after
+// 5 s), on a copy of the config
+typedef struct {
+    AppConfig cfg;
+    bool answered;
+    u32 key;
+    char error[96];
+} SetupProbeJob;
+
+static bool setup_probe_job(void *ctx) {
+    SetupProbeJob *j = ctx;
+    j->answered = network_select_server(&j->cfg);
+    j->key = j->answered ? titles_probe_key(&j->cfg) : 0;
+    snprintf(j->error, sizeof(j->error), "%s", network_last_error());
+    return true;
+}
+
 // Probe the server and the key just typed. Returns true to go on (it
-// answered and took the key, or "Continue anyway"), false to edit again.
+// answered and the key check said 200, or "Continue anyway"), false to edit
+// again.
 static bool setup_check(AppConfig *cfg, bool net_ok) {
-    char title[64], body[MAX_URL_LEN + 160];
+    char title[64], body[MAX_URL_LEN + 224];
     if (net_ok) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
-        ui_busy("Set up", msg);
-        bool answered = network_select_server(cfg);
-        u32 key = answered ? titles_probe_key(cfg) : 0;
-        if (answered && key != 401) return true;
-        if (answered) {
+        bool answered = false, cancelled = false;
+        u32 key = 0;
+        char error[96] = "";
+        SetupProbeJob *j = ui_job_ctx(sizeof(SetupProbeJob));
+        if (j) {
+            j->cfg = *cfg;
+            UiProgress p = { 0 };
+            p.title = "Set up";
+            p.status = msg;
+            p.frac = -1;
+            ui_run_job(setup_probe_job, j, &p, true, &cancelled);
+            if (!cancelled) {
+                cfg->use_alt_url = j->cfg.use_alt_url;
+                answered = j->answered;
+                key = j->key;
+                snprintf(error, sizeof(error), "%s", j->error);
+                ui_job_release(j);
+            }
+        } else {
+            ui_busy("Set up", msg);
+            answered = network_select_server(cfg);
+            key = answered ? titles_probe_key(cfg) : 0;
+            snprintf(error, sizeof(error), "%s", network_last_error());
+        }
+        if (answered && key == 200) return true;
+        if (cancelled) {
+            snprintf(title, sizeof(title), "Not checked");
+            snprintf(body, sizeof(body), "You cancelled the check of %s.\n"
+                     UI_DIM "It is saved anyway; you can check it later in Settings.", cfg->server_url);
+        } else if (answered && key == 401) {
             snprintf(title, sizeof(title), "Key rejected");
             snprintf(body, sizeof(body), "The server at %s refused this API key (401).\n"
                      UI_DIM "It is saved anyway; you can fix it later in Settings.", config_active_url(cfg));
+        } else if (answered) {
+            // The server answered /status, but not the key check (no answer,
+            // or an error): the key is still unchecked
+            char why[64];
+            if (key == 0) snprintf(why, sizeof(why), "%.63s", error[0] ? error : "No reply");
+            else snprintf(why, sizeof(why), "HTTP %lu", (unsigned long)key);
+            snprintf(title, sizeof(title), "Couldn't check the key");
+            snprintf(body, sizeof(body), "The server at %s answered, but not the key check (%s).\n"
+                     UI_DIM "It is saved anyway; you can check it later in Settings.", config_active_url(cfg), why);
         } else {
             snprintf(title, sizeof(title), "No answer from the server");
             snprintf(body, sizeof(body), "%s\n" UI_DIM "%s\n" UI_DIM "It is saved anyway; check WiFi and the address.",
-                     config_active_url(cfg), network_last_error()[0] ? network_last_error() : "No reply");
+                     config_active_url(cfg), error[0] ? error : "No reply");
         }
     } else {
         snprintf(title, sizeof(title), "Can't check the server");
@@ -1506,6 +1605,8 @@ int main(int argc, char *argv[]) {
 
     // The network service first: first-run setup checks the server with it
     bool net_ok = network_init();
+    // A cancelled background request stops waiting for the server
+    network_set_abort_check(ui_job_abort_requested);
 
     char config_error[512];
     bool config_ok = config_load(&config, config_error, sizeof(config_error));

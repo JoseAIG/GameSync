@@ -60,6 +60,23 @@ static void test_paths(void) {
     CHECK(folder_path_parent("sdmc:/roms", out, sizeof(out)));
     CHECK_STR(out, "sdmc:/");
     CHECK(!folder_path_parent("sdmc:/", out, sizeof(out)));
+    // A stray ':' after the device is part of a name: walking up from it
+    // reaches the root and stops (it used to return its own path forever)
+    folder_path_normalize("sdmc:/roms:/nds", out, sizeof(out));
+    {
+        char cur[64], up[64];
+        snprintf(cur, sizeof(cur), "%s", out);
+        int steps = 0;
+        while (steps < 10 && folder_path_parent(cur, up, sizeof(up))) {
+            CHECK(strcmp(up, cur) != 0);
+            snprintf(cur, sizeof(cur), "%s", up);
+            steps++;
+        }
+        CHECK(steps < 10);
+        CHECK_STR(cur, "sdmc:/");
+    }
+    CHECK(folder_path_parent("sdmc:/roms:/", out, sizeof(out)));
+    CHECK_STR(out, "sdmc:/roms:");
     CHECK_STR(folder_path_name("sdmc:/roms/nds"), "nds");
     CHECK_STR(folder_path_name("sdmc:/"), "sdmc:/");
 }

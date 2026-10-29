@@ -68,7 +68,7 @@ void ui_format_when(const char *iso, char *out, int out_size) {
     // clock. Only used for the date words; ui_format_when_at() distrusts it
     // when it is implausible.
     int64_t now_local = (int64_t)(osGetTime() / 1000ULL) - 2208988800LL;
-    ui_format_when_at(iso, utc_offset_minutes, now_local, out, out_size);
+    ui_format_when_at(iso, network_utc_offset(utc_offset_minutes), now_local, out, out_size);
 }
 
 void ui_device_label(const char *console_id, char *out, int out_size) {
@@ -451,6 +451,10 @@ static float smooth_progress(const UiProgress *p) {
 
 static GuiRect progress_cancel_rect;   // touch rect of the last card's Cancel pill
 static bool progress_cancel_shown;
+// The pill outside a job (catalog downloads): like every button it acts
+// when the finger lifts on it, and shows pressed while it is down
+static UiTap progress_tap = { -1 };
+static bool progress_pill_pressed;
 
 // What a card shows beyond its UiProgress
 typedef struct {
@@ -592,6 +596,10 @@ static void job_join(void) {
 
 bool ui_job_cancelled(void) {
     return __atomic_load_n(&job.cancel, __ATOMIC_ACQUIRE) != 0;
+}
+
+bool ui_job_abort_requested(void) {
+    return job_on_worker() && ui_job_cancelled();
 }
 
 void ui_job_settle(void) {
@@ -774,7 +782,12 @@ void ui_progress(const UiProgress *p) {
         job_report(p);
         return;
     }
-    if (!p->cancel_hint) progress_cancelling = false;   // another operation
+    if (!p->cancel_hint) {
+        // another operation
+        progress_cancelling = false;
+        progress_tap.armed = -1;
+        progress_pill_pressed = false;
+    }
     bool cancelling = p->cancel_hint && progress_cancelling;
     float bar_frac = smooth_progress(p);
     gui_begin(false);
@@ -786,7 +799,7 @@ void ui_progress(const UiProgress *p) {
     // work has news): the card at rest over a full scrim
     gui_scrim_full();
     gui_scrim_draw();
-    ProgressExtras x = { NULL, p->cancel_hint, cancelling, cancelling };
+    ProgressExtras x = { NULL, p->cancel_hint, cancelling || progress_pill_pressed, cancelling };
     draw_progress_card(p, bar_frac, &x);
     progress_cancel_shown = p->cancel_hint;
     gui_end();
@@ -801,9 +814,13 @@ bool ui_progress_cancel_poll(void) {
         progress_cancelling = true;   // the app is closing
         return true;
     }
-    if ((in.held & KEY_B) ||
-        (progress_cancel_shown && in.t_held && gui_rect_contains(progress_cancel_rect, in.tx, in.ty)))
-        progress_cancelling = true;
+    if (in.held & KEY_B) progress_cancelling = true;
+    if (progress_cancel_shown) {
+        int pressed = -1;
+        if (ui_tap_buttons(&progress_tap, &in, &progress_cancel_rect, 1, &pressed) == 0)
+            progress_cancelling = true;
+        progress_pill_pressed = pressed == 0;
+    }
     return progress_cancelling;
 }
 
@@ -1043,7 +1060,11 @@ float ui_bar_layout(const UiBarItem *items, int n, GuiRect *draw, GuiRect *touch
     for (int i = 0; i < n; i++) {
         float w = i == 0 ? w0 : (items[i].width > 0 ? items[i].width : rest);
         draw[i] = gui_rect_make(x, by, w, GUI_BTN_H);
-        float tx0 = i == 0 ? 0 : x - gap / 2, tx1 = i == n - 1 ? GUI_BOT_W : x + w + gap / 2;
+        // The last item's touch area runs to the screen edge, unless it has
+        // a fixed width: then whatever is drawn beside it (Settings' "LR
+        // First / last" hint) isn't part of the button
+        bool to_edge = i == n - 1 && items[i].width <= 0;
+        float tx0 = i == 0 ? 0 : x - gap / 2, tx1 = to_edge ? GUI_BOT_W : x + w + gap / 2;
         touch[i] = gui_rect_make(tx0, GUI_BAR_Y, tx1 - tx0, GUI_BAR_H);
         x += w + gap;
     }
@@ -1621,7 +1642,10 @@ void ui_draw_saves_bottom(const SavesView *v) {
         gui_text_fit(GUI_BOT_W / 2.0f, 86, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_CENTER, GUI_BOT_W - 24, line);
         // Both edit and clear work by touch, so an Old 3DS (no ZR) is
         // never stuck on an empty result
-        gui_btn(edraw[0], "B", "Clear search", GUI_BTN_TONAL, 0, v->empty_held == 1 || ((v->held & KEY_B) && v->marked <= 0));
+        // B clears marks first while any are marked: the button then shows
+        // no key, only its touch action
+        gui_btn(edraw[0], v->marked > 0 ? NULL : "B", "Clear search", GUI_BTN_TONAL, 0,
+                v->empty_held == 1 || ((v->held & KEY_B) && v->marked <= 0));
         gui_btn(edraw[1], new3ds ? "ZR" : "^search", "Edit search", GUI_BTN_TONAL, 0,
                 v->empty_held == 2 || (v->held & KEY_ZR));
     } else {
@@ -1837,8 +1861,10 @@ static void compare_top(void *ctx) {
         snprintf(line, sizeof(line), "Console %.16s  \xC2\xB7  Server %.16s",
                  d->local_exists ? d->local_hash : "-", d->server_exists ? d->server_hash : "-");
         gui_text_fit(10, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
-        snprintf(line, sizeof(line), "Last synced %s", d->has_last_synced ? d->last_synced_hash : "never");
-        gui_text_fit(10, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
+        // The full 64-digit hash: at GUI_S_SMALL with "Last synced " it
+        // needs ~400 px of the 380 and lost its tail to the ellipsis
+        snprintf(line, sizeof(line), "Synced %s", d->has_last_synced ? d->last_synced_hash : "never");
+        gui_text_fit(10, y + lh, GUI_S_TINY, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
     }
 
     // Verdict banner
@@ -2134,7 +2160,7 @@ static void restore_top(void *ctx) {
     ui_save_card(CARD_X_RIGHT, CARD_Y, &right, 0);
 
     gui_text_fit(10, CARD_Y + CARD_H + 6, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20,
-                 "The server keeps every version: restoring one doesn't remove any.");
+                 "The next sync sends it to the server, which keeps every version.");
 
     // Thin footer so the top screen looks finished
     gui_rect(0, GUI_FOOTER_Y + 8, GUI_TOP_W, GUI_FOOTER_H - 8, gui_rgb(HEX_BG2));
@@ -2276,6 +2302,13 @@ static void set_cfg_note(int row, UiTone tone, const char *text) {
     cfg_note_ms = gui_clock_ms();
     if (!cfg_note_ms) cfg_note_ms = 1;
     cfg_note_row = row;
+}
+
+void ui_settings_action_note(SettingsResult action, UiTone tone, const char *text) {
+    int row = action == SETTINGS_RESCAN ? CFG_RESCAN
+            : action == SETTINGS_REFRESH_CATALOG ? CFG_REFRESH_CATALOG
+            : action == SETTINGS_UPDATE ? CFG_UPDATE : -1;
+    if (row >= 0) set_cfg_note(row, tone, text);
 }
 
 static void config_top(void *ctx) {
@@ -2443,45 +2476,113 @@ static void probe_answer(int row, bool ok, const char *version) {
     else snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Answered");
 }
 
+// The Settings probes run on the worker (cancellable, the card animates and
+// offers Cancel after 5 s) on a copy of the config; the results are applied
+// on the main thread. Without a thread or memory they run here, as before.
+typedef struct {
+    AppConfig cfg;
+    int row;
+    bool ok, use_alt;
+    char version[24];
+    u32 key_status;
+} ProbeJob;
+
+// GET /status on the edited address, and which address requests use now
+static bool server_probe_job(void *ctx) {
+    ProbeJob *j = ctx;
+    AppConfig probe = j->cfg;
+    if (j->row == CFG_SERVER_URL_ALT) {
+        probe.use_alt_url = true;
+        j->ok = network_probe_status(&probe, j->version, sizeof(j->version));
+        probe.use_alt_url = false;
+        j->use_alt = j->ok && !network_probe_status(&probe, NULL, 0);
+    } else {
+        probe.use_alt_url = false;
+        j->ok = network_probe_status(&probe, j->version, sizeof(j->version));
+        j->use_alt = false;
+        if (!j->ok && probe.server_url_alt[0]) {
+            probe.use_alt_url = true;
+            j->use_alt = network_probe_status(&probe, NULL, 0);
+        }
+    }
+    return true;
+}
+
+static bool key_probe_job(void *ctx) {
+    ProbeJob *j = ctx;
+    j->key_status = titles_probe_key(&j->cfg);
+    return true;
+}
+
+// Runs fn on a ProbeJob filled from `in` (row set); false if cancelled.
+// `out` gets the results.
+static bool run_probe(UiJobFn fn, const ProbeJob *in, const char *msg, ProbeJob *out) {
+    ProbeJob *j = ui_job_ctx(sizeof(ProbeJob));
+    if (!j) {
+        ui_busy("Settings", msg);
+        *out = *in;
+        fn(out);
+        return true;
+    }
+    *j = *in;
+    UiProgress p = { 0 };
+    p.title = "Settings";
+    p.status = msg;
+    p.frac = -1;
+    bool cancelled = false;
+    ui_run_job(fn, j, &p, true, &cancelled);
+    if (cancelled) return false;
+    *out = *j;
+    ui_job_release(j);
+    return true;
+}
+
 // After a server address was saved: does it answer (GET /status), and which
 // address do requests use from now on (the primary when it answers, else
 // the alternate if that does, as at startup). Informs, never blocks.
 static void check_server(AppConfig *config, int row) {
-    ui_job_settle();   // a cancelled job may still be talking to the server
+    // The key was checked against the server used before: that verdict says
+    // nothing about this one
+    cfg_probe[CFG_API_KEY][0] = '\0';
+    cfg_probe_ok[CFG_API_KEY] = false;
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
-    AppConfig probe = *config;
-    char version[24];
     if (row == CFG_SERVER_URL_ALT) {
         cfg_probe[CFG_SERVER_URL_ALT][0] = '\0';
         config->use_alt_url = false;
         if (!config->server_url_alt[0]) return;   // turned off: the primary only
-        ui_busy("Settings", msg);
-        probe.use_alt_url = true;
-        bool alt_ok = network_probe_status(&probe, version, sizeof(version));
-        probe_answer(CFG_SERVER_URL_ALT, alt_ok, version);
-        probe.use_alt_url = false;
-        config->use_alt_url = alt_ok && !network_probe_status(&probe, NULL, 0);
+    } else {
+        row = CFG_SERVER_URL;
+    }
+    static ProbeJob in, res;   // main thread only; kept off its stack
+    memset(&in, 0, sizeof(in));
+    in.cfg = *config;
+    in.row = row;
+    if (!run_probe(server_probe_job, &in, msg, &res)) {
+        // Nothing learned: requests go to the primary, as before the edit
+        cfg_probe_ok[row] = false;
+        snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Not checked (cancelled)");
+        config->use_alt_url = false;
         return;
     }
-    ui_busy("Settings", msg);
-    probe.use_alt_url = false;
-    bool ok = network_probe_status(&probe, version, sizeof(version));
-    probe_answer(CFG_SERVER_URL, ok, version);
-    config->use_alt_url = false;
-    if (!ok && config->server_url_alt[0]) {
-        probe.use_alt_url = true;
-        config->use_alt_url = network_probe_status(&probe, NULL, 0);
-    }
+    probe_answer(row, res.ok, res.version);
+    config->use_alt_url = res.use_alt;
 }
 
 // After the API key was saved: the cheapest request that needs it
 static void check_key(const AppConfig *config) {
-    ui_job_settle();
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the key%s", gui_ellipsis());
-    ui_busy("Settings", msg);
-    u32 status = titles_probe_key(config);
+    static ProbeJob in, res;   // main thread only; kept off its stack
+    memset(&in, 0, sizeof(in));
+    in.cfg = *config;
+    in.row = CFG_API_KEY;
+    if (!run_probe(key_probe_job, &in, msg, &res)) {
+        cfg_probe_ok[CFG_API_KEY] = false;
+        snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Not checked (cancelled)");
+        return;
+    }
+    u32 status = res.key_status;
     cfg_probe_ok[CFG_API_KEY] = status == 200;
     if (status == 200) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key accepted");
     else if (status == 401) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key rejected (401)");
@@ -2503,7 +2604,10 @@ static void choose_nds_dir(AppConfig *config) {
     if (!path[0])
         snprintf(note, sizeof(note), "None: DS games aren't scanned.");
     else if (count.opened)
-        snprintf(note, sizeof(note), "%s \xC2\xB7 %d ROM%s, %d save%s", path, count.items,
+        // Only the first FOLDER_SCAN_CAP entries are counted: then these
+        // are minimums (every ROM is still synced)
+        snprintf(note, sizeof(note), "%s \xC2\xB7 %s%d ROM%s, %d save%s", path,
+                 count.capped ? "at least " : "", count.items,
                  count.items == 1 ? "" : "s", count.saves, count.saves == 1 ? "" : "s");
     else
         snprintf(note, sizeof(note), "%s", path);
@@ -2616,8 +2720,14 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
                                        in.rep & (KEY_UP | KEY_DOWN));
         if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
             ui_list_keys(&config_anim, in.rep, CFG_ITEMS, CFG_ITEMS, &v.selected);
-            if (v.selected < v.scroll) v.scroll = v.selected;
-            if (v.selected >= v.scroll + CFG_ROWS) v.scroll = v.selected - CFG_ROWS + 1;
+            if ((in.rep & (KEY_LEFT | KEY_RIGHT)) && !config_anim.tracking) {
+                // Stop a coast still running from a flick: when it settled
+                // it would scroll the new selection off screen again
+                ui_list_reveal(&config_anim, CFG_ITEMS, v.selected, &v.scroll);
+            } else {
+                if (v.selected < v.scroll) v.scroll = v.selected;
+                if (v.selected >= v.scroll + CFG_ROWS) v.scroll = v.selected - CFG_ROWS + 1;
+            }
         }
 
         UiBarItem item;
@@ -2752,7 +2862,9 @@ static bool dpad_editor(const UiTextField *f, char *buffer, int max_len) {
     ui_input_latch_touch();
     UiInput in;
     while (ui_input_scan(&in)) {
-        u32 down = in.down, rep = in.rep;
+        // The plain hardware repeat, as in v055: the accelerated one (made
+        // for list rows) cycles characters too fast to stop on one
+        u32 down = in.down, rep = hidKeysDownRepeat();
         if (rep & KEY_LEFT && e.cursor > 0) e.cursor--;
         if (rep & KEY_RIGHT && e.cursor < e.len) e.cursor++;
         if (rep & (KEY_UP | KEY_DOWN)) {

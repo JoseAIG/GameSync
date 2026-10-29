@@ -75,6 +75,12 @@ typedef struct {
 
     CatEntry *win;           // loaded window of the filtered list
     int win_off, win_count;
+    // Live mode: the selected entry as it was when a new window replaced
+    // the one holding it (a drag can scroll far from the selection), so
+    // the top screen and A still have it
+    CatEntry kept;
+    int kept_idx;
+    bool kept_valid;
     int total;               // filtered count, -1 before the first page
     bool filter_ignored;     // server didn't apply has_ra (too old)
     char error[96];
@@ -87,6 +93,7 @@ typedef struct {
     // test (a server returning fewer rows than its total claims)
     int ew_first, ew_off, ew_total, ew_win_off, ew_win_count;
     bool loading;            // a page request is in flight (drawn as a spinner)
+    bool shown;              // catalog_run() is drawing it (else another screen is, e.g. Settings)
     UiListAnim anim;
     UiBar bar;
     u32 held;                // keys held while the tab's own loop draws (else 0)
@@ -304,6 +311,7 @@ static void unload_lists(Catalog *cat) {
     cat->win_off = cat->win_count = 0;
     cat->ew_first = cat->ew_off = cat->ew_total = -1;
     cat->selected = cat->scroll = 0;
+    cat->kept_valid = false;
     ui_list_reset(&cat->anim);
 }
 
@@ -465,6 +473,12 @@ static bool page_job(void *ctx) {
 
 // Load the page starting at `offset` into the window
 static void fetch_window(Catalog *cat, int offset) {
+    if (!cat->cached && cat->selected >= cat->win_off && cat->selected < cat->win_off + cat->win_count) {
+        // The window is about to be replaced: keep the selection's entry
+        cat->kept = cat->win[cat->selected - cat->win_off];
+        cat->kept_idx = cat->selected;
+        cat->kept_valid = true;
+    }
     if (cat->cached) {
         const CatList *list = &cat->lists[cat->sys];
         int n = 0;
@@ -497,14 +511,16 @@ static void fetch_window(Catalog *cat, int offset) {
     j->config = *cat->config;
     snprintf(j->path, sizeof(j->path), "%s", path);
     // The list stays live underneath, showing its "Loading..." rows and the
-    // header spinner; a card only appears if the server is slow
+    // header spinner; a card only appears if the server is slow. Over any
+    // other screen (Settings > Refresh catalog) nothing would show the load:
+    // the card then appears at once.
     UiProgress p = { 0 };
     p.title = "Game Catalog";
     p.status = "Loading the list...";
     p.frac = -1;
     bool cancelled = false;
     cat->loading = true;
-    ui_run_job_ex(page_job, j, &p, UI_JOB_CANCELLABLE | UI_JOB_QUIET, &cancelled);
+    ui_run_job_ex(page_job, j, &p, UI_JOB_CANCELLABLE | (cat->shown ? UI_JOB_QUIET : 0), &cancelled);
     cat->loading = false;
     if (cancelled) {
         // Nothing changed; A asks again
@@ -530,6 +546,7 @@ static void fetch_window(Catalog *cat, int offset) {
 // drag left behind) is converted on the fly, valid until the next call.
 static const CatEntry *entry_at(const Catalog *cat, int index) {
     if (index >= cat->win_off && index < cat->win_off + cat->win_count) return &cat->win[index - cat->win_off];
+    if (!cat->cached && cat->kept_valid && index == cat->kept_idx) return &cat->kept;
     if (cat->cached && cat->filtered && index >= 0 && index < cat->filtered_count &&
         cat->list_loaded[cat->sys]) {
         static CatEntry scratch;
@@ -584,6 +601,7 @@ static void ensure_loaded(Catalog *cat) {
 
 // New filter/system: start over from the top
 static void reset_list(Catalog *cat) {
+    cat->kept_valid = false;   // indexes now mean another list
     cat->total = -1;
     cat->win_off = cat->win_count = 0;
     cat->ew_first = cat->ew_off = cat->ew_total = -1;
@@ -1500,6 +1518,7 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
     }
 
     UiBackdrop prev = ui_set_backdrop(draw_top, draw_bottom, cat);
+    cat->shown = true;
     if (!cat->ready) open_catalog(cat, NULL);
     hidSetRepeatParameters(20, 4);
 
@@ -1559,6 +1578,7 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
         cat->tabs.held = 0;
     }
 
+    cat->shown = false;
     ui_restore_backdrop(prev);
     if (saves_changed) *saves_changed = cat->nds_installed;
     cat->nds_installed = false;
@@ -1604,7 +1624,13 @@ void catalog_refresh(const AppConfig *config, char *report, size_t size) {
     u32 status = 0;
     int count = -1;
     ScanJob *j = ui_job_ctx(sizeof(ScanJob));
-    if (j) {
+    if (!j) {
+        // Nothing was asked: keep the cached catalog rather than wipe it
+        snprintf(report, size, "Out of memory: the server wasn't asked to rescan. "
+                 "The cached catalog was kept.");
+        return;
+    }
+    {
         j->config = *config;
         UiProgress p = { 0 };
         p.title = "Refresh catalog";

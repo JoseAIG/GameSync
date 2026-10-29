@@ -1,4 +1,5 @@
 #include "config_file.h"
+#include <strings.h>
 
 void config_set_defaults(AppConfig *config) {
     memset(config, 0, sizeof(AppConfig));
@@ -28,6 +29,19 @@ static void skip_bom(char *str) {
         (unsigned char)str[2] == 0xBF) {
         memmove(str, str + 3, strlen(str + 3) + 1);
     }
+}
+
+// A boolean value: 1/true/yes/on or 0/false/no/off (any case). Anything
+// else keeps `current` (the default), so a typo can never switch off a
+// safety setting such as tls_verify.
+static bool parse_bool(const char *val, bool current) {
+    static const char *const on[] = { "1", "true", "yes", "on" };
+    static const char *const off[] = { "0", "false", "no", "off" };
+    for (size_t i = 0; i < sizeof(on) / sizeof(on[0]); i++) {
+        if (strcasecmp(val, on[i]) == 0) return true;
+        if (strcasecmp(val, off[i]) == 0) return false;
+    }
+    return current;
 }
 
 static void copy_value(char *dst, size_t size, const char *val) {
@@ -80,13 +94,13 @@ void config_parse_stream(AppConfig *config, FILE *f) {
             config->local_backups = keep;
         } else if (strcmp(key, "tls_verify") == 0) {
             // 0 = accept any HTTPS certificate (old behaviour)
-            config->tls_verify = atoi(val) != 0;
+            config->tls_verify = parse_bool(val, config->tls_verify);
         } else if (strcmp(key, "update_check") == 0) {
             // 0 = never contact the server for app updates
-            config->update_check = atoi(val) != 0;
+            config->update_check = parse_bool(val, config->update_check);
         } else if (strcmp(key, "reduce_motion") == 0) {
             // 1 = no sliding or springing: fades and snaps instead
-            config->reduce_motion = atoi(val) != 0;
+            config->reduce_motion = parse_bool(val, config->reduce_motion);
         }
     }
 }

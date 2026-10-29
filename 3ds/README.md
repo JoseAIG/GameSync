@@ -83,12 +83,13 @@ keyboard, or a D-pad editor if the keyboard applet can't start).
 
 These keys can be edited in `config.txt`; all but `utc_offset_minutes` are
 also rows in the Settings tab. Saving from Settings keeps every key, including
-the ones it doesn't show.
+the ones it doesn't show. Switches take `1` or `0` (also `true`/`false`,
+`yes`/`no`, `on`/`off`); any other value keeps the default.
 
 | Key | Default | Meaning |
 |---|---|---|
 | `server_url_alt` | *(empty)* | Optional second server address, e.g. the same server's IP on another home network. At startup the client asks `server_url` for `/status`; if it doesn't answer, it tries `server_url_alt` and uses it for that session. |
-| `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. |
+| `utc_offset_minutes` | `0` | Offset of the console clock from UTC, in minutes (e.g. `-240` for UTC-4, `60` for UTC+1). The 3DS clock is local time with no time zone; this lets the client send real Unix (UTC) timestamps so they line up with other devices. `0` means automatic: the offset is worked out, to the quarter hour, from the server's clock (the `Date` header of its answers). Set it only if the server's clock is wrong. |
 | `local_backups` | `3` | Before a download or history restore overwrites a save, the current save is copied to `sdmc:/3ds/3dssync/backups/<TITLEID>/<YYYYMMDD-HHMMSS>/`. This many copies are kept per title (oldest deleted first); `0` disables the copies. |
 | `tls_verify` | `1` | For `https://` server URLs, verify the server certificate. `0` accepts any certificate (the behaviour of older versions; use it for a self-signed server). Has no effect on `http://`. |
 | `reduce_motion` | `0` | `1` turns off sliding and springing: the list highlight and scrolling jump instead of gliding, nothing nudges or bounces, and tabs and dialogs fade in instead of sliding or rising. The fade when a list wraps around, the dimming fading out after a dialog and the progress bar's glide stay. |
@@ -156,16 +157,18 @@ key that does the same thing.
   a progress bar (with speed, elapsed and remaining time for downloads).
   Downloads that can be stopped have a **B Cancel** button. Talking to the
   server (comparing a save, uploads, downloads, *Sync all*, History, game
-  names, the update check, *Refresh catalog* and catalog pages) runs in the
-  background, so the screen never freezes: the spinner keeps turning and the
+  names, the update check, *Refresh catalog*, catalog pages, and the server
+  and key checks in Settings and first-run setup) runs in the background, so the screen never freezes: the spinner keeps turning and the
   list underneath keeps moving. If the server hasn't answered for 5 seconds
   the card says "Waiting for the server… 0:07", and where stopping is safe
   (anything that only reads: comparing, History, names, the update check,
-  *Refresh catalog*, catalog pages) it offers **B Cancel**, which leaves
+  *Refresh catalog*, catalog pages, the server and key checks) it offers
+  **B Cancel**, which leaves
   everything as it was. Uploads, downloads and *Sync all* can't be cancelled
-  once they have started. A cancelled request may still be running on the
-  server; the next thing that needs the server waits for it ("Finishing the
-  request you cancelled…"). A catalog page that loads quickly shows no card
+  once they have started. A cancelled request stops waiting for the server
+  within about a second (the server may still finish its work, e.g. a
+  rescan); until then the next thing that needs the server waits for it
+  ("Finishing the request you cancelled…"). A catalog page that loads quickly shows no card
   at all, only the list's own loading rows.
 - **Catalog**, **Settings** and **History** use the same layout: a list on the
   bottom screen, details of the highlighted entry on the top.
@@ -188,9 +191,10 @@ end and the rows fade in, and a page press with nowhere left to go nudges the
 highlight. On the touch screen lists scroll like a phone's: drag them, flick
 them (they coast and settle on a whole row, and bounce softly at the ends),
 touch a coasting list to stop it. Dragging doesn't move the selection; the
-next Up / Down picks the nearest row on screen, and A / Y scroll back to the
-selection they act on. Dates read "Today 21:14", "Yesterday 21:14" or
-"Oct 12 21:14" in the console's time zone (`utc_offset_minutes`); if the
+next D-pad press (Up / Down, or Left / Right where they page) picks the
+nearest row on screen, and A / Y scroll back to the selection they act on. Dates read "Today 21:14", "Yesterday 21:14" or
+"Oct 12 21:14" in the console's time zone (`utc_offset_minutes`, or worked
+out from the server's clock); if the
 console clock looks wrong (before 2024, or more than a day behind the server) they always
 show the year instead.
 
@@ -199,6 +203,8 @@ show the year instead.
 - Every file of a downloaded bundle is checked against its SHA-256 before anything is written; a mismatch aborts the download.
 - The current save is backed up to the SD card first (see `local_backups`). If it cannot be read or backed up completely, nothing is written.
 - A History restore always asks first and says whether the current save will be backed up.
+- A restored version counts as a change made on this console: the next sync sends it to the server (or reports a conflict if another device uploaded since), instead of downloading the server's copy back over it.
+- *Sync all* never downloads over a save this console has never synced when the server's copy differs (for example one uploaded by an emulator first): it reports a conflict instead, like the single-save sync.
 - Uploading marked saves that are in conflict (Sync All marks them) asks "Replace N server copies?" in red and names them; the server keeps the replaced copies in its history.
 - If writing or committing the new save fails, the previous save is written back. To recover by hand, copy the files from the backup folder into the save with a save manager such as Checkpoint.
 - A save with more than 256 files is refused instead of being uploaded incompletely.
@@ -234,7 +240,8 @@ never reaches the screen underneath.
 | Touch | Everywhere |
 |---|---|
 | Tap a row | Select it (on release) |
-| Tap the selected row | Its A action in Settings, Catalog (asks first) and History (asks first) |
+| Tap the selected row | Its A action in Settings, Catalog (asks first), History (asks first) and the folder picker (opens it) |
+| Tap an item in a menu (the Y menu, choice lists such as Local backups) | Pick it at once (on release); anything that writes still asks first |
 | Drag / flick a list | Scroll it; a touch stops a flick |
 | Tap a sub-tab segment | Show it (same as cycling to it with SELECT) |
 | Tap a button | The same as its key |

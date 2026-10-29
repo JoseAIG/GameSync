@@ -24,6 +24,18 @@ bool network_probe_status(const AppConfig *config, char *version, int version_si
 // 0 no answer (down / unreachable), 1 answered (any HTTP status).
 int network_server_state(void);
 
+// The console clock's offset from UTC in minutes: `configured`
+// (utc_offset_minutes) when it isn't 0, else the offset learned from the
+// server's clock (the Date header of its answers, to the quarter hour), else
+// 0 until a server has answered.
+int network_utc_offset(int configured);
+
+// `fn` says whether the request running now should stop (a cancelled
+// background job, or the app closing). Requests then give up while waiting
+// for the server's answer, within about a second, and fail with
+// network_last_error() "cancelled". NULL: never.
+void network_set_abort_check(bool (*fn)(void));
+
 // HTTP GET - returns malloc'd response body, sets out_size and out_status.
 // Returns NULL on failure. Caller must free.
 u8 *network_get(const AppConfig *config, const char *path,
@@ -72,8 +84,9 @@ typedef struct {
     char error[256];    // start of the error body for NET_DL_STATUS
 } NetDlInfo;
 
-// Called about once a second while the server prepares the response (a CIA
-// conversion can take minutes). Return true to cancel.
+// Called about ten times a second while the server prepares the response (a
+// CIA conversion can take minutes), with the whole seconds waited so far.
+// Return true to cancel.
 typedef bool (*NetWaitCb)(u32 seconds, void *user);
 
 // Called for every received chunk. Return 0 to continue, 1 to cancel,

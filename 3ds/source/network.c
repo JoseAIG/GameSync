@@ -1,6 +1,7 @@
 #include "network.h"
 #include "root_certs.h"
 #include "config.h"
+#include "ui_format.h"
 #include <3ds/svc.h>
 #include <dirent.h>
 #include <stdarg.h>
@@ -172,6 +173,44 @@ int network_server_state(void) {
     return server_state;
 }
 
+// The console clock's offset from UTC, learned from the Date header of the
+// server's answers (requests run on the worker thread too: one aligned word
+// each, read on the main thread)
+static volatile int detected_offset;
+static volatile bool offset_detected;
+
+static void note_server_date(httpcContext *context) {
+    char date[40];
+    if (R_FAILED(httpcGetResponseHeader(context, "Date", date, sizeof(date)))) return;
+    int64_t server_utc;
+    if (!ui_parse_http_date(date, &server_utc)) return;
+    // osGetTime(): ms since 1900 on the console's clock (local time, no zone)
+    int64_t console = (int64_t)(osGetTime() / 1000ULL) - 2208988800LL;
+    int minutes;
+    if (!ui_clock_offset_minutes(console, server_utc, &minutes)) return;
+    if (!offset_detected || detected_offset != minutes)
+        log_line("console clock is UTC%+d min (from the server's Date)", minutes);
+    detected_offset = minutes;
+    offset_detected = true;
+}
+
+int network_utc_offset(int configured) {
+    if (configured != 0) return configured;
+    return offset_detected ? detected_offset : 0;
+}
+
+// Whether the request running now should stop (its job was cancelled, or
+// the app is closing). NULL = never.
+static bool (*abort_check)(void);
+
+void network_set_abort_check(bool (*fn)(void)) {
+    abort_check = fn;
+}
+
+static bool aborted(void) {
+    return abort_check && abort_check();
+}
+
 // Brief delay between requests to let httpc clean up
 static void request_delay(void) {
     svcSleepThread(50000000LL); // 50ms
@@ -187,8 +226,13 @@ void network_exit(void) {
 }
 
 // Build full URL from config base + path
+// (a base typed with a trailing '/' would give "//api/v1", which the server
+// answers 404 to everything: the slashes are dropped)
 static void build_url(const AppConfig *config, const char *path, char *url, int url_size) {
-    snprintf(url, url_size, "%s/api/v1%s", config_active_url(config), path);
+    const char *base = config_active_url(config);
+    int len = (int)strlen(base);
+    while (len > 0 && base[len - 1] == '/') len--;
+    snprintf(url, url_size, "%.*s/api/v1%s", len, base, path);
 }
 
 // Download data with timeout - wraps httpcReceiveDataTimeout + httpcGetDownloadSizeState
@@ -257,9 +301,11 @@ static u8 *read_response(httpcContext *context, u32 *out_size) {
 }
 
 // Open a context for url and set TLS options and the common headers.
+// `send_key`: add X-API-Key (every endpoint but GET /status needs it; the
+// status probe also goes to an address that may not be the server yet).
 // Returns false (with the error recorded) if the context can't be opened.
 static bool open_request(const AppConfig *config, httpcContext *context,
-                         HTTPC_RequestMethod method, const char *url) {
+                         HTTPC_RequestMethod method, const char *url, bool send_key) {
     Result res = httpcOpenContext(context, method, url, 0);
     if (R_FAILED(res)) {
         request_failed(url, is_https(url), "open", res);
@@ -272,7 +318,7 @@ static bool open_request(const AppConfig *config, httpcContext *context,
         httpcSetSSLOpt(context, SSLCOPT_DisableVerify);  // Not used over http://
     httpcSetKeepAlive(context, HTTPC_KEEPALIVE_DISABLED);
     httpcAddRequestHeaderField(context, "User-Agent", "3DSSaveSync/" APP_VERSION);
-    httpcAddRequestHeaderField(context, "X-API-Key", config->api_key);
+    if (send_key) httpcAddRequestHeaderField(context, "X-API-Key", config->api_key);
     httpcAddRequestHeaderField(context, "X-Console-ID", config->console_id);
     httpcAddRequestHeaderField(context, "Connection", "close");
     return true;
@@ -292,7 +338,24 @@ static u8 *finish_request(httpcContext *context, const char *url,
         return NULL;
     }
 
-    res = httpcGetResponseStatusCodeTimeout(context, out_status, response_timeout);
+    // Wait in one-second slices so a cancelled request stops within a
+    // second instead of holding the next request (and app exit) for up to
+    // the whole timeout (300 s for a ROM rescan)
+    u64 left = response_timeout;
+    for (;;) {
+        u64 slice = left < 1000000000ULL ? left : 1000000000ULL;
+        res = httpcGetResponseStatusCodeTimeout(context, out_status, slice);
+        if (res != (Result)HTTPC_RESULTCODE_TIMEDOUT) break;
+        left -= slice;
+        if (left == 0) break;
+        if (aborted()) {
+            set_error("cancelled");
+            log_line("cancelled while waiting: url=%s", url);
+            httpcCancelConnection(context);
+            httpcCloseContext(context);
+            return NULL;
+        }
+    }
     note_server(R_SUCCEEDED(res));
     if (R_FAILED(res)) {
         request_failed(url, is_https(url), "response", res);
@@ -301,6 +364,7 @@ static u8 *finish_request(httpcContext *context, const char *url,
         return NULL;
     }
 
+    note_server_date(context);
     u8 *body = read_response(context, out_size);
     if (!body) log_line("read failed: %s url=%s", last_error, url);
     httpcCancelConnection(context);
@@ -323,7 +387,7 @@ u8 *network_get_timeout(const AppConfig *config, const char *path,
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
-    if (!open_request(config, &context, HTTPC_METHOD_GET, url)) return NULL;
+    if (!open_request(config, &context, HTTPC_METHOD_GET, url, strcmp(path, "/status") != 0)) return NULL;
     return finish_request(&context, url, out_size, out_status, response_timeout);
 }
 
@@ -335,7 +399,7 @@ static u8 *post_data(const AppConfig *config, const char *path,
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
-    if (!open_request(config, &context, HTTPC_METHOD_POST, url)) return NULL;
+    if (!open_request(config, &context, HTTPC_METHOD_POST, url, true)) return NULL;
     httpcAddRequestHeaderField(&context, "Content-Type", content_type);
 
     Result res = httpcAddPostDataRaw(&context, (u32 *)body, body_size);
@@ -449,7 +513,7 @@ NetDlResult network_download(const AppConfig *config, const char *path,
 
     // Same TLS setup (tls_verify) and headers as every other request
     httpcContext context;
-    if (!open_request(config, &context, HTTPC_METHOD_GET, url))
+    if (!open_request(config, &context, HTTPC_METHOD_GET, url, true))
         return NET_DL_CONNECT;
 
     // The TLS handshake (and certificate check) happens here for https://
@@ -462,11 +526,13 @@ NetDlResult network_download(const AppConfig *config, const char *path,
     }
 
     // The server only answers once a conversion (?extract=cia) is done, so
-    // wait in one-second slices and let the caller show progress / cancel.
+    // wait in short slices and let the caller show progress / cancel. Short
+    // enough that the caller sees a normal B press or tap on Cancel (it
+    // samples the input when called), not only a held one.
     u32 status = 0;
-    u32 waited = 0;
+    u32 slices = 0, waited = 0;
     while (1) {
-        Result res = httpcGetResponseStatusCodeTimeout(&context, &status, 1000000000ULL);
+        Result res = httpcGetResponseStatusCodeTimeout(&context, &status, 100000000ULL);  // 100 ms
         if (R_SUCCEEDED(res)) break;
         if (res != (Result)HTTPC_RESULTCODE_TIMEDOUT) {
             note_server(false);
@@ -474,7 +540,7 @@ NetDlResult network_download(const AppConfig *config, const char *path,
             close_context(&context);
             return NET_DL_CONNECT;
         }
-        waited++;
+        waited = ++slices / 10;
         if (wait && wait(waited, user)) {
             close_context(&context);
             return NET_DL_CANCELLED;

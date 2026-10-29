@@ -114,11 +114,11 @@ bool ui_confirm(UiTone tone, const char *title, const char *body, const char *ye
 // Draw one frame: backdrop + progress card. Doesn't wait for vsync.
 void ui_progress(const UiProgress *p);
 // For work that polls between progress frames: reads the input and returns
-// true once B is held or a finger is on the card's Cancel pill (or the app
-// is closing). It stays true for the rest of that operation, whose next
-// frames then say "Cancelling..." with the pill pressed. Downloads poll a
-// few times a second and can't see a release reliably, so touching the
-// pill commits right away, like holding B.
+// true once B is held or a finger lifts on the card's Cancel pill (or the
+// app is closing). It stays true for the rest of that operation, whose next
+// frames then say "Cancelling..." with the pill pressed. Like every button,
+// the pill shows pressed while touched and acts on release (slide off to
+// keep going); a release between two polls is seen at the next one.
 bool ui_progress_cancel_poll(void);
 // Indeterminate progress card with a message
 void ui_busy(const char *title, const char *message);
@@ -162,6 +162,9 @@ bool ui_run_job(UiJobFn fn, void *ctx, const UiProgress *initial, bool cancellab
 bool ui_run_job_ex(UiJobFn fn, void *ctx, const UiProgress *initial, u32 flags, bool *cancelled_out);
 // For the worker: has the user cancelled (or is the app closing)?
 bool ui_job_cancelled(void);
+// The same, but only true on the worker thread (false on the main thread,
+// whose own requests aren't jobs): the network's abort check
+bool ui_job_abort_requested(void);
 // Zeroed job-owned storage for a cancellable job's ctx, valid until the
 // next ui_job_ctx() (NULL when out of memory). Waits for a cancelled worker.
 void *ui_job_ctx(size_t size);
@@ -390,6 +393,9 @@ typedef bool (*SettingsActionFn)(SettingsResult action);
 // they are confirmed. Returns SETTINGS_NAV_PREV / _NEXT / _EXIT when the
 // user leaves the tab.
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action);
+// A short outcome for an action row, shown in the help panel while that
+// row is selected (e.g. "Update check cancelled, nothing changed")
+void ui_settings_action_note(SettingsResult action, UiTone tone, const char *text);
 
 // ---------------------------------------------------------------------------
 // Folder picker

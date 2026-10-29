@@ -21,6 +21,17 @@ void ui_format_date_str(const char *iso, char *out, int out_size);
 // then unknown.
 bool ui_parse_timestamp(const char *s, int64_t *unix_out);
 
+// An HTTP Date header ("Sun, 06 Nov 1994 08:49:37 GMT") as Unix seconds.
+// False for any other form.
+bool ui_parse_http_date(const char *s, int64_t *unix_out);
+
+// The console clock's offset from UTC, in minutes, from one reading of both
+// clocks (`console_local` = console clock as seconds since 1970, as if UTC;
+// `server_utc` = the server's time): rounded to the nearest quarter hour.
+// False when it isn't a real zone (-12:00 .. +14:00): the console clock is
+// then simply wrong, and no offset fixes it.
+bool ui_clock_offset_minutes(int64_t console_local, int64_t server_utc, int *minutes_out);
+
 #define UI_NOW_UNKNOWN INT64_MIN
 
 // "Today 21:14", "Yesterday 21:14", "Oct 12 21:14" (the year is added when

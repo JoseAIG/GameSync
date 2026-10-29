@@ -100,6 +100,19 @@ static void test_written_keys(void) {
     CHECK(strstr(buf, "utc_offset_minutes=0\n") != NULL);
 }
 
+static void test_booleans(void) {
+    AppConfig c;
+    // Words, any case
+    parse_text(&c, "tls_verify=true\nupdate_check=Yes\nreduce_motion=ON\n");
+    CHECK(c.tls_verify && c.update_check && c.reduce_motion);
+    parse_text(&c, "tls_verify=false\nupdate_check=no\nreduce_motion=Off\n");
+    CHECK(!c.tls_verify && !c.update_check && !c.reduce_motion);
+    // Anything else keeps the default: a typo never turns certificate
+    // checks off
+    parse_text(&c, "tls_verify=ture\nupdate_check=\nreduce_motion=2\n");
+    CHECK(c.tls_verify && c.update_check && !c.reduce_motion);
+}
+
 static void test_clamps(void) {
     AppConfig c;
     parse_text(&c, "local_backups=99\nutc_offset_minutes=9999\n");
@@ -111,6 +124,7 @@ static void test_clamps(void) {
 }
 
 int main(void) {
+    test_booleans();
     test_defaults();
     test_every_key_round_trips();
     test_written_keys();

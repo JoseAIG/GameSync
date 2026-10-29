@@ -1604,7 +1604,13 @@ void catalog_refresh(const AppConfig *config, char *report, size_t size) {
     u32 status = 0;
     int count = -1;
     ScanJob *j = ui_job_ctx(sizeof(ScanJob));
-    if (j) {
+    if (!j) {
+        // Nothing was asked: keep the cached catalog rather than wipe it
+        snprintf(report, size, "Out of memory: the server wasn't asked to rescan. "
+                 "The cached catalog was kept.");
+        return;
+    }
+    {
         j->config = *config;
         UiProgress p = { 0 };
         p.title = "Refresh catalog";

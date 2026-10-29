@@ -78,8 +78,9 @@ typedef struct {
     char error[256];    // start of the error body for NET_DL_STATUS
 } NetDlInfo;
 
-// Called about once a second while the server prepares the response (a CIA
-// conversion can take minutes). Return true to cancel.
+// Called about ten times a second while the server prepares the response (a
+// CIA conversion can take minutes), with the whole seconds waited so far.
+// Return true to cancel.
 typedef bool (*NetWaitCb)(u32 seconds, void *user);
 
 // Called for every received chunk. Return 0 to continue, 1 to cancel,

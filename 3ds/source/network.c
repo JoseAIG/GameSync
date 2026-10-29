@@ -495,11 +495,13 @@ NetDlResult network_download(const AppConfig *config, const char *path,
     }
 
     // The server only answers once a conversion (?extract=cia) is done, so
-    // wait in one-second slices and let the caller show progress / cancel.
+    // wait in short slices and let the caller show progress / cancel. Short
+    // enough that the caller sees a normal B press or tap on Cancel (it
+    // samples the input when called), not only a held one.
     u32 status = 0;
-    u32 waited = 0;
+    u32 slices = 0, waited = 0;
     while (1) {
-        Result res = httpcGetResponseStatusCodeTimeout(&context, &status, 1000000000ULL);
+        Result res = httpcGetResponseStatusCodeTimeout(&context, &status, 100000000ULL);  // 100 ms
         if (R_SUCCEEDED(res)) break;
         if (res != (Result)HTTPC_RESULTCODE_TIMEDOUT) {
             note_server(false);
@@ -507,7 +509,7 @@ NetDlResult network_download(const AppConfig *config, const char *path,
             close_context(&context);
             return NET_DL_CONNECT;
         }
-        waited++;
+        waited = ++slices / 10;
         if (wait && wait(waited, user)) {
             close_context(&context);
             return NET_DL_CANCELLED;

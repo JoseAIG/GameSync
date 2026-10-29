@@ -214,8 +214,13 @@ void network_exit(void) {
 }
 
 // Build full URL from config base + path
+// (a base typed with a trailing '/' would give "//api/v1", which the server
+// answers 404 to everything: the slashes are dropped)
 static void build_url(const AppConfig *config, const char *path, char *url, int url_size) {
-    snprintf(url, url_size, "%s/api/v1%s", config_active_url(config), path);
+    const char *base = config_active_url(config);
+    int len = (int)strlen(base);
+    while (len > 0 && base[len - 1] == '/') len--;
+    snprintf(url, url_size, "%.*s/api/v1%s", len, base, path);
 }
 
 // Download data with timeout - wraps httpcReceiveDataTimeout + httpcGetDownloadSizeState

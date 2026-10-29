@@ -2448,6 +2448,10 @@ static void probe_answer(int row, bool ok, const char *version) {
 // the alternate if that does, as at startup). Informs, never blocks.
 static void check_server(AppConfig *config, int row) {
     ui_job_settle();   // a cancelled job may still be talking to the server
+    // The key was checked against the server used before: that verdict says
+    // nothing about this one
+    cfg_probe[CFG_API_KEY][0] = '\0';
+    cfg_probe_ok[CFG_API_KEY] = false;
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
     AppConfig probe = *config;

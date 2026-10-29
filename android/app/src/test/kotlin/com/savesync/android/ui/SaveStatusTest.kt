@@ -158,7 +158,7 @@ class SaveStatusTest {
 
     @Test
     fun `server source prefers the server's label, then platform and console`() {
-        assertEquals("3ds_emu", serverSourceLabel("3ds_emu", "android", "abcdef1234"))
+        assertEquals("handheld", serverSourceLabel("handheld", "android", "abcdef1234"))
         assertEquals("android · 1234", serverSourceLabel(null, "android", "abcdef1234"))
         assertEquals("android", serverSourceLabel("", "android", null))
         assertEquals("Unknown device", serverSourceLabel(null, null, null))
@@ -167,6 +167,16 @@ class SaveStatusTest {
         assertEquals("Device 1234", serverSourceLabel("gc_card", null, "abcdef1234"))
         assertEquals("GameCube memory card", serverSourceLabel("gc_card", null, null))
         assertEquals("Raw save upload", serverSourceLabel("raw", "GBA", null))
+    }
+
+    @Test
+    fun `the source tags this app sends are never shown raw`() {
+        assertEquals("3DS · 1234", serverSourceLabel("3ds_emu", "3DS", "abcdef1234"))
+        assertEquals("Wii U emulator", serverSourceLabel("wiiu_emu", null, null))
+        assertEquals("Android", serverSourceLabel("android", null, null))
+        // PSP uploads are filed under the shared console id "psp": not a device.
+        assertEquals("PSP emulator", serverSourceLabel("psp_emu", "PSP", "psp"))
+        assertEquals("PSP emulator", serverSourceLabel("PSP_EMU", null, "psp"))
     }
 
     @Test

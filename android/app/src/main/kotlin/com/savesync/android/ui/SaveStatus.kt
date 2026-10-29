@@ -169,15 +169,19 @@ fun resolveSelection(titleIds: List<String>, selectedTitleId: String?, lastIndex
  * The detail screen's "From" for the server copy: the server's
  * last_sync_source, else the platform plus the last four characters of the
  * console id ("android · 3f9a"), else "Unknown device".  Some sources name
- * only the route the save came in by ("raw", "gc_card"), not the device:
- * for those the platform and console id say more, and the route is put in
- * words when they are missing.
+ * only the route the save came in by ("raw", "gc_card") or the kind of
+ * client ("psp_emu", which this app sends too), not the device: for those
+ * the platform and console id say more, and the source is put in words
+ * when they are missing.  The server files every PSP-emulator upload under
+ * the shared console id "psp", which names no device.
  */
 fun serverSourceLabel(lastSyncSource: String?, platform: String?, consoleId: String?): String {
     val source = lastSyncSource?.trim()?.takeIf { it.isNotEmpty() }
     val transport = source?.let { TRANSPORT_SOURCES[it.lowercase()] }
     if (source != null && transport == null) return source
-    val tail = consoleId?.trim()?.takeIf { it.isNotEmpty() }?.takeLast(4)
+    val tail = consoleId?.trim()
+        ?.takeIf { it.isNotEmpty() && !it.equals(SHARED_PSP_CONSOLE_ID, ignoreCase = true) }
+        ?.takeLast(4)
     val plat = platform?.trim()?.takeIf { it.isNotEmpty() }
     return when {
         plat != null && tail != null -> "$plat · $tail"
@@ -188,9 +192,20 @@ fun serverSourceLabel(lastSyncSource: String?, platform: String?, consoleId: Str
     }
 }
 
-/** Server sources that name an upload route rather than a device. */
+/** server/app/routes/saves.py `_resolve_console_id`: every PSP upload's console id. */
+private const val SHARED_PSP_CONSOLE_ID = "psp"
+
+/**
+ * Server sources that name an upload route or a kind of client rather than
+ * a device.  Includes every `source` this app sends (SaveSyncApi /
+ * SyncEngine), so "From" never shows a raw tag.
+ */
 private val TRANSPORT_SOURCES = mapOf(
     "raw" to "Raw save upload",
+    "android" to "Android",
+    "psp_emu" to "PSP emulator",
+    "3ds_emu" to "3DS emulator",
+    "wiiu_emu" to "Wii U emulator",
     "ps1_card" to "PS1 memory card",
     "ps2_card" to "PS2 memory card",
     "gc_card" to "GameCube memory card",

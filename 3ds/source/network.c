@@ -289,9 +289,11 @@ static u8 *read_response(httpcContext *context, u32 *out_size) {
 }
 
 // Open a context for url and set TLS options and the common headers.
+// `send_key`: add X-API-Key (every endpoint but GET /status needs it; the
+// status probe also goes to an address that may not be the server yet).
 // Returns false (with the error recorded) if the context can't be opened.
 static bool open_request(const AppConfig *config, httpcContext *context,
-                         HTTPC_RequestMethod method, const char *url) {
+                         HTTPC_RequestMethod method, const char *url, bool send_key) {
     Result res = httpcOpenContext(context, method, url, 0);
     if (R_FAILED(res)) {
         request_failed(url, is_https(url), "open", res);
@@ -304,7 +306,7 @@ static bool open_request(const AppConfig *config, httpcContext *context,
         httpcSetSSLOpt(context, SSLCOPT_DisableVerify);  // Not used over http://
     httpcSetKeepAlive(context, HTTPC_KEEPALIVE_DISABLED);
     httpcAddRequestHeaderField(context, "User-Agent", "3DSSaveSync/" APP_VERSION);
-    httpcAddRequestHeaderField(context, "X-API-Key", config->api_key);
+    if (send_key) httpcAddRequestHeaderField(context, "X-API-Key", config->api_key);
     httpcAddRequestHeaderField(context, "X-Console-ID", config->console_id);
     httpcAddRequestHeaderField(context, "Connection", "close");
     return true;
@@ -356,7 +358,7 @@ u8 *network_get_timeout(const AppConfig *config, const char *path,
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
-    if (!open_request(config, &context, HTTPC_METHOD_GET, url)) return NULL;
+    if (!open_request(config, &context, HTTPC_METHOD_GET, url, strcmp(path, "/status") != 0)) return NULL;
     return finish_request(&context, url, out_size, out_status, response_timeout);
 }
 
@@ -368,7 +370,7 @@ static u8 *post_data(const AppConfig *config, const char *path,
     build_url(config, path, url, sizeof(url));
 
     httpcContext context;
-    if (!open_request(config, &context, HTTPC_METHOD_POST, url)) return NULL;
+    if (!open_request(config, &context, HTTPC_METHOD_POST, url, true)) return NULL;
     httpcAddRequestHeaderField(&context, "Content-Type", content_type);
 
     Result res = httpcAddPostDataRaw(&context, (u32 *)body, body_size);
@@ -482,7 +484,7 @@ NetDlResult network_download(const AppConfig *config, const char *path,
 
     // Same TLS setup (tls_verify) and headers as every other request
     httpcContext context;
-    if (!open_request(config, &context, HTTPC_METHOD_GET, url))
+    if (!open_request(config, &context, HTTPC_METHOD_GET, url, true))
         return NET_DL_CONNECT;
 
     // The TLS handshake (and certificate check) happens here for https://

@@ -189,9 +189,10 @@ end and the rows fade in, and a page press with nowhere left to go nudges the
 highlight. On the touch screen lists scroll like a phone's: drag them, flick
 them (they coast and settle on a whole row, and bounce softly at the ends),
 touch a coasting list to stop it. Dragging doesn't move the selection; the
-next Up / Down picks the nearest row on screen, and A / Y scroll back to the
-selection they act on. Dates read "Today 21:14", "Yesterday 21:14" or
-"Oct 12 21:14" in the console's time zone (`utc_offset_minutes`); if the
+next D-pad press (Up / Down, or Left / Right where they page) picks the
+nearest row on screen, and A / Y scroll back to the selection they act on. Dates read "Today 21:14", "Yesterday 21:14" or
+"Oct 12 21:14" in the console's time zone (`utc_offset_minutes`, or worked
+out from the server's clock); if the
 console clock looks wrong (before 2024, or more than a day behind the server) they always
 show the year instead.
 
@@ -237,7 +238,8 @@ never reaches the screen underneath.
 | Touch | Everywhere |
 |---|---|
 | Tap a row | Select it (on release) |
-| Tap the selected row | Its A action in Settings, Catalog (asks first) and History (asks first) |
+| Tap the selected row | Its A action in Settings, Catalog (asks first), History (asks first) and the folder picker (opens it) |
+| Tap an item in a menu (the Y menu, choice lists such as Local backups) | Pick it at once (on release); anything that writes still asks first |
 | Drag / flick a list | Scroll it; a touch stops a flick |
 | Tap a sub-tab segment | Show it (same as cycling to it with SELECT) |
 | Tap a button | The same as its key |

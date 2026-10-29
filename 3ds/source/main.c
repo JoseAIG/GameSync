@@ -1206,6 +1206,15 @@ static bool do_update(void) {
         ui_message(UI_TONE_ERR, "Update", "Update check failed.\n\n" UI_DIM "Check WiFi and the server URL.");
         return false;
     }
+    if (!update_info.available && !update_info.latest_version[0]) {
+        // No release named: the server didn't look one up (its update check
+        // is off, or GitHub didn't answer), so this says nothing about
+        // whether this version is the latest
+        ui_message(UI_TONE_INFO, "Update",
+                   "The server couldn't look up the latest release.\n\n"
+                   UI_DIM "Its update check may be turned off, or GitHub didn't answer.");
+        return false;
+    }
     if (!update_info.available) {
         char body[96];
         snprintf(body, sizeof(body), "You have the latest version (%s).", APP_VERSION);

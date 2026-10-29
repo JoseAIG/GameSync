@@ -451,6 +451,10 @@ static float smooth_progress(const UiProgress *p) {
 
 static GuiRect progress_cancel_rect;   // touch rect of the last card's Cancel pill
 static bool progress_cancel_shown;
+// The pill outside a job (catalog downloads): like every button it acts
+// when the finger lifts on it, and shows pressed while it is down
+static UiTap progress_tap = { -1 };
+static bool progress_pill_pressed;
 
 // What a card shows beyond its UiProgress
 typedef struct {
@@ -774,7 +778,12 @@ void ui_progress(const UiProgress *p) {
         job_report(p);
         return;
     }
-    if (!p->cancel_hint) progress_cancelling = false;   // another operation
+    if (!p->cancel_hint) {
+        // another operation
+        progress_cancelling = false;
+        progress_tap.armed = -1;
+        progress_pill_pressed = false;
+    }
     bool cancelling = p->cancel_hint && progress_cancelling;
     float bar_frac = smooth_progress(p);
     gui_begin(false);
@@ -786,7 +795,7 @@ void ui_progress(const UiProgress *p) {
     // work has news): the card at rest over a full scrim
     gui_scrim_full();
     gui_scrim_draw();
-    ProgressExtras x = { NULL, p->cancel_hint, cancelling, cancelling };
+    ProgressExtras x = { NULL, p->cancel_hint, cancelling || progress_pill_pressed, cancelling };
     draw_progress_card(p, bar_frac, &x);
     progress_cancel_shown = p->cancel_hint;
     gui_end();
@@ -801,9 +810,13 @@ bool ui_progress_cancel_poll(void) {
         progress_cancelling = true;   // the app is closing
         return true;
     }
-    if ((in.held & KEY_B) ||
-        (progress_cancel_shown && in.t_held && gui_rect_contains(progress_cancel_rect, in.tx, in.ty)))
-        progress_cancelling = true;
+    if (in.held & KEY_B) progress_cancelling = true;
+    if (progress_cancel_shown) {
+        int pressed = -1;
+        if (ui_tap_buttons(&progress_tap, &in, &progress_cancel_rect, 1, &pressed) == 0)
+            progress_cancelling = true;
+        progress_pill_pressed = pressed == 0;
+    }
     return progress_cancelling;
 }
 

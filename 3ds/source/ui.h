@@ -114,11 +114,11 @@ bool ui_confirm(UiTone tone, const char *title, const char *body, const char *ye
 // Draw one frame: backdrop + progress card. Doesn't wait for vsync.
 void ui_progress(const UiProgress *p);
 // For work that polls between progress frames: reads the input and returns
-// true once B is held or a finger is on the card's Cancel pill (or the app
-// is closing). It stays true for the rest of that operation, whose next
-// frames then say "Cancelling..." with the pill pressed. Downloads poll a
-// few times a second and can't see a release reliably, so touching the
-// pill commits right away, like holding B.
+// true once B is held or a finger lifts on the card's Cancel pill (or the
+// app is closing). It stays true for the rest of that operation, whose next
+// frames then say "Cancelling..." with the pill pressed. Like every button,
+// the pill shows pressed while touched and acts on release (slide off to
+// keep going); a release between two polls is seen at the next one.
 bool ui_progress_cancel_poll(void);
 // Indeterminate progress card with a message
 void ui_busy(const char *title, const char *message);

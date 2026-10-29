@@ -592,10 +592,11 @@ fun RomCatalogScreen(
                         // an empty list), so Retry is touch-only and carries no
                         // A glyph; a pad user waits for the automatic retry or
                         // uses Settings → Refresh catalog.
+                        val copy = catalogErrorCopy(error ?: "", serverHostOf(settings.serverUrl))
                         CenterMessage(
-                            title = "Couldn't reach ${serverHostOf(settings.serverUrl)}",
-                            detail = "Check the server is running and on the same network.",
-                            footnotes = listOf(error ?: "", "Retrying when the server comes back"),
+                            title = copy.title,
+                            detail = copy.detail,
+                            footnotes = copy.footnotes,
                             action = "Retry" to { viewModel.fetchRomCatalog() },
                         )
                     }
@@ -829,3 +830,40 @@ internal const val DOWNLOADS_TAB = 3
 internal fun serverHostOf(serverUrl: String): String =
     runCatching { java.net.URI(serverUrl.trim()).host }.getOrNull()?.takeIf { it.isNotBlank() }
         ?: serverUrl.trim().ifEmpty { "the server" }
+
+/** What the empty catalog says when loading it failed. */
+internal data class CatalogErrorCopy(val title: String, val detail: String, val footnotes: List<String>)
+
+/**
+ * The failed-catalog message for [error] (the load's exception message).
+ * Only a network failure is "couldn't reach" with an automatic retry; a
+ * server that answered (a rejected API key, a server error, a reply that
+ * isn't a catalog) says so, since waiting for it to "come back" won't help.
+ */
+internal fun catalogErrorCopy(error: String, host: String): CatalogErrorCopy {
+    val code = Regex("""\bHTTP (\d{3})\b""").find(error)?.groupValues?.get(1)?.toIntOrNull()
+    val parse = listOf("Expected BEGIN", "Expected a", "JsonSyntax", "JsonDataException", "MalformedJson", "Unexpected JSON", "Use JsonReader.setLenient")
+        .any { error.contains(it, ignoreCase = true) }
+    return when {
+        code == 401 || code == 403 -> CatalogErrorCopy(
+            title = "$host rejected the API key",
+            detail = "Check the API key in Settings.",
+            footnotes = listOf(error),
+        )
+        code != null -> CatalogErrorCopy(
+            title = "$host answered with an error",
+            detail = "Check the server's log, then Retry.",
+            footnotes = listOf(error),
+        )
+        parse -> CatalogErrorCopy(
+            title = "Unexpected reply from $host",
+            detail = "Check that the server URL points at a GameSync server.",
+            footnotes = listOf(error),
+        )
+        else -> CatalogErrorCopy(
+            title = "Couldn't reach $host",
+            detail = "Check the server is running and on the same network.",
+            footnotes = listOf(error, "Retrying when the server comes back"),
+        )
+    }
+}

@@ -1563,6 +1563,8 @@ int main(int argc, char *argv[]) {
 
     // The network service first: first-run setup checks the server with it
     bool net_ok = network_init();
+    // A cancelled background request stops waiting for the server
+    network_set_abort_check(ui_job_abort_requested);
 
     char config_error[512];
     bool config_ok = config_load(&config, config_error, sizeof(config_error));

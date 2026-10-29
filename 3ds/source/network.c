@@ -199,6 +199,18 @@ int network_utc_offset(int configured) {
     return offset_detected ? detected_offset : 0;
 }
 
+// Whether the request running now should stop (its job was cancelled, or
+// the app is closing). NULL = never.
+static bool (*abort_check)(void);
+
+void network_set_abort_check(bool (*fn)(void)) {
+    abort_check = fn;
+}
+
+static bool aborted(void) {
+    return abort_check && abort_check();
+}
+
 // Brief delay between requests to let httpc clean up
 static void request_delay(void) {
     svcSleepThread(50000000LL); // 50ms
@@ -326,7 +338,24 @@ static u8 *finish_request(httpcContext *context, const char *url,
         return NULL;
     }
 
-    res = httpcGetResponseStatusCodeTimeout(context, out_status, response_timeout);
+    // Wait in one-second slices so a cancelled request stops within a
+    // second instead of holding the next request (and app exit) for up to
+    // the whole timeout (300 s for a ROM rescan)
+    u64 left = response_timeout;
+    for (;;) {
+        u64 slice = left < 1000000000ULL ? left : 1000000000ULL;
+        res = httpcGetResponseStatusCodeTimeout(context, out_status, slice);
+        if (res != (Result)HTTPC_RESULTCODE_TIMEDOUT) break;
+        left -= slice;
+        if (left == 0) break;
+        if (aborted()) {
+            set_error("cancelled");
+            log_line("cancelled while waiting: url=%s", url);
+            httpcCancelConnection(context);
+            httpcCloseContext(context);
+            return NULL;
+        }
+    }
     note_server(R_SUCCEEDED(res));
     if (R_FAILED(res)) {
         request_failed(url, is_https(url), "response", res);

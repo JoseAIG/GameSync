@@ -598,6 +598,10 @@ bool ui_job_cancelled(void) {
     return __atomic_load_n(&job.cancel, __ATOMIC_ACQUIRE) != 0;
 }
 
+bool ui_job_abort_requested(void) {
+    return job_on_worker() && ui_job_cancelled();
+}
+
 void ui_job_settle(void) {
     if (!job.thread) return;
     if (!job_done()) {

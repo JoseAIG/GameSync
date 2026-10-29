@@ -164,9 +164,10 @@ key that does the same thing.
   (anything that only reads: comparing, History, names, the update check,
   *Refresh catalog*, catalog pages) it offers **B Cancel**, which leaves
   everything as it was. Uploads, downloads and *Sync all* can't be cancelled
-  once they have started. A cancelled request may still be running on the
-  server; the next thing that needs the server waits for it ("Finishing the
-  request you cancelled…"). A catalog page that loads quickly shows no card
+  once they have started. A cancelled request stops waiting for the server
+  within about a second (the server may still finish its work, e.g. a
+  rescan); until then the next thing that needs the server waits for it
+  ("Finishing the request you cancelled…"). A catalog page that loads quickly shows no card
   at all, only the list's own loading rows.
 - **Catalog**, **Settings** and **History** use the same layout: a list on the
   bottom screen, details of the highlighted entry on the top.

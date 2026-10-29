@@ -30,6 +30,12 @@ int network_server_state(void);
 // 0 until a server has answered.
 int network_utc_offset(int configured);
 
+// `fn` says whether the request running now should stop (a cancelled
+// background job, or the app closing). Requests then give up while waiting
+// for the server's answer, within about a second, and fail with
+// network_last_error() "cancelled". NULL: never.
+void network_set_abort_check(bool (*fn)(void));
+
 // HTTP GET - returns malloc'd response body, sets out_size and out_status.
 // Returns NULL on failure. Caller must free.
 u8 *network_get(const AppConfig *config, const char *path,

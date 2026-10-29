@@ -162,6 +162,9 @@ bool ui_run_job(UiJobFn fn, void *ctx, const UiProgress *initial, bool cancellab
 bool ui_run_job_ex(UiJobFn fn, void *ctx, const UiProgress *initial, u32 flags, bool *cancelled_out);
 // For the worker: has the user cancelled (or is the app closing)?
 bool ui_job_cancelled(void);
+// The same, but only true on the worker thread (false on the main thread,
+// whose own requests aren't jobs): the network's abort check
+bool ui_job_abort_requested(void);
 // Zeroed job-owned storage for a cancellable job's ctx, valid until the
 // next ui_job_ctx() (NULL when out of memory). Waits for a cancelled worker.
 void *ui_job_ctx(size_t size);

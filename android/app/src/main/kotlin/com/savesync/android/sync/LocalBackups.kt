@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.savesync.android.storage.SyncStateDao
 import com.savesync.android.storage.SyncStateEntity
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -66,6 +67,14 @@ class LocalBackupStore(
      * Copies [target] (a file or a folder) into a new snapshot and prunes the
      * title to the newest [keep].  Returns the snapshot folder, or null when
      * there is nothing to keep (no target yet: a first download).
+     *
+     * When the newest snapshot (same [reason]) already holds exactly what
+     * [target] holds — a download that failed after its snapshot and is
+     * retried every auto sync — that snapshot is renewed instead of copied
+     * again, so repeats can't push older, different copies out.
+     *
+     * The copy is flushed to disk before this returns: the write that
+     * follows is fsynced, and must never become durable before its backup.
      * @throws BackupFailedException when the copy can't be made; the caller
      *   must then not overwrite [target].
      */
@@ -91,6 +100,18 @@ class LocalBackupStore(
             var name = stamp
             var n = 2
             while (File(parent, name).exists() || File(parent, "$name$PARTIAL").exists()) name = "$stamp-${n++}"
+            val done = File(parent, name)
+
+            val newest = latest(titleId)
+            if (newest != null && newest.reason == reason && newest.isDirectory == isDir &&
+                sameContent(newest.payload, target, isDir)
+            ) {
+                val meta = SnapshotMeta(now, reason, previousLastSyncedHash, previousLastSyncedAt, newest.payload.name, isDir)
+                writeSynced(File(newest.dir, META), gson.toJson(meta))
+                if (!newest.dir.renameTo(done)) throw IOException("Could not renew snapshot ${newest.dir}")
+                return done
+            }
+
             val work = File(parent, "$name$PARTIAL").also { partial = it }
             if (!work.mkdirs()) throw IOException("Could not create $work")
             val payloadName = payloadNameFor(target)
@@ -100,9 +121,9 @@ class LocalBackupStore(
             } else {
                 target.copyTo(copy, overwrite = true)
             }
+            copy.walkTopDown().filter { it.isFile }.forEach(::syncFile)
             val meta = SnapshotMeta(now, reason, previousLastSyncedHash, previousLastSyncedAt, payloadName, isDir)
-            File(work, META).writeText(gson.toJson(meta))
-            val done = File(parent, name)
+            writeSynced(File(work, META), gson.toJson(meta))
             if (!work.renameTo(done)) throw IOException("Could not finish snapshot $done")
             partial = null
             prune(titleId, protect)
@@ -178,6 +199,42 @@ class LocalBackupStore(
             )
         )
         return true
+    }
+
+    /** Flushes [file]'s data to the storage device. */
+    private fun syncFile(file: File) {
+        FileOutputStream(file, true).use { it.fd.sync() }
+    }
+
+    private fun writeSynced(file: File, text: String) {
+        FileOutputStream(file).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.flush()
+            out.fd.sync()
+        }
+    }
+
+    /** Whether snapshot [payload] holds byte-for-byte what [target] holds now. */
+    private fun sameContent(payload: File, target: File, isDir: Boolean): Boolean {
+        if (!isDir) return payload.isFile && filesEqual(payload, target)
+        if (!payload.isDirectory) return false
+        fun filesOf(root: File) = root.walkTopDown().filter { it.isFile }.associateBy { it.relativeTo(root).path }
+        val kept = filesOf(payload)
+        val now = filesOf(target)
+        return kept.keys == now.keys && kept.all { (path, f) -> filesEqual(f, now.getValue(path)) }
+    }
+
+    private fun filesEqual(a: File, b: File): Boolean {
+        if (a.length() != b.length()) return false
+        a.inputStream().buffered().use { x ->
+            b.inputStream().buffered().use { y ->
+                while (true) {
+                    val c = x.read()
+                    if (c != y.read()) return false
+                    if (c == -1) return true
+                }
+            }
+        }
     }
 
     private fun prune(titleId: String, protect: File? = null) {

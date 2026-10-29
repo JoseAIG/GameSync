@@ -57,6 +57,37 @@ class LocalBackupsTest {
     }
 
     @Test
+    fun `a download retried over the same save renews its snapshot instead of pushing older ones out`() {
+        val s = store()
+        val save = tmp.newFile("game.srm")
+        (1..4).forEach { i ->
+            save.writeText("v$i")
+            s.snapshot("T", save, "download", previousLastSyncedHash = "h$i")
+        }
+        // The fifth download fails after its snapshot, every auto sync.
+        save.writeText("v5")
+        repeat(6) { s.snapshot("T", save, "download", previousLastSyncedHash = "h5") }
+        val kept = s.list("T")
+        assertEquals(5, kept.size)
+        assertEquals(listOf("v5", "v4", "v3", "v2", "v1"), kept.map { it.payload.readText() })
+    }
+
+    @Test
+    fun `a folder snapshot is renewed only when every file matches`() {
+        val s = store()
+        val dir = tmp.newFolder("00000001")
+        File(dir, "a.bin").writeBytes(byteArrayOf(1))
+        val first = s.snapshot("3DS", dir, "download", "h")!!
+        val renewed = s.snapshot("3DS", dir, "download", "h")!!
+        assertEquals(1, s.list("3DS").size)
+        assertFalse(first.exists())
+        assertTrue(renewed.exists())
+        File(dir, "b.bin").writeBytes(byteArrayOf(2))
+        s.snapshot("3DS", dir, "download", "h")
+        assertEquals(2, s.list("3DS").size)
+    }
+
+    @Test
     fun `nothing is copied before the first download`() {
         val s = store()
         assertNull(s.snapshot("T", File(tmp.root, "missing.sav"), "download", null))

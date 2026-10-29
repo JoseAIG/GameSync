@@ -59,7 +59,7 @@ All settings are via environment variables with the `SYNC_` prefix, or in a `ser
 | `SYNC_MAX_UPLOAD_BYTES` | `67108864` (64 MiB) | Largest accepted request body; bigger uploads get `413`. `0` disables the limit |
 | `SYNC_MAX_DECOMPRESSED_BYTES` | `268435456` (256 MiB) | Largest uncompressed payload accepted in a compressed save bundle. `0` disables the limit |
 | `SYNC_UPDATE_REPO` | `pepasjc/GameSync` | GitHub `owner/repo` whose releases `/update/check` reports and `/update/download` may proxy for the 3DS/NDS clients |
-| `SYNC_UPDATE_PROXY_ENABLED` | `true` | Set `false` to disable both update endpoints (no outbound requests) |
+| `SYNC_UPDATE_PROXY_ENABLED` | `true` | Set `false` to disable both update endpoints (no outbound requests). `/update/check` then answers 503, so clients report the check as failed rather than "up to date" |
 | `SYNC_EMULATOR_INDEX_ENABLED` | `true` | `GET /emulators/ps5sx2/game-index` fetches PCSX2's `GameIndex.yaml` from GitHub on request (cached under `SYNC_SAVE_DIR/.emulator_cache/`). Set `false` to turn the endpoint off: it answers `404` and makes no outbound requests |
 | `SYNC_TRUST_PROXY_AUTH` | `false` | Trust the `X-Remote-User` header set by nginx Basic Auth (see [User Roles](#user-roles)). Only enable it when clients cannot reach the server except through that proxy |
 | `SYNC_LAN_ADMIN` | `false` | Treat every web UI visitor as admin and embed the API key in the page. Only for a LAN that is never exposed to the internet |

@@ -56,7 +56,9 @@ pausa (`docker compose pause` / `unpause`).
 - Sin catálogo de ROMs (`SYNC_ROM_DIR` sin definir).
 - Sin RetroAchievements.
 - Sin documentación pública.
-- Sin proxy de actualizaciones.
+- Sin proxy de actualizaciones. La 3DS muestra "Update check failed" al
+  buscar actualizaciones: el servidor responde 503 en vez de fingir que no
+  hay versión nueva.
 - Sin índice de juegos para emuladores (`GameIndex.yaml` de PS5SX2).
 - Key solo por header.
 - Sin access log de uvicorn.

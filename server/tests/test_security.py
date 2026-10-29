@@ -414,9 +414,11 @@ class TestUpdateProxySSRF:
             "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
         )
         assert r.status_code == 404
+        # Disabled is an error, not "no update": the 3DS would otherwise say
+        # "You have the latest version" without anything having been checked.
         r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json()["available"] is False
+        assert r.status_code == 503
+        assert "disabled" in r.json()["detail"]
         assert github_mock["seen"] == []
 
     def test_check_uses_configured_repo(self, client, auth_headers, github_mock, monkeypatch):
@@ -440,6 +442,37 @@ class TestUpdateProxySSRF:
         )
         r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
         assert r.json()["available"] is True
+        assert r.json()["sha256"] is None  # no digest published
+
+    @pytest.mark.parametrize(
+        "digest, expected",
+        [
+            ("sha256:" + "AB" * 32, "ab" * 32),
+            ("sha256:" + "ab" * 31, None),  # wrong length
+            ("md5:" + "ab" * 16, None),
+            (None, None),
+        ],
+    )
+    def test_check_passes_asset_sha256(
+        self, client, auth_headers, github_mock, monkeypatch, digest, expected
+    ):
+        import httpx
+
+        monkeypatch.setattr(settings, "update_repo", "JoseAIG/GameSync")
+        api = "https://api.github.com/repos/JoseAIG/GameSync/releases/latest"
+        asset = {
+            "name": "3dssync.cia",
+            "browser_download_url": "https://github.com/JoseAIG/GameSync/releases/download/v9.9.9/3dssync.cia",
+            "size": 1,
+        }
+        if digest is not None:
+            asset["digest"] = digest
+        github_mock["routes"][api] = httpx.Response(
+            200, json={"tag_name": "v9.9.9", "body": "", "assets": [asset]}
+        )
+        r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
+        assert r.json()["available"] is True
+        assert r.json()["sha256"] == expected
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────

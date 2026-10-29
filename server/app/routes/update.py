@@ -93,6 +93,21 @@ class UpdateInfo(BaseModel):
     download_url: str | None = None
     changelog: str | None = None
     file_size: int | None = None
+    # SHA-256 of the asset (hex), from GitHub's asset ``digest`` when present.
+    # The 3DS verifies the downloaded CIA against it.
+    sha256: str | None = None
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _asset_sha256(asset: dict) -> str | None:
+    """Hex SHA-256 from a GitHub asset's ``digest`` (``sha256:<hex>``)."""
+    digest = asset.get("digest")
+    if not isinstance(digest, str) or not digest.startswith("sha256:"):
+        return None
+    hexdigest = digest[len("sha256:"):].lower()
+    return hexdigest if _SHA256_RE.match(hexdigest) else None
 
 
 @router.get("/update/check")
@@ -109,7 +124,11 @@ async def check_update(current: str = "0.0.0", platform: str = "3ds") -> UpdateI
     extension = PLATFORM_EXTENSIONS.get(platform, ".cia")
 
     if not settings.update_proxy_enabled:
-        return UpdateInfo(available=False, current_version=current)
+        # Not a "no update" answer: the clients would report "You have the
+        # latest version" without anything having been checked.
+        raise HTTPException(
+            status_code=503, detail="Update checks are disabled on this server"
+        )
 
     try:
         async with _http_client() as client:
@@ -128,10 +147,12 @@ async def check_update(current: str = "0.0.0", platform: str = "3ds") -> UpdateI
             # Find asset matching the platform extension
             download_url = None
             file_size = None
+            sha256 = None
             for asset in data.get("assets", []):
                 if asset["name"].endswith(extension):
                     download_url = asset["browser_download_url"]
                     file_size = asset["size"]
+                    sha256 = _asset_sha256(asset)
                     break
 
             # Compare versions
@@ -144,6 +165,7 @@ async def check_update(current: str = "0.0.0", platform: str = "3ds") -> UpdateI
                 download_url=download_url,
                 changelog=data.get("body", ""),
                 file_size=file_size,
+                sha256=sha256,
             )
 
     except Exception:

@@ -86,6 +86,28 @@ class SyncEngine(
      */
     private val backups: LocalBackupStore by lazy { backupStore ?: LocalBackups.store }
 
+    /**
+     * What each download by this engine wrote, by title id: the base
+     * [recordDownloaded] records.  Hashed from the bytes (or the staged
+     * folder) before the swap, so a save the emulator writes after the swap
+     * never becomes the base.
+     */
+    private val writtenSaves = java.util.concurrent.ConcurrentHashMap<String, WrittenSave>()
+
+    /** Test seam: runs after a download has landed, before its base is recorded. */
+    internal var beforeDownloadRecorded: (SaveEntry) -> Unit = {}
+
+    private fun noteWritten(entry: SaveEntry, written: WrittenSave?) {
+        if (written == null || written.hash.isEmpty()) writtenSaves.remove(entry.titleId)
+        else writtenSaves[entry.titleId] = written
+    }
+
+    /** [writtenFileSave] for a download about to put [bytes] in [entry]'s save file; null if unpredictable. */
+    private fun writtenFile(entry: SaveEntry, bytes: ByteArray, downloadedCanonical: ByteArray? = null): WrittenSave? =
+        runCatching { writtenFileSave(entry, bytes, saturnSyncFormat, downloadedCanonical) }
+            .onFailure { Log.w(TAG, "Couldn't hash the downloaded save for ${entry.titleId}", it) }
+            .getOrNull()
+
     /** The title's sync state now, recorded in the snapshot (see [LocalBackup]). */
     private suspend fun syncStateForBackup(entry: SaveEntry): SyncStateEntity? = dao.getById(entry.titleId)
 
@@ -402,22 +424,25 @@ class SyncEngine(
                 else -> downloadRawCard(entry)
             }
             if (!ok) throw IOException(if (title.action == PlannedAction.UPLOAD) "Upload failed" else "Download failed")
-            if (title.action == PlannedAction.UPLOAD) updateSyncState(entry, hashBeforeUpload) else updateSyncStateFromFile(entry)
+            if (title.action == PlannedAction.UPLOAD) updateSyncState(entry, hashBeforeUpload) else recordDownloaded(entry, fromFile = true)
             true
         }
         PlanRoute.SERVER_ONLY -> {
             val ok = downloadSave(entry, entry.titleId)
             if (ok) {
-                // A "server only" entry is hashed from the file just written
-                // (its own hash would be empty); a local entry the request
-                // left out is recorded the way the old server_only pass did.
-                if (entry.isServerOnly) updateSyncStateFromFile(entry) else updateSyncState(entry)
+                // The base is what the download wrote.  (Unpredictable shapes
+                // re-read the disk: a "server only" entry from the file just
+                // written, as its own hash would be empty.)
+                recordDownloaded(entry, fromFile = entry.isServerOnly)
             }
             ok
         }
         PlanRoute.SYNC -> {
             val ok = if (title.action == PlannedAction.UPLOAD) uploadSave(entry) else downloadSave(entry, entry.titleId)
-            if (ok) updateSyncState(entry, hashBeforeUpload)
+            if (ok) {
+                if (title.action == PlannedAction.UPLOAD) updateSyncState(entry, hashBeforeUpload)
+                else recordDownloaded(entry, fromFile = false)
+            }
             ok
         }
     }
@@ -676,11 +701,14 @@ class SyncEngine(
         val prev = syncStateForBackup(entry)
         return when {
             entry.isMultiFile && entry.saveDir != null -> {
+                var written: WrittenSave? = null
                 backedUpWrite(backups, entry.titleId, entry.saveDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
                     AtomicSaveWriter.replaceDirectory(entry.saveDir, keepExisting = true) { staging ->
                         unzipBytesToDirectory(canonicalBytes, staging)
+                        written = stagedDirHash(entry, staging)?.let(::WrittenSave)
                     }
                 }
+                noteWritten(entry, written)
                 true
             }
             entry.saveFile != null -> {
@@ -693,9 +721,11 @@ class SyncEngine(
                 } else {
                     canonicalBytes
                 }
+                val written = writtenFile(entry, bytesToWrite, downloadedCanonical = canonicalBytes)
                 backedUpWrite(backups, entry.titleId, entry.saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
                     AtomicSaveWriter.replaceFile(entry.saveFile, bytesToWrite)
                 }
+                noteWritten(entry, written)
                 true
             }
             else -> false
@@ -834,6 +864,7 @@ class SyncEngine(
     }
 
     suspend fun downloadSave(entry: SaveEntry, titleId: String): Boolean {
+        writtenSaves.remove(entry.titleId)
         return if (entry.isPspSlot) {
             downloadPspBundle(entry, titleId)
         } else if (isTreeBundleEntry(entry)) {
@@ -991,9 +1022,11 @@ class SyncEngine(
             val body = response.body() ?: return false
             val bytes = body.bytes()
             val prev = syncStateForBackup(entry)
+            val written = writtenFile(entry, bytes)
             backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
                 AtomicSaveWriter.replaceFile(saveFile, bytes)
             }
+            noteWritten(entry, written)
             true
         } catch (e: BackupFailedException) {
             throw e
@@ -1016,9 +1049,11 @@ class SyncEngine(
             val body = response.body() ?: return false
             val bytes = body.bytes()
             val prev = syncStateForBackup(entry)
+            val written = writtenFile(entry, bytes)
             backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
                 AtomicSaveWriter.replaceFile(saveFile, bytes)
             }
+            noteWritten(entry, written)
             true
         } catch (e: BackupFailedException) {
             throw e
@@ -1075,9 +1110,13 @@ class SyncEngine(
             // Overlay onto the existing slot (files the bundle doesn't carry
             // are kept, as before), but swap the result in atomically.
             val prev = syncStateForBackup(entry)
+            var written: WrittenSave? = null
             backedUpWrite(backups, entry.titleId, slotDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
-                AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true)
+                AtomicSaveWriter.replaceDirectory(slotDir, files, keepExisting = true) { staged ->
+                    written = stagedDirHash(entry, staged)?.let(::WrittenSave)
+                }
             }
+            noteWritten(entry, written)
             true
         } catch (e: BackupFailedException) {
             throw e
@@ -1104,9 +1143,13 @@ class SyncEngine(
             // verify it, then swap.  The old save is only removed once the new
             // one is in place, so a failure never leaves a half-written save.
             val prev = syncStateForBackup(entry)
+            var written: WrittenSave? = null
             backedUpWrite(backups, entry.titleId, saveDir, prev?.lastSyncedHash, prev?.lastSyncedAt) {
-                AtomicSaveWriter.replaceDirectory(saveDir, files)
+                AtomicSaveWriter.replaceDirectory(saveDir, files) { staged ->
+                    written = stagedDirHash(entry, staged)?.let(::WrittenSave)
+                }
             }
+            noteWritten(entry, written)
             true
         } catch (e: BackupFailedException) {
             throw e
@@ -1126,8 +1169,41 @@ class SyncEngine(
         saturnCanonicalSnapshot(e)?.let { HashUtils.sha256Bytes(it.bytes) } ?: e.computeHash()
     }.getOrNull()?.takeIf { it.isNotEmpty() }
 
-    suspend fun recordSyncedStateFromFile(entry: SaveEntry) {
-        updateSyncStateFromFile(entry)
+    /** Records [entry] as synced after [downloadSave] landed: see [recordDownloaded]. */
+    suspend fun recordDownloadedState(entry: SaveEntry) {
+        recordDownloaded(entry, fromFile = true)
+    }
+
+    /**
+     * Records [entry] as synced after a download.  The base is what the
+     * download wrote, hashed as [localSyncHash] hashes the save, not the
+     * save re-read now: the emulator may have written it since the swap,
+     * and with that copy as the base the next sync would see "only the
+     * server changed" and download over the new play.  A shape the download
+     * couldn't hash as written falls back to reading the disk ([fromFile]:
+     * [updateSyncStateFromFile], else [updateSyncState]).
+     */
+    private suspend fun recordDownloaded(entry: SaveEntry, fromFile: Boolean) {
+        beforeDownloadRecorded(entry)
+        val written = writtenSaves.remove(entry.titleId)
+        if (written == null) {
+            if (fromFile) updateSyncStateFromFile(entry) else updateSyncState(entry)
+            return
+        }
+        try {
+            written.saturnArchiveNames?.let { SaturnArchiveStateStore.put(entry.titleId, it) }
+            dao.upsert(
+                SyncStateEntity(
+                    titleId = entry.titleId,
+                    lastSyncedHash = written.hash,
+                    lastSyncedAt = System.currentTimeMillis(),
+                    displayName = entry.displayName,
+                    systemName = entry.systemName
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update sync state for ${entry.titleId}", e)
+        }
     }
 
     /**
@@ -1296,9 +1372,11 @@ class SyncEngine(
             }
             val bytes = response.body()?.bytes() ?: return false
             val prev = syncStateForBackup(entry)
+            val written = writtenFile(entry, bytes)
             backedUpWrite(backups, entry.titleId, saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
                 AtomicSaveWriter.replaceFile(saveFile, bytes)
             }
+            noteWritten(entry, written)
             true
         } catch (e: BackupFailedException) {
             throw e
@@ -1413,5 +1491,64 @@ fun localSaveTimestamp(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): Lo
 fun localSyncHash(entry: SaveEntry, saturnSyncFormat: SaturnSyncFormat): String =
     saturnCanonicalBytes(entry, saturnSyncFormat)?.let { HashUtils.sha256Bytes(it) }
         ?: entry.computeHash()
+
+/** What a download wrote: the sync base to record, and a Saturn save's archive names. */
+internal class WrittenSave(val hash: String, val saturnArchiveNames: List<String>? = null)
+
+/**
+ * [localSyncHash] of [entry] once its save file holds [written] (companion
+ * files as they are on disk), computed from the bytes rather than the disk.
+ * A shared YabaSanshiro container hashes this title's part, picked by the
+ * archives in [downloadedCanonical] (the server's copy), as the archive
+ * store will then hold.  Null for a shape whose hash isn't the save file's
+ * (a save folder), or a shared container with no archives to pick.
+ * May throw (unparsable Saturn bytes, unreadable companion file).
+ */
+internal fun writtenFileSave(
+    entry: SaveEntry,
+    written: ByteArray,
+    saturnSyncFormat: SaturnSyncFormat,
+    downloadedCanonical: ByteArray? = null,
+): WrittenSave? {
+    val saveFile = entry.saveFile ?: return null
+    if (isSaturnSaveEntry(entry)) {
+        val canonical = if (isSharedYabaSanshiroSave(entry, saturnSyncFormat)) {
+            val names = downloadedCanonical?.let { SaturnSaveFormatConverter.archiveNames(it) }.orEmpty()
+            if (names.isEmpty()) return null
+            SaturnSaveFormatConverter.extractCanonical(written, names)
+        } else {
+            SaturnSaveFormatConverter.toCanonical(written)
+        }
+        return WrittenSave(HashUtils.sha256Bytes(canonical), SaturnSaveFormatConverter.archiveNames(canonical))
+    }
+    // computeHash() hashes a save folder ahead of the file for these.
+    if (entry.saveDir != null) return null
+    val hash = when {
+        entry.extraFiles.isNotEmpty() -> {
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            (listOf(saveFile) + entry.extraFiles)
+                .filter { it == saveFile || it.exists() }
+                .sortedBy { it.name }
+                .forEach { f -> if (f == saveFile) digest.update(written) else digest.update(f.readBytes()) }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        }
+        entry.systemName == "PS2" -> Ps2CardEcc.normalizedHash(written) ?: HashUtils.sha256Bytes(written)
+        else -> HashUtils.sha256Bytes(written)
+    }
+    return WrittenSave(hash)
+}
+
+/**
+ * [SaveEntry.computeHash] of [entry]'s save folder, taken from [staged]: the
+ * folder about to be swapped in.  Null when the folder isn't what the hash
+ * covers.
+ */
+internal fun stagedDirHash(entry: SaveEntry, staged: File): String? = when {
+    entry.isPspSlot -> HashUtils.sha256DirFiles(staged)
+    entry.isTreeSaveDir -> HashUtils.sha256DirTreeFiles(staged)
+    entry.saveFile != null -> null
+    entry.isMultiFile -> HashUtils.sha256Dir(staged)
+    else -> null
+}
 
 private const val ROM_BUFFER_SIZE = 8192

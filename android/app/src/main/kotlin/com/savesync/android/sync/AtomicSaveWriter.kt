@@ -75,11 +75,15 @@ object AtomicSaveWriter {
      *
      * Every entry name must stay inside the directory; an unsafe name aborts
      * the whole write and leaves [targetDir] untouched.
+     *
+     * [onStaged] sees the finished, verified staging directory just before
+     * the swap (under the swap lock): exactly what lands in [targetDir].
      */
     fun replaceDirectory(
         targetDir: File,
         files: List<Pair<String, ByteArray>>,
-        keepExisting: Boolean = false
+        keepExisting: Boolean = false,
+        onStaged: (File) -> Unit = {},
     ) {
         replaceDirectory(targetDir, keepExisting) { staging ->
             for ((name, data) in files) {
@@ -91,6 +95,7 @@ object AtomicSaveWriter {
             for ((name, data) in files) {
                 verify(File(staging, name), sha256(data))
             }
+            onStaged(staging)
         }
     }
 

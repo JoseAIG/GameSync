@@ -3199,7 +3199,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 var backedUp = false
                 if (ok) {
                     clearConflict(entry.titleId)
-                    withContext(Dispatchers.IO) { engine.recordSyncedStateFromFile(entry) }
+                    withContext(Dispatchers.IO) { engine.recordDownloadedState(entry) }
                     backedUp = latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
                     if (backedUp) _backupsVersion.value++
                     fetchServerMeta(entry.titleId, entry.systemName)

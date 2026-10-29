@@ -342,7 +342,7 @@ static void pick_enter(Picker *p, int index) {
     if (index < 0 || index >= p->list.count) return;
     char path[FOLDER_PATH_MAX];
     child_path(p, index, path, sizeof(path));
-    // The row being opened (not always the highlighted one: "Open <best>/"
+    // The row being opened (not always the highlighted one: "Open it"
     // in the empty-folder dialog opens another), shown on screen, so going
     // back up finds it here and keeps every saved level
     int scroll = p->scroll;
@@ -440,7 +440,7 @@ static PickOutcome pick_empty_choice(Picker *p) {
         }
     }
 
-    char title[64], body[FOLDER_PATH_MAX + 160], name[40], open[48];
+    char title[64], body[FOLDER_PATH_MAX + 160], name[40];
     snprintf(title, sizeof(title), "No %s here", p->rules->item_label);
     if (best >= 0) {
         char found[24];
@@ -448,8 +448,9 @@ static PickOutcome pick_empty_choice(Picker *p) {
         if (cut) strncat(name, gui_ellipsis(), sizeof(name) - strlen(name) - 1);
         snprintf(found, sizeof(found), "%d", best_count.items);
         snprintf(body, sizeof(body), "%s\n" UI_HI "Found %s in %s/.", p->path, found, name);
-        snprintf(open, sizeof(open), "Open %s/", name);
-        UiButton b[3] = { { KEY_B, "B", "Back" }, { KEY_X, "X", "Use anyway" }, { KEY_A, "A", open } };
+        // The body names the folder: three buttons share one row (~87 px),
+        // too narrow for "Open <name>/"
+        UiButton b[3] = { { KEY_B, "B", "Back" }, { KEY_X, "X", "Use anyway" }, { KEY_A, "A", "Open it" } };
         u32 k = ui_dialog(UI_TONE_WARN, title, body, b, 3);
         if (k & KEY_X) return PICK_CHOSEN;
         if (k & KEY_A) pick_enter(p, best);

@@ -216,4 +216,44 @@ class AtomicSaveWriterTest {
         assertTrue(file.isFile)
         assertArrayEquals(byteArrayOf(1), file.readBytes())
     }
+
+    @Test
+    fun `merging writers to one shared file never drop each other's change`() {
+        val shared = File(tmp.root, "backup.bin").apply { writeText("") }
+        val aRead = java.util.concurrent.CountDownLatch(1)
+        val releaseA = java.util.concurrent.CountDownLatch(1)
+
+        // A reads the container, then is held before it swaps; B merges its
+        // own part meanwhile.  B must see A's part, not the copy A read.
+        val a = Thread {
+            AtomicSaveWriter.replaceFileMerging(shared) { now ->
+                aRead.countDown()
+                releaseA.await()
+                ((now?.let { String(it) } ?: "") + "A").toByteArray()
+            }
+        }
+        val b = Thread {
+            AtomicSaveWriter.replaceFileMerging(shared) { now -> ((now?.let { String(it) } ?: "") + "B").toByteArray() }
+        }
+        a.start()
+        aRead.await()
+        b.start()
+        Thread.sleep(200)
+        releaseA.countDown()
+        a.join(); b.join()
+
+        assertEquals("AB", shared.readText())
+        assertFalse(AtomicSaveWriter.stagingFor(shared).exists())
+    }
+
+    @Test
+    fun `merging writer sees no current file as null and returns what it wrote`() {
+        val target = File(tmp.root, "new/backup.bin")
+        val written = AtomicSaveWriter.replaceFileMerging(target) { now ->
+            assertEquals(null, now)
+            byteArrayOf(7)
+        }
+        assertArrayEquals(byteArrayOf(7), written)
+        assertArrayEquals(byteArrayOf(7), target.readBytes())
+    }
 }

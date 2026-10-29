@@ -64,6 +64,20 @@ object AtomicSaveWriter {
     }
 
     /**
+     * [replaceFile] with bytes built from [target]'s current contents (null
+     * when there is none), read under the swap lock.  For a file several
+     * titles share (YabaSanshiro's backup.bin): another writer in the app
+     * can't swap in its change between this read and this swap, so neither
+     * merge drops the other's.  Returns the bytes written.
+     */
+    fun replaceFileMerging(target: File, build: (existing: ByteArray?) -> ByteArray): ByteArray =
+        synchronized(swapLock) {
+            val bytes = build(target.takeIf { it.isFile }?.readBytes())
+            replaceFile(target, bytes)
+            bytes
+        }
+
+    /**
      * Writes [files] (relative path → bytes) into a fresh directory and swaps
      * it in place of [targetDir].
      *

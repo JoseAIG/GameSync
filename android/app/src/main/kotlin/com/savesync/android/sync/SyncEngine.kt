@@ -713,10 +713,21 @@ class SyncEngine(
             }
             entry.saveFile != null -> {
                 entry.saveFile.parentFile?.mkdirs()
-                val bytesToWrite = if (isSharedYabaSanshiroContainer(entry)) {
-                    val existing = entry.saveFile.takeIf { it.exists() }?.readBytes()
-                    SaturnSaveFormatConverter.mergeCanonicalIntoYabaSanshiro(existing, canonicalBytes)
-                } else if (isSaturnEntry(entry)) {
+                if (isSharedYabaSanshiroContainer(entry)) {
+                    // Read, merged and swapped under the swap lock: another
+                    // title's download or restore into the same container
+                    // can't land in between and be dropped.
+                    var written: WrittenSave? = null
+                    backedUpWrite(backups, entry.titleId, entry.saveFile, prev?.lastSyncedHash, prev?.lastSyncedAt) {
+                        val merged = AtomicSaveWriter.replaceFileMerging(entry.saveFile) { existing ->
+                            SaturnSaveFormatConverter.mergeCanonicalIntoYabaSanshiro(existing, canonicalBytes)
+                        }
+                        written = writtenFile(entry, merged, downloadedCanonical = canonicalBytes)
+                    }
+                    noteWritten(entry, written)
+                    return true
+                }
+                val bytesToWrite = if (isSaturnEntry(entry)) {
                     SaturnSaveFormatConverter.fromCanonical(canonicalBytes, saturnSyncFormat)
                 } else {
                     canonicalBytes

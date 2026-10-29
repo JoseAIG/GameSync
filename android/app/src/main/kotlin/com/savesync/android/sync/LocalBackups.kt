@@ -194,8 +194,13 @@ class LocalBackupStore(
             }
         } else {
             val bytes = chosen.payload.readBytes()
-            val toWrite = merge?.invoke(bytes, target.takeIf { it.isFile }?.readBytes()) ?: bytes
-            AtomicSaveWriter.replaceFile(target, toWrite)
+            if (merge != null) {
+                // The current file is read under the swap lock, so a download
+                // into the same shared container can't be dropped by this merge.
+                AtomicSaveWriter.replaceFileMerging(target) { now -> merge(bytes, now) }
+            } else {
+                AtomicSaveWriter.replaceFile(target, bytes)
+            }
         }
 
         dao.upsert(

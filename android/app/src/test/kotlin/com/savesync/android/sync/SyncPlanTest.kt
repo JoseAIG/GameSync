@@ -263,6 +263,30 @@ class SyncPlanTest {
     }
 
     @Test
+    fun `a stale upload that shrank since the preview is not sent`() = runBlocking {
+        val server = FakeServer(serverSize = 1000)
+        val dao = syncedDao("A")
+        val engine = SyncEngine(server.api, dao, "console")
+        val entry = save("A", 900)
+        val preview = engine.plan(listOf(entry))
+        assertTrue("not a suspect when planned", preview.suspects.isEmpty())
+        // The user started a fresh game before pressing Sync.
+        entry.saveFile!!.writeBytes(ByteArray(10) { 1 })
+        val stale = SyncPreview(
+            titles = preview.titles,
+            suspects = preview.suspects,
+            sizeCheckSkipped = preview.sizeCheckSkipped,
+            errors = preview.errors,
+            createdAtMs = 0L,
+            entries = preview.entries,
+            conflictInfo = preview.conflictInfo,
+        )
+        val result = engine.execute(stale, emptySet())
+        assertTrue(server.uploads.isEmpty())
+        assertEquals(listOf("Game A"), result.changedSincePreview)
+    }
+
+    @Test
     fun `a fresh preview runs without asking again`() = runBlocking {
         val server = FakeServer(serverSize = 100)
         val engine = SyncEngine(server.api, syncedDao("A"), "console")

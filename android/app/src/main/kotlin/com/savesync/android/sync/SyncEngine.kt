@@ -314,6 +314,17 @@ class SyncEngine(
                     changed.add(title.displayName)
                     continue
                 }
+                // An upload that became a rollback suspect since the preview
+                // (the save shrank or lost files) is not sent on stale
+                // sizes; an included suspect only if it is unchanged.
+                val now = fresh.suspects[title.titleId]
+                val seen = preview.suspects.firstOrNull { it.titleId == title.titleId }
+                if (now != null &&
+                    (seen == null || seen.localSize != now.localSize || seen.localFileCount != now.localFileCount)
+                ) {
+                    changed.add(title.displayName)
+                    continue
+                }
             }
             try {
                 val ok = runPlanned(title, entry)
@@ -399,6 +410,8 @@ class SyncEngine(
         /** Titles the re-check couldn't decide (server unreachable): they don't run. */
         val failedIds: Set<String>,
         val errors: List<String>,
+        /** Uploads that look like a rollback now, from the sizes on disk now. */
+        val suspects: Map<String, SuspectUpload> = emptyMap(),
     )
 
     /**
@@ -411,12 +424,20 @@ class SyncEngine(
         val failed = mutableSetOf<String>()
         val errors = mutableListOf<String>()
 
+        val current = mutableMapOf<String, SaveEntry>()
+        val states = mutableMapOf<String, SyncStateEntity?>()
+        val sentSize = mutableMapOf<String, Long>()
+        val rawMeta = mutableMapOf<String, SaveMeta>()
+
         val syncRoute = titles.filter { it.route == PlanRoute.SYNC }
         if (syncRoute.isNotEmpty()) {
             val ignored = mutableListOf<String>()
             val request = syncRoute.mapNotNull { t ->
                 val entry = entries[t.titleId]?.reconcileWithDisk() ?: return@mapNotNull null
-                buildSyncTitle(entry, dao.getById(t.titleId), ignored)
+                val state = dao.getById(t.titleId)
+                current[t.titleId] = entry
+                states[t.titleId] = state
+                buildSyncTitle(entry, state, ignored)?.also { sentSize[it.title_id] = it.size }
             }
             try {
                 if (request.isNotEmpty()) {
@@ -441,14 +462,19 @@ class SyncEngine(
         for (t in titles.filter { it.route == PlanRoute.RAW_CARD }) {
             val entry = entries[t.titleId] ?: continue
             try {
-                planRawCard(entry).first?.let { actions[t.titleId] = it }
+                val (action, meta) = planRawCard(entry)
+                action?.let { actions[t.titleId] = it }
+                meta?.let { rawMeta[t.titleId] = it }
+                current[t.titleId] = entry
             } catch (e: Exception) {
                 Log.e(TAG, "Raw-card re-check failed for ${t.titleId}", e)
                 failed.add(t.titleId)
                 errors.add("Sync error: ${entry.displayName}: ${e.message}")
             }
         }
-        return FreshDecisions(actions, failed, errors)
+        val uploadsNow = titles.filter { it.titleId !in failed && actions[it.titleId] == PlannedAction.UPLOAD }
+        val (suspects, _) = findSuspectUploads(uploadsNow, current, states, sentSize, rawMeta)
+        return FreshDecisions(actions, failed, errors, suspects.associateBy { it.titleId })
     }
 
     /** The /sync request line for [entry], or null (no local save, or unreadable: noted in [errors]). */

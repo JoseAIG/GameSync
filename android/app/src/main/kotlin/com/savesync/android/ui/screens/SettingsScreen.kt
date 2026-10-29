@@ -47,6 +47,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -287,8 +288,8 @@ fun SettingsScreen(
                     .onFocusChanged {
                         if (urlFocused && !it.isFocused) commitUrl()
                         urlFocused = it.isFocused
-                    }
-                    .gsFocusRing(GsShapes.Field),
+                    },
+                colors = gsFieldColors(),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = {
@@ -308,8 +309,8 @@ fun SettingsScreen(
                     .onFocusChanged {
                         if (keyFocused && !it.isFocused) commitKey()
                         keyFocused = it.isFocused
-                    }
-                    .gsFocusRing(GsShapes.Field),
+                    },
+                colors = gsFieldColors(),
                 singleLine = true,
                 visualTransformation = if (apiKeyVisible) VisualTransformation.None
                     else PasswordVisualTransformation(),
@@ -599,8 +600,8 @@ fun SettingsScreen(
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(addSystemExpanded) },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .menuAnchor()
-                                .gsFocusRing(GsShapes.Field),
+                                .menuAnchor(),
+                            colors = gsFieldColors(),
                             textStyle = MaterialTheme.typography.bodySmall
                         )
                         ExposedDropdownMenu(
@@ -1058,8 +1059,8 @@ private fun <T> SettingsDropdown(
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
             modifier = Modifier
                 .fillMaxWidth()
-                .menuAnchor()
-                .gsFocusRing(GsShapes.Field)
+                .menuAnchor(),
+            colors = gsFieldColors(),
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { option ->
@@ -1084,3 +1085,11 @@ private val SETTINGS_CHROME = GsChromeSpec(
         GsHint(GsButton.START, "Exit"),
     ),
 )
+
+/**
+ * A text field's colours: its own focused outline, in the focus-ring colour,
+ * is the D-pad ring.  A gsFocusRing around the whole field would also ring
+ * the label gap and the caption under it, and double the outline.
+ */
+@Composable
+private fun gsFieldColors() = OutlinedTextFieldDefaults.colors(focusedBorderColor = GsColors.Accent2)

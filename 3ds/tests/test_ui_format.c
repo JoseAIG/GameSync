@@ -192,11 +192,40 @@ static void test_backup_choices(void) {
     for (int i = 1; i < n; i++) CHECK(values[i - 1] < values[i]);
 }
 
+static void test_server_clock(void) {
+    int64_t t = 0;
+    CHECK(ui_parse_http_date("Fri, 02 Jan 2026 03:04:05 GMT", &t) && t == 1767323045);
+    CHECK(ui_parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT", &t) && t == 0);
+    CHECK(ui_parse_http_date("Thu, 29 Feb 2024 23:59:59 GMT", &t) && t == 1709251199);
+    CHECK(!ui_parse_http_date("Fri, 02 Foo 2026 03:04:05 GMT", &t));
+    CHECK(!ui_parse_http_date("Fri, 02 Jan 2026 03:04:05 UTC", &t));
+    CHECK(!ui_parse_http_date("Friday, 02-Jan-26 03:04:05 GMT", &t));
+    CHECK(!ui_parse_http_date("2026-01-02T03:04:05Z", &t));
+    CHECK(!ui_parse_http_date("", &t));
+    CHECK(!ui_parse_http_date(NULL, &t));
+
+    int m = 1;
+    const int64_t utc = 1793016000;
+    // A console set to UTC-4 local time, a few seconds of latency
+    CHECK(ui_clock_offset_minutes(utc - 4 * 3600 + 3, utc, &m) && m == -240);
+    // UTC+5:30, and a clock that drifted 6 minutes
+    CHECK(ui_clock_offset_minutes(utc + 330 * 60 + 6 * 60, utc, &m) && m == 330);
+    CHECK(ui_clock_offset_minutes(utc - 6 * 60, utc, &m) && m == 0);
+    CHECK(ui_clock_offset_minutes(utc + 14 * 3600, utc, &m) && m == 840);
+    CHECK(ui_clock_offset_minutes(utc - 12 * 3600, utc, &m) && m == -720);
+    // Not a zone: the console clock is just wrong (e.g. stuck in 1990)
+    m = 7;
+    CHECK(!ui_clock_offset_minutes(utc - 13 * 3600, utc, &m) && m == 7);
+    CHECK(!ui_clock_offset_minutes(utc + 15 * 3600, utc, &m));
+    CHECK(!ui_clock_offset_minutes(631152000, utc, &m));
+}
+
 int main(void) {
     test_backup_choices();
     test_search();
     test_text_entry();
     test_parse();
+    test_server_clock();
     test_when();
     test_labels();
     TEST_DONE();

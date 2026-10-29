@@ -121,6 +121,30 @@ static const char *const month_names[12] = {
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 };
 
+bool ui_parse_http_date(const char *s, int64_t *unix_out) {
+    // "Sun, 06 Nov 1994 08:49:37 GMT" (IMF-fixdate, RFC 9110 5.6.7)
+    if (!s || strlen(s) != 29 || s[3] != ',' || s[4] != ' ' || s[7] != ' ' || s[11] != ' ' ||
+        s[16] != ' ' || s[19] != ':' || s[22] != ':' || s[25] != ' ' || strcmp(s + 26, "GMT") != 0)
+        return false;
+    int mo = 0;
+    for (int i = 0; i < 12 && !mo; i++)
+        if (strncmp(s + 8, month_names[i], 3) == 0) mo = i + 1;
+    int d = digits(s + 5, 2), y = digits(s + 12, 4);
+    int h = digits(s + 17, 2), mi = digits(s + 20, 2), sec = digits(s + 23, 2);
+    if (!mo || d < 1 || d > 31 || y < 0 || h < 0 || h > 23 || mi < 0 || mi > 59 || sec < 0 || sec > 60)
+        return false;
+    *unix_out = days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec;
+    return true;
+}
+
+bool ui_clock_offset_minutes(int64_t console_local, int64_t server_utc, int *minutes_out) {
+    // Zones are whole quarter hours; a few minutes of clock drift round away
+    int64_t quarters = floor_div(console_local - server_utc + 450, 900);
+    if (quarters < -12 * 4 || quarters > 14 * 4) return false;
+    *minutes_out = (int)(quarters * 15);
+    return true;
+}
+
 void ui_format_when_at(const char *iso, int utc_offset_minutes, int64_t now_local,
                        char *out, int out_size) {
     int64_t utc;

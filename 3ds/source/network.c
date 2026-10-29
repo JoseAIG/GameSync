@@ -1,6 +1,7 @@
 #include "network.h"
 #include "root_certs.h"
 #include "config.h"
+#include "ui_format.h"
 #include <3ds/svc.h>
 #include <dirent.h>
 #include <stdarg.h>
@@ -172,6 +173,32 @@ int network_server_state(void) {
     return server_state;
 }
 
+// The console clock's offset from UTC, learned from the Date header of the
+// server's answers (requests run on the worker thread too: one aligned word
+// each, read on the main thread)
+static volatile int detected_offset;
+static volatile bool offset_detected;
+
+static void note_server_date(httpcContext *context) {
+    char date[40];
+    if (R_FAILED(httpcGetResponseHeader(context, "Date", date, sizeof(date)))) return;
+    int64_t server_utc;
+    if (!ui_parse_http_date(date, &server_utc)) return;
+    // osGetTime(): ms since 1900 on the console's clock (local time, no zone)
+    int64_t console = (int64_t)(osGetTime() / 1000ULL) - 2208988800LL;
+    int minutes;
+    if (!ui_clock_offset_minutes(console, server_utc, &minutes)) return;
+    if (!offset_detected || detected_offset != minutes)
+        log_line("console clock is UTC%+d min (from the server's Date)", minutes);
+    detected_offset = minutes;
+    offset_detected = true;
+}
+
+int network_utc_offset(int configured) {
+    if (configured != 0) return configured;
+    return offset_detected ? detected_offset : 0;
+}
+
 // Brief delay between requests to let httpc clean up
 static void request_delay(void) {
     svcSleepThread(50000000LL); // 50ms
@@ -301,6 +328,7 @@ static u8 *finish_request(httpcContext *context, const char *url,
         return NULL;
     }
 
+    note_server_date(context);
     u8 *body = read_response(context, out_size);
     if (!body) log_line("read failed: %s url=%s", last_error, url);
     httpcCancelConnection(context);

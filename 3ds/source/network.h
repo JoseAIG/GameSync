@@ -24,6 +24,12 @@ bool network_probe_status(const AppConfig *config, char *version, int version_si
 // 0 no answer (down / unreachable), 1 answered (any HTTP status).
 int network_server_state(void);
 
+// The console clock's offset from UTC in minutes: `configured`
+// (utc_offset_minutes) when it isn't 0, else the offset learned from the
+// server's clock (the Date header of its answers, to the quarter hour), else
+// 0 until a server has answered.
+int network_utc_offset(int configured);
+
 // HTTP GET - returns malloc'd response body, sets out_size and out_status.
 // Returns NULL on failure. Caller must free.
 u8 *network_get(const AppConfig *config, const char *path,

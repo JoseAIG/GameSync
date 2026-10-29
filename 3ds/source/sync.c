@@ -146,12 +146,13 @@ static int json_parse_string_array(const char *json, const char *key,
 
 // Current time as a Unix timestamp (UTC).
 // osGetTime() returns milliseconds since 1900-01-01 on the console clock, which
-// is local time with no time zone, so the configured UTC offset is removed.
+// is local time with no time zone, so its UTC offset (utc_offset_minutes, or
+// the one learned from the server's clock when that is 0) is removed.
 static u32 unix_timestamp_now(const AppConfig *config) {
     u64 secs = osGetTime() / 1000ULL;
     if (secs < SECONDS_1900_TO_1970) return 0;
     s64 unix_secs = (s64)(secs - SECONDS_1900_TO_1970)
-                  - (s64)config->utc_offset_minutes * 60;
+                  - (s64)network_utc_offset(config->utc_offset_minutes) * 60;
     if (unix_secs < 0) return 0;
     if (unix_secs > 0xFFFFFFFFLL) return 0xFFFFFFFFu;
     return (u32)unix_secs;

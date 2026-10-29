@@ -68,7 +68,7 @@ void ui_format_when(const char *iso, char *out, int out_size) {
     // clock. Only used for the date words; ui_format_when_at() distrusts it
     // when it is implausible.
     int64_t now_local = (int64_t)(osGetTime() / 1000ULL) - 2208988800LL;
-    ui_format_when_at(iso, utc_offset_minutes, now_local, out, out_size);
+    ui_format_when_at(iso, network_utc_offset(utc_offset_minutes), now_local, out, out_size);
 }
 
 void ui_device_label(const char *console_id, char *out, int out_size) {

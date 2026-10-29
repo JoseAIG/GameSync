@@ -1621,7 +1621,10 @@ void ui_draw_saves_bottom(const SavesView *v) {
         gui_text_fit(GUI_BOT_W / 2.0f, 86, GUI_S_BODY, gui_rgb(HEX_TEXT), GUI_CENTER, GUI_BOT_W - 24, line);
         // Both edit and clear work by touch, so an Old 3DS (no ZR) is
         // never stuck on an empty result
-        gui_btn(edraw[0], "B", "Clear search", GUI_BTN_TONAL, 0, v->empty_held == 1 || ((v->held & KEY_B) && v->marked <= 0));
+        // B clears marks first while any are marked: the button then shows
+        // no key, only its touch action
+        gui_btn(edraw[0], v->marked > 0 ? NULL : "B", "Clear search", GUI_BTN_TONAL, 0,
+                v->empty_held == 1 || ((v->held & KEY_B) && v->marked <= 0));
         gui_btn(edraw[1], new3ds ? "ZR" : "^search", "Edit search", GUI_BTN_TONAL, 0,
                 v->empty_held == 2 || (v->held & KEY_ZR));
     } else {

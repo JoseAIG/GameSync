@@ -116,15 +116,16 @@ class GsNotifier(
      * queued*: cancelling the previous show's job makes `showSnackbar` clear
      * its data, so three quick calls leave only the third.
      * [hapticOverride] replaces the kind's default haptic (a conflict is a
-     * Warning that still rejects).
+     * Warning that still rejects).  The returned job ends when the notice
+     * does; it is cancelled if another notice replaced it first.
      */
-    fun show(n: GsNotice, haptic: Boolean = true, hapticOverride: GsHaptic? = null) {
+    fun show(n: GsNotice, haptic: Boolean = true, hapticOverride: GsHaptic? = null): Job {
         job?.cancel()
         if (haptic) (hapticOverride ?: hapticFor(n.kind))?.let { haptics?.perform(it) }
-        job = scope.launch {
+        return scope.launch {
             val result = host.showSnackbar(GsSnackbarVisuals(n))
             if (result == SnackbarResult.ActionPerformed) n.onAction?.invoke()
-        }
+        }.also { job = it }
     }
 }
 

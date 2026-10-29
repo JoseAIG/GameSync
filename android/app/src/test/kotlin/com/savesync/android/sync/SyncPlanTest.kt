@@ -299,12 +299,20 @@ class SyncPlanTest {
     // ── Held-back report ────────────────────────────────────────────────
 
     @Test
-    fun `held-back names are reported once`() {
+    fun `held-back entries stay until their notice is shown`() {
         val store = HeldBackUploadStore(File(tmp.root, "held.txt"))
         store.record(listOf("Zelda", "Mario"))
         store.record(listOf("Mario", "Metroid"))
-        assertEquals(listOf("Zelda", "Mario", "Metroid"), store.take())
-        assertTrue(store.take().isEmpty())
+        val shown = store.peek()
+        assertEquals(listOf("Zelda", "Mario", "Metroid"), shown)
+        // Not shown yet (the notice was cut short): still there.
+        assertEquals(shown, store.peek())
+        // Recorded while the notice showed: kept for the next one.
+        store.record(listOf("Kirby"))
+        store.clear(shown)
+        assertEquals(listOf("Kirby"), store.peek())
+        store.clear(listOf("Kirby"))
+        assertTrue(store.peek().isEmpty())
     }
 
     @Test

@@ -2382,8 +2382,30 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Uploads the background worker held back since the app last looked
      * (see SyncWorker), read once; empty when there were none.
      */
-    suspend fun takeHeldBackUploads(): List<String> = withContext(Dispatchers.IO) {
-        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.take() }.getOrDefault(emptyList())
+    suspend fun peekHeldBackUploads(): List<String> = withContext(Dispatchers.IO) {
+        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.peek() }.getOrDefault(emptyList())
+    }
+
+    /** Forgets held-back entries whose notice has been shown. */
+    suspend fun clearHeldBackUploads(shown: List<String>) = withContext(Dispatchers.IO) {
+        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.clear(shown) }
+    }
+
+    /**
+     * Game names for held-back entries: the worker records title ids, which
+     * the scanned list names, else the name the last sync stored (an entry
+     * with neither, or a name an older version recorded, is shown as it is).
+     */
+    suspend fun heldBackDisplayNames(entries: List<String>): List<String> {
+        val names = _allSaves.value.associate { it.titleId to it.displayName }
+        return withContext(Dispatchers.IO) {
+            entries.map { id ->
+                names[id]?.takeIf { it != id }
+                    ?: runCatching { db.syncStateDao().getById(id)?.displayName }.getOrNull()
+                        ?.takeIf { it.isNotBlank() }
+                    ?: id
+            }
+        }
     }
 
     /** Scans romScanDir subfolders and populates [detectedSystemFolders]. */

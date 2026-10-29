@@ -56,6 +56,8 @@ data class SyncResult(
     val conflictInfo: Map<String, com.savesync.android.api.ConflictInfo> = emptyMap(),
     /** Uploads held back because they look like a rollback (display names). */
     val skippedSuspects: List<String> = emptyList(),
+    /** Title ids of [skippedSuspects], same order. */
+    val skippedSuspectIds: List<String> = emptyList(),
     /** Titles skipped because they changed after the preview was made (display names). */
     val changedSincePreview: List<String> = emptyList(),
 )
@@ -279,6 +281,7 @@ class SyncEngine(
         val conflictIds = mutableListOf<String>()
         val resolvedIds = mutableListOf<String>()
         val skippedSuspects = mutableListOf<String>()
+        val skippedSuspectIds = mutableListOf<String>()
         val changed = mutableListOf<String>()
 
         val moving = preview.titles.filter { it.action in SyncPreview.MOVING_ACTIONS && it.titleId !in skip }
@@ -302,7 +305,10 @@ class SyncEngine(
                 else -> Unit
             }
             if (title.titleId in skip) {
-                if (title.titleId in preview.suspectIds) skippedSuspects.add(title.displayName)
+                if (title.titleId in preview.suspectIds) {
+                    skippedSuspects.add(title.displayName)
+                    skippedSuspectIds.add(title.titleId)
+                }
                 continue
             }
             if (entry == null) continue
@@ -360,6 +366,7 @@ class SyncEngine(
             resolvedTitleIds = resolvedIds,
             conflictInfo = preview.conflictInfo,
             skippedSuspects = skippedSuspects,
+            skippedSuspectIds = skippedSuspectIds,
             changedSincePreview = changed,
         )
     }

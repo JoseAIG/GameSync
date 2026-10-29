@@ -544,11 +544,16 @@ private fun MainApp() {
         GsNotifier(snackbarHostState, appScope, haptics)
     }
     // Uploads auto sync held back as suspected rollbacks (SyncWorker): said
-    // once, the next time the app opens.
+    // the next time the app opens.  They are forgotten only once the notice
+    // has run its course; one that was cut short (another notice replaced
+    // it, or the app went away) is said again on the next resume.
     LaunchedEffect(resumeTick, notifier) {
-        val heldBack = viewModel.takeHeldBackUploads()
+        val heldBack = viewModel.peekHeldBackUploads()
         if (heldBack.isNotEmpty()) {
-            notifier.show(GsNotice(GsNoticeKind.Warning, heldBackNoticeText(heldBack)))
+            val names = viewModel.heldBackDisplayNames(heldBack)
+            val shown = notifier.show(GsNotice(GsNoticeKind.Warning, heldBackNoticeText(names)))
+            shown.join()
+            if (!shown.isCancelled) viewModel.clearHeldBackUploads(heldBack)
         }
     }
     // Unknown (null) until the stored settings are read: treat as configured.

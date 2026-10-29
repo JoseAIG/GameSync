@@ -263,6 +263,30 @@ class SyncPlanTest {
     }
 
     @Test
+    fun `a stale upload that shrank since the preview is not sent`() = runBlocking {
+        val server = FakeServer(serverSize = 1000)
+        val dao = syncedDao("A")
+        val engine = SyncEngine(server.api, dao, "console")
+        val entry = save("A", 900)
+        val preview = engine.plan(listOf(entry))
+        assertTrue("not a suspect when planned", preview.suspects.isEmpty())
+        // The user started a fresh game before pressing Sync.
+        entry.saveFile!!.writeBytes(ByteArray(10) { 1 })
+        val stale = SyncPreview(
+            titles = preview.titles,
+            suspects = preview.suspects,
+            sizeCheckSkipped = preview.sizeCheckSkipped,
+            errors = preview.errors,
+            createdAtMs = 0L,
+            entries = preview.entries,
+            conflictInfo = preview.conflictInfo,
+        )
+        val result = engine.execute(stale, emptySet())
+        assertTrue(server.uploads.isEmpty())
+        assertEquals(listOf("Game A"), result.changedSincePreview)
+    }
+
+    @Test
     fun `a fresh preview runs without asking again`() = runBlocking {
         val server = FakeServer(serverSize = 100)
         val engine = SyncEngine(server.api, syncedDao("A"), "console")
@@ -275,12 +299,20 @@ class SyncPlanTest {
     // ── Held-back report ────────────────────────────────────────────────
 
     @Test
-    fun `held-back names are reported once`() {
+    fun `held-back entries stay until their notice is shown`() {
         val store = HeldBackUploadStore(File(tmp.root, "held.txt"))
         store.record(listOf("Zelda", "Mario"))
         store.record(listOf("Mario", "Metroid"))
-        assertEquals(listOf("Zelda", "Mario", "Metroid"), store.take())
-        assertTrue(store.take().isEmpty())
+        val shown = store.peek()
+        assertEquals(listOf("Zelda", "Mario", "Metroid"), shown)
+        // Not shown yet (the notice was cut short): still there.
+        assertEquals(shown, store.peek())
+        // Recorded while the notice showed: kept for the next one.
+        store.record(listOf("Kirby"))
+        store.clear(shown)
+        assertEquals(listOf("Kirby"), store.peek())
+        store.clear(listOf("Kirby"))
+        assertTrue(store.peek().isEmpty())
     }
 
     @Test

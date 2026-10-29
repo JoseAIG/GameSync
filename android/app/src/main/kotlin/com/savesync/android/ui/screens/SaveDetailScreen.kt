@@ -51,6 +51,7 @@ import com.savesync.android.ui.theme.gsTextMuted
 import kotlinx.coroutines.flow.first
 import androidx.compose.material.icons.filled.History
 import com.savesync.android.sync.LocalBackup
+import com.savesync.android.sync.isSharedYabaSanshiroSave
 import com.savesync.android.ui.components.GsConfirmDialog
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -777,17 +778,20 @@ fun SaveDetailScreen(
         )
     }
     GsDialogHost(confirmRestore) { backup, _ ->
-        val shared = entry.systemName == "SAT" && entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+        // Same test restoreLatestBackup uses to put back only this game's part.
+        val shared = isSharedYabaSanshiroSave(
+            entry, viewModel.settings.value.saturnSyncFormat
+        )
         GsConfirmDialog(
             title = "Put back the copy from ${formatWhen(backup.takenAt)}?",
             message = "The save on this device now is kept as a copy too, so this can be undone." +
-                if (shared) " This file holds other Saturn games' saves as well; they go back to that copy too." else "",
+                if (shared) " This file holds other Saturn games' saves as well; only this game's part goes back." else "",
             confirmLabel = "Restore",
             dismissLabel = "Keep current",
             destructive = true,
             onConfirm = {
                 confirmRestore = null
-                viewModel.restoreLatestBackup(entry.titleId)
+                viewModel.restoreLatestBackup(entry.titleId, backup)
             },
             onDismiss = { confirmRestore = null },
         )
@@ -1144,10 +1148,38 @@ internal fun movePickerCursor(cursor: Int, dy: Int, size: Int): Int =
     if (size <= 0) 0 else (cursor + dy).coerceIn(0, size - 1)
 
 /**
+ * Whether A confirms a picker (true) or acts on the row under the cursor.
+ * As in v055, where A pressed the focused control: on a row it selects or
+ * toggles that row, and confirming is its own stop after the last row
+ * ([rows]).  Touch has no cursor, so its A button always confirms.
+ */
+internal fun pickerAConfirms(cursor: Int, rows: Int, pad: Boolean): Boolean = !pad || cursor >= rows
+
+/** The pad's confirm stop after a picker's rows, highlighted like a row. */
+@Composable
+private fun PickerConfirmRow(label: String, isSelected: Boolean, onClick: () -> Unit) {
+    GsListRow(
+        isSelected = isSelected,
+        onClick = onClick,
+        clickLabel = label,
+        modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.Bold,
+            color = GsColors.Accent,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+/**
  * "Choose canonical name": one choice from the server's candidates.  The
- * cursor starts on the current name (else the recommended first entry),
- * Up/Down move it, A applies it, B cancels.  A tap moves the cursor and
- * doesn't apply, so touch and pad pick the same way.
+ * choice and the cursor start on the current name (else the recommended
+ * first entry).  As in v055: Up/Down move the cursor, A on a name chooses
+ * it, A on "Apply" after the last name applies the choice, B cancels.  A
+ * tap chooses a name without applying; touch applies with the Apply button.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1157,21 +1189,29 @@ private fun NormalizePickerDialog(
     onDismiss: () -> Unit,
 ) {
     val options = state.options
-    var cursor by remember(state) {
+    var choice by remember(state) {
         mutableIntStateOf(pickerCursorStart(options) { it == state.entry.displayName })
     }
-    val requesters = remember(state) { List(options.size) { BringIntoViewRequester() } }
+    var cursor by remember(state) { mutableIntStateOf(choice) }
+    // One more than the names: the pad's Apply stop.
+    val requesters = remember(state) { List(options.size + 1) { BringIntoViewRequester() } }
+    val pad = LocalInputMode.current == GsInputMode.Pad
+    val stops = if (pad && options.isNotEmpty()) options.size + 1 else options.size
+    val confirms = pickerAConfirms(cursor, options.size, pad)
     GsDialog(
         title = "Choose canonical name",
         message = "Select the correct version. USA releases are listed first; demos and protos last.",
         onDismiss = onDismiss,
-        onNavigate = { dy -> cursor = movePickerCursor(cursor, dy, options.size) },
+        onNavigate = { dy -> cursor = movePickerCursor(cursor, dy, stops) },
         choices = listOf(
             GsDialogChoice(GsButton.B, "Cancel", onDismiss),
             GsDialogChoice(
                 GsButton.A,
-                "Apply",
-                { options.getOrNull(cursor)?.let(onApply) },
+                if (confirms) "Apply" else "Choose",
+                {
+                    if (pickerAConfirms(cursor, options.size, pad)) options.getOrNull(choice)?.let(onApply)
+                    else choice = cursor
+                },
                 color = GsColors.Accent,
                 textColor = GsColors.Ink,
             ),
@@ -1180,10 +1220,13 @@ private fun NormalizePickerDialog(
             // Inside the dialog's composition, where the rows are laid out.
             LaunchedEffect(cursor) { requesters.getOrNull(cursor)?.bringIntoView() }
             options.forEachIndexed { index, name ->
-                val chosen = index == cursor
+                val chosen = index == choice
                 GsListRow(
-                    isSelected = chosen,
-                    onClick = { cursor = index },
+                    isSelected = index == cursor,
+                    onClick = {
+                        cursor = index
+                        choice = index
+                    },
                     clickLabel = "Choose",
                     stateDescription = if (chosen) "Chosen" else null,
                     modifier = Modifier
@@ -1215,16 +1258,23 @@ private fun NormalizePickerDialog(
                     }
                 }
             }
+            if (pad && options.isNotEmpty()) {
+                Box(Modifier.bringIntoViewRequester(requesters[options.size])) {
+                    PickerConfirmRow("Apply", isSelected = cursor == options.size) {
+                        options.getOrNull(choice)?.let(onApply)
+                    }
+                }
+            }
         },
     )
 }
 
 /**
- * "Choose Saturn save archives": several choices.  Up/Down move the
- * cursor, X includes or leaves out the archive under it (X = secondary,
- * dialog-internal; A never toggles because A = "Use selection"), B
- * cancels.  A tap toggles that row and moves the cursor there.  The cursor
- * starts on the first archive already selected.
+ * "Choose Saturn save archives": several choices.  As in v055: Up/Down move
+ * the cursor, A on an archive includes or leaves it out, A on "Use
+ * selection" after the last archive applies, B cancels.  A tap toggles that
+ * row and moves the cursor there; touch applies with the Use selection
+ * button.  The cursor starts on the first archive already selected.
  */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -1240,34 +1290,37 @@ private fun SaturnArchivePickerDialog(
     var cursor by remember(state) {
         mutableIntStateOf(pickerCursorStart(options) { it.preselected })
     }
-    val requesters = remember(state) { List(options.size) { BringIntoViewRequester() } }
+    // One more than the archives: the pad's Use selection stop.
+    val requesters = remember(state) { List(options.size + 1) { BringIntoViewRequester() } }
     fun toggle(index: Int) {
         val family = options.getOrNull(index)?.archiveFamily ?: return
         selected = if (family in selected) selected - family else selected + family
     }
     val cursorChecked = options.getOrNull(cursor)?.archiveFamily in selected
     val pad = LocalInputMode.current == GsInputMode.Pad
+    val stops = if (pad) options.size + 1 else options.size
+    val confirms = pickerAConfirms(cursor, options.size, pad)
     GsDialog(
         title = "Choose Saturn save archives",
         message = "Pick the archive names in YabaSanshiro's backup memory that belong to this game.",
         onDismiss = onDismiss,
-        onNavigate = { dy -> cursor = movePickerCursor(cursor, dy, options.size) },
-        choices = buildList {
-            add(GsDialogChoice(GsButton.B, "Cancel", onDismiss))
-            // The pad toggle; touch toggles by tapping the row instead.
-            if (pad && options.isNotEmpty()) {
-                add(GsDialogChoice(GsButton.X, if (cursorChecked) "Leave out" else "Include", { toggle(cursor) }))
-            }
-            add(
-                GsDialogChoice(
-                    GsButton.A,
-                    "Use selection",
-                    { onApply(selected) },
-                    color = GsColors.Accent,
-                    textColor = GsColors.Ink,
-                )
-            )
-        },
+        onNavigate = { dy -> cursor = movePickerCursor(cursor, dy, stops) },
+        choices = listOf(
+            GsDialogChoice(GsButton.B, "Cancel", onDismiss),
+            GsDialogChoice(
+                GsButton.A,
+                when {
+                    confirms -> "Use selection"
+                    cursorChecked -> "Leave out"
+                    else -> "Include"
+                },
+                {
+                    if (pickerAConfirms(cursor, options.size, pad)) onApply(selected) else toggle(cursor)
+                },
+                color = GsColors.Accent,
+                textColor = GsColors.Ink,
+            ),
+        ),
         body = {
             LaunchedEffect(cursor) { requesters.getOrNull(cursor)?.bringIntoView() }
             if (state.hiddenSelectedArchives.isNotEmpty()) {
@@ -1310,6 +1363,13 @@ private fun SaturnArchivePickerDialog(
                             style = MaterialTheme.typography.labelSmall,
                             color = gsTextMuted(),
                         )
+                    }
+                }
+            }
+            if (pad) {
+                Box(Modifier.bringIntoViewRequester(requesters[options.size])) {
+                    PickerConfirmRow("Use selection", isSelected = cursor == options.size) {
+                        onApply(selected)
                     }
                 }
             }

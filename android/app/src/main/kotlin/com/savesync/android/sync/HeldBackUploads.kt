@@ -6,8 +6,10 @@ import java.io.File
 /**
  * Uploads the background worker held back as suspected rollbacks (see
  * [RollbackCheck]).  The worker has nobody to ask, so it never uploads them;
- * it records their names here and the app reports them, once, the next time
- * it opens.  One display name per line; names repeat-free, newest last.
+ * it records their title ids here and the app reports them the next time it
+ * opens, clearing each entry only once its notice has been shown.  One entry
+ * per line (a title id; older versions wrote display names); repeat-free,
+ * newest last.
  */
 class HeldBackUploadStore(private val file: File) {
 
@@ -23,12 +25,21 @@ class HeldBackUploadStore(private val file: File) {
         }
     }
 
-    /** The recorded names, cleared as they are read (each is reported once). */
+    /** The recorded entries, left in place until [clear]ed. */
     @Synchronized
-    fun take(): List<String> {
-        val names = read()
-        if (file.exists()) runCatching { file.delete() }
-        return names
+    fun peek(): List<String> = read()
+
+    /**
+     * Forgets [shown] (entries a notice has reported).  Entries the worker
+     * recorded since they were read stay for the next notice.
+     */
+    @Synchronized
+    fun clear(shown: Collection<String>) {
+        if (shown.isEmpty()) return
+        val rest = read().filter { it !in shown }
+        runCatching {
+            if (rest.isEmpty()) file.delete() else file.writeText(rest.joinToString("\n"))
+        }
     }
 
     private fun read(): List<String> =

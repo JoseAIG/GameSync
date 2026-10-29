@@ -90,9 +90,14 @@ class HoldNavState {
         if (_mode.value != mode) _mode.value = mode
     }
 
-    /** A fresh press starts a new hold: page mode, and its first letter will tick. */
+    /**
+     * A fresh press starts a new hold: page mode, and its first letter will
+     * tick.  The last hold's letter is cleared, so the HUD never pops in
+     * showing it before this hold's first jump.
+     */
     internal fun beginHold() {
         tickedLetter = ""
+        _letter.value = ""
         setMode(HoldMode.Page)
     }
 
@@ -188,9 +193,13 @@ fun AlphabetHud(holdNav: HoldNavState, modifier: Modifier = Modifier) {
     val reduce = LocalReduceMotion.current
     val high = LocalHighContrast.current
     var visible by remember { mutableStateOf(false) }
+    // What the card shows: the last letter a jump landed on, kept while the
+    // card lingers or leaves even after a new hold has cleared [letter].
+    var shown by remember { mutableStateOf("") }
     // Keyed on the letter too: each new letter restarts the linger timer.
     LaunchedEffect(mode, letter) {
         if (mode == HoldMode.Alpha && letter.isNotEmpty()) {
+            shown = letter
             visible = true
         } else if (visible) {
             delay(ALPHA_HUD_LINGER_MS)
@@ -208,7 +217,7 @@ fun AlphabetHud(holdNav: HoldNavState, modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .semantics {
                         liveRegion = LiveRegionMode.Polite
-                        contentDescription = letter
+                        contentDescription = shown
                     }
                     .shadow(GsElevation.Hud, GsShapes.Hud)
                     .clip(GsShapes.Hud)
@@ -219,7 +228,7 @@ fun AlphabetHud(holdNav: HoldNavState, modifier: Modifier = Modifier) {
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
-                    letter,
+                    shown,
                     style = MaterialTheme.typography.headlineSmall.copy(fontSize = 32.sp, lineHeight = 36.sp),
                     fontWeight = FontWeight.Bold,
                     color = GsColors.Accent,

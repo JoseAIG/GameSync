@@ -116,15 +116,16 @@ class GsNotifier(
      * queued*: cancelling the previous show's job makes `showSnackbar` clear
      * its data, so three quick calls leave only the third.
      * [hapticOverride] replaces the kind's default haptic (a conflict is a
-     * Warning that still rejects).
+     * Warning that still rejects).  The returned job ends when the notice
+     * does; it is cancelled if another notice replaced it first.
      */
-    fun show(n: GsNotice, haptic: Boolean = true, hapticOverride: GsHaptic? = null) {
+    fun show(n: GsNotice, haptic: Boolean = true, hapticOverride: GsHaptic? = null): Job {
         job?.cancel()
         if (haptic) (hapticOverride ?: hapticFor(n.kind))?.let { haptics?.perform(it) }
-        job = scope.launch {
+        return scope.launch {
             val result = host.showSnackbar(GsSnackbarVisuals(n))
             if (result == SnackbarResult.ActionPerformed) n.onAction?.invoke()
-        }
+        }.also { job = it }
     }
 }
 
@@ -224,15 +225,22 @@ internal fun isServerNotConfigured(message: String): Boolean =
 
 /**
  * A single-save sync reports through one string (MainViewModel.syncSave):
- * an embedded error makes it an Error, a conflict a Warning, anything else
- * a Success.
+ * an embedded error makes it an Error, a conflict or a held-back upload a
+ * Warning, anything else a Success.  Only the exact markers syncSave writes
+ * count, so a game name in a message ("Renamed to \"Conflict - Desert
+ * Storm\"", "…Terror…") never changes its kind.
  */
 internal fun noticeKindForSaveMessage(message: String): GsNoticeKind = when {
-    message.contains("Error", ignoreCase = true) -> GsNoticeKind.Error
-    message.contains("Conflict", ignoreCase = true) -> GsNoticeKind.Warning
-    message.contains("Not uploaded", ignoreCase = true) -> GsNoticeKind.Warning
+    message.contains(SAVE_MSG_ERROR) -> GsNoticeKind.Error
+    message.contains(SAVE_MSG_CONFLICT) -> GsNoticeKind.Warning
+    message.contains(SAVE_MSG_HELD_BACK) -> GsNoticeKind.Warning
     else -> GsNoticeKind.Success
 }
+
+/** Markers MainViewModel.syncSave puts in its result message. */
+internal const val SAVE_MSG_ERROR = "✗ Error: "
+internal const val SAVE_MSG_CONFLICT = "⚠ Conflict detected"
+internal const val SAVE_MSG_HELD_BACK = "Not uploaded: "
 
 /** Strips a leading glyph ("✓ ", "↑ ") the view model puts on success messages. */
 internal fun stripLeadingGlyph(message: String): String =

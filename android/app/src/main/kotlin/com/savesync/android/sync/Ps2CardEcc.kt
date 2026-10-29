@@ -1,6 +1,7 @@
 package com.savesync.android.sync
 
 import java.io.File
+import java.io.InputStream
 import java.security.MessageDigest
 
 /**
@@ -66,8 +67,14 @@ object Ps2CardEcc {
      * Accepts both ``.ps2`` (ECC) and ``.mc2`` (raw) card sizes; returns null
      * for anything else so callers can fall back to a plain file hash.
      */
-    fun normalizedHash(file: File): String? {
-        val size = file.length()
+    fun normalizedHash(file: File): String? =
+        normalizedHash(file.length()) { file.inputStream().buffered(1 shl 16) }
+
+    /** [normalizedHash] of a card held in memory (one about to be written). */
+    fun normalizedHash(bytes: ByteArray): String? =
+        normalizedHash(bytes.size.toLong()) { bytes.inputStream() }
+
+    private fun normalizedHash(size: Long, open: () -> InputStream): String? {
         val stride = when (size) {
             PS2_SIZE.toLong() -> PAGE_SIZE + SPARE_SIZE
             MC2_SIZE.toLong() -> PAGE_SIZE
@@ -76,7 +83,7 @@ object Ps2CardEcc {
         val digest = MessageDigest.getInstance("SHA-256")
         val buf = ByteArray(stride)
         val spare = ByteArray(SPARE_SIZE)
-        file.inputStream().buffered(1 shl 16).use { input ->
+        open().use { input ->
             repeat(PAGES_PER_CARD) {
                 var read = 0
                 while (read < stride) {

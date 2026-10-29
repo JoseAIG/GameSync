@@ -22,9 +22,21 @@ class DescribeSaveDirTest {
         val user = tmp.newFolder("Azahar")
         val titleRoot = File(user, "sdmc/Nintendo 3DS/$zero/$zero/title").apply { mkdirs() }
         titles.forEach { id ->
-            File(titleRoot, "${id.take(8)}/${id.drop(8)}/data/00000001").mkdirs()
+            val save = File(titleRoot, "${id.take(8)}/${id.drop(8)}/data/00000001").apply { mkdirs() }
+            File(save, "main").writeBytes(ByteArray(16))
         }
         return user
+    }
+
+    @Test
+    fun `an empty save folder is not counted, as it is not synced`() {
+        val user = azaharUser("0004000000055d00")
+        val titleRoot = File(user, "sdmc/Nintendo 3DS/$zero/$zero/title")
+        File(titleRoot, "00040000/001b5000/data/00000001").mkdirs()
+        assertEquals(
+            "Found sdmc/Nintendo 3DS/…/title (1 title)",
+            EmulatorRegistry.describeSaveDir(AzaharEmulator.EMULATOR_KEY, user).summary,
+        )
     }
 
     @Test
@@ -59,7 +71,8 @@ class DescribeSaveDirTest {
         val empty = tmp.newFolder("empty")
         val check = EmulatorRegistry.describeSaveDir(AzaharEmulator.EMULATOR_KEY, empty)
         assertFalse(check.ok)
-        assertTrue(check.summary, check.summary.startsWith("No 3DS saves in empty yet"))
+        // Read as a user folder whose sdmc doesn't exist yet: the persistent warning.
+        assertEquals(AzaharEmulator.overrideWarning(empty.path), check.summary)
     }
 
     @Test

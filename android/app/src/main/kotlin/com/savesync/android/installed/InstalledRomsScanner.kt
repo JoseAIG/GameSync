@@ -124,7 +124,23 @@ object InstalledRomsScanner {
      */
     val SAVE_EXTENSIONS: Set<String> = setOf(
         "srm", "sav", "brm", "bkr", "mcd", "mcr", "vmu", "dsv", "eep", "fla", "sra", "ps2", "gci",
+        // N64 controller pak, Beetle Saturn cart RAM, Mednafen NVRAM, RTC data.
+        "mpk", "bcr", "nv", "rtc", "sv",
     )
+
+    /**
+     * RetroArch save states kept beside the content ("savestates in content
+     * directory"): `game.state`, `game.state1`…, `game.state.auto`, and the
+     * `.png` thumbnail RetroArch writes next to each.  They block a
+     * whole-folder delete like a save does.
+     */
+    internal fun isSaveState(f: File): Boolean {
+        val name = f.name.lowercase()
+        val stem = if (name.endsWith(".png")) name.removeSuffix(".png") else name
+        return STATE_NAME.containsMatchIn(stem)
+    }
+
+    private val STATE_NAME = Regex("""\.state(\d+|\.auto)?$""")
 
     private val PRIMARY_PRIORITY: Map<String, Int> = mapOf(
         "cue" to 10, "gdi" to 10,
@@ -298,11 +314,16 @@ object InstalledRomsScanner {
      *  dedicated per-game subfolder (not the system root), the whole
      *  subfolder is rmtree'd in one pass — readmes, box art, thumbnail
      *  caches and all.  Otherwise falls back to file-by-file delete. */
-    fun deleteInstalled(rom: InstalledRom): DeleteResult {
+    /**
+     * [allowWholeFolder] = false keeps the delete to the ROM and its
+     * companions even where the folder could go whole: the confirm said
+     * so, and the delete must not remove more than the user agreed to.
+     */
+    fun deleteInstalled(rom: InstalledRom, allowWholeFolder: Boolean = true): DeleteResult {
         val parent = rom.path.parentFile ?: return DeleteResult(0, listOf("Missing parent"), null)
         val group = listOf(rom.path) + rom.companionFiles
 
-        if (canRemoveWholeFolder(parent, rom.systemRoot, group)) {
+        if (allowWholeFolder && canRemoveWholeFolder(parent, rom.systemRoot, group)) {
             val fileCount = countFilesRecursive(parent)
             val ok = parent.deleteRecursively()
             return if (ok) {
@@ -446,7 +467,7 @@ object InstalledRomsScanner {
             if (!f.isFile) return@forEach
             // A save in the folder: never rmtree it.  The caller falls back
             // to deleting the ROM and its companions, so the save stays.
-            if (f.extension.lowercase() in SAVE_EXTENSIONS) {
+            if (f.extension.lowercase() in SAVE_EXTENSIONS || isSaveState(f)) {
                 allowed = false
                 return@forEach
             }

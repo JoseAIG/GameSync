@@ -23,6 +23,15 @@ class InputModeTest {
     }
 
     @Test
+    fun `the phone's volume and media keys are not pad input`() {
+        // gpio-keys reports itself as a keyboard.
+        assertFalse(isPhysicalPadKey(false, padId, InputDevice.SOURCE_KEYBOARD, KeyEvent.KEYCODE_VOLUME_UP))
+        assertFalse(isPhysicalPadKey(false, padId, InputDevice.SOURCE_KEYBOARD, KeyEvent.KEYCODE_VOLUME_DOWN))
+        assertFalse(isPhysicalPadKey(false, padId, InputDevice.SOURCE_KEYBOARD, KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE))
+        assertFalse(isPhysicalPadKey(false, padId, InputDevice.SOURCE_KEYBOARD, KeyEvent.KEYCODE_HEADSETHOOK))
+    }
+
+    @Test
     fun `a bluetooth keyboard is pad input`() {
         assertTrue(isPhysicalPadKey(false, padId, InputDevice.SOURCE_KEYBOARD, KeyEvent.KEYCODE_ENTER))
     }

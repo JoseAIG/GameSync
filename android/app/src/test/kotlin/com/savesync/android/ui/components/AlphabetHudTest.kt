@@ -33,6 +33,15 @@ class AlphabetHudTest {
     }
 
     @Test
+    fun `a new hold forgets the last hold's letter`() {
+        val nav = HoldNavState()
+        nav.announceLetter("M")
+        nav.setMode(HoldMode.Idle)
+        nav.beginHold()
+        assertEquals("", nav.letter.value)
+    }
+
+    @Test
     fun `an empty letter shows nothing and never ticks`() {
         val nav = HoldNavState()
         var ticks = 0

@@ -66,7 +66,10 @@ class SyncWorker(
             val result = engine.sync(saves)
             if (result.skippedSuspects.isNotEmpty()) {
                 Log.w(TAG, "Held back ${result.skippedSuspects.size} suspect upload(s)")
-                HeldBackUploadStore.app.record(result.skippedSuspects)
+                // Title ids: the worker's scan has no game names (an Azahar
+                // save is named by its id); the app resolves them when it
+                // shows the notice.
+                HeldBackUploadStore.app.record(result.skippedSuspectIds)
             }
 
             // Post notification

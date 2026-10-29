@@ -67,6 +67,9 @@ data class GsChromeSpec(
 @Stable
 class GsChromeState {
     val specs = mutableStateMapOf<String, GsChromeSpec>()
+
+    /** Which screen instance last wrote each key (not state: never read in composition). */
+    internal val owners = HashMap<String, Any>()
 }
 
 val LocalGsChrome = staticCompositionLocalOf<GsChromeState> { error("no chrome") }
@@ -95,9 +98,32 @@ fun chromeKeyFor(routePattern: String?, titleId: String?): String = when {
 @Composable
 fun GsScreenChrome(key: String, spec: GsChromeSpec) {
     val chrome = LocalGsChrome.current
-    SideEffect { if (chrome.specs[key] != spec) chrome.specs[key] = spec }
+    val owner = remember { Any() }
+    // Claimed once, when this instance first shows [key].  A screen that
+    // recomposes during its exit animation must not take the key back from
+    // the one that replaced it: it would overwrite that one's spec, and its
+    // dispose would then drop the chrome of the screen still showing.  A key
+    // nobody owns any more (its owner left) is claimed again.
+    val claimed = remember(key) { booleanArrayOf(false) }
+    SideEffect {
+        if (!claimed[0] || chrome.owners[key] == null) {
+            chrome.owners[key] = owner
+            claimed[0] = true
+        }
+        if (chrome.owners[key] === owner && chrome.specs[key] != spec) chrome.specs[key] = spec
+    }
     if (key !in NAV_TAB_ROUTES) {
-        DisposableEffect(chrome, key) { onDispose { chrome.specs.remove(key) } }
+        // Only the instance that wrote the key drops it: the same screen
+        // reopened during the old one's exit animation has already written
+        // its own spec, which the old one's dispose must not remove.
+        DisposableEffect(chrome, key) {
+            onDispose {
+                if (chrome.owners[key] === owner) {
+                    chrome.owners.remove(key)
+                    chrome.specs.remove(key)
+                }
+            }
+        }
     }
 }
 
@@ -161,10 +187,18 @@ fun GsChromeHeader(
     }
 }
 
-/** MainApp's footer: the current screen's hints, swapped instantly. */
+/**
+ * MainApp's footer: the current screen's hints, swapped instantly.  A
+ * screen publishes its spec after its first composition, so for that one
+ * frame the previous hints stay: an empty footer would collapse and the
+ * content would jump by its height.
+ */
 @Composable
 fun GsChromeFooter(key: String) {
-    GsFooterHints(LocalGsChrome.current.specs[key]?.hints ?: emptyList())
+    val last = remember { arrayOf(emptyList<GsHint>()) }
+    val hints = LocalGsChrome.current.specs[key]?.hints ?: last[0]
+    last[0] = hints
+    GsFooterHints(hints)
 }
 
 // ── Scroll edges (M5-4) ─────────────────────────────────────────────────────

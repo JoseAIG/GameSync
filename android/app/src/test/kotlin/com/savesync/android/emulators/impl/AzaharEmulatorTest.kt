@@ -122,4 +122,77 @@ class AzaharEmulatorTest {
         fresh.mkdirs()
         assertNotNull(AzaharEmulator.overrideWarning(fresh.parentFile!!.path))
     }
+
+    @Test
+    fun `no override - a download target is never guessed outside azahar's tree`() {
+        // Azahar's user folder is a later candidate; /sdcard/sdmc doesn't exist.
+        val (_, titleRoot) = azaharUserDir()
+        val predicted = AzaharEmulator.defaultSaveDir(storageBaseDir = tmp.root, titleId = "0004000000055D00")
+        assertEquals(
+            File(titleRoot, "00040000/00055d00/data/00000001").absolutePath,
+            predicted?.absolutePath,
+        )
+        assertTrue(!File(tmp.root, "sdmc").exists())
+    }
+
+    @Test
+    fun `no override - azahar's sdmc without a title tree is predicted, nothing at all is not`() {
+        assertNull(AzaharEmulator.defaultSaveDir(storageBaseDir = tmp.root, titleId = "0004000000055D00"))
+
+        File(tmp.root, "Azahar/sdmc").mkdirs()
+        val predicted = AzaharEmulator.defaultSaveDir(storageBaseDir = tmp.root, titleId = "0004000000055D00")
+        assertEquals(
+            File(tmp.root, "Azahar/sdmc/Nintendo 3DS/$zero/$zero/title/00040000/00055d00/data/00000001").absolutePath,
+            predicted?.absolutePath,
+        )
+    }
+
+    @Test
+    fun `an override without sdmc yet is read as azahar's user folder and warned about`() {
+        val user = File(tmp.root, "NewAzahar").apply { mkdirs() }
+        File(user, "config").mkdirs()
+        val root = AzaharEmulator.resolveOverrideTitleRoot(user)
+        assertEquals(File(user, "sdmc/Nintendo 3DS/$zero/$zero/title").absolutePath, root.absolutePath)
+        // Not the folder itself: downloads must not land beside Azahar's future tree.
+        assertNotNull(AzaharEmulator.overrideWarning(user.path))
+        assertTrue(AzaharEmulator(saveDirOverride = user.path).discoverSaves().isEmpty())
+    }
+
+    @Test
+    fun `an override that already holds title folders is the title root`() {
+        val root = File(tmp.root, "copied-titles")
+        File(root, "00040000/00055d00/data/00000001").mkdirs()
+        File(root, "00040000/00055d00/data/00000001/main").writeBytes(byteArrayOf(1))
+        assertEquals(root.absolutePath, AzaharEmulator.resolveOverrideTitleRoot(root).absolutePath)
+        assertNull(AzaharEmulator.overrideWarning(root.path))
+    }
+
+    @Test
+    fun `an override with sdmc but no title tree yet predicts downloads where azahar will put them`() {
+        val user = File(tmp.root, "FreshAzahar").apply { File(this, "sdmc").mkdirs() }
+        // Still warned about: there are no saves to sync yet.
+        assertNotNull(AzaharEmulator.overrideWarning(user.path))
+        val expected = File(user, "sdmc/Nintendo 3DS/$zero/$zero/title").absolutePath
+        assertEquals(expected, AzaharEmulator.overrideDownloadTitleRoot(user.path)?.absolutePath)
+        // Every level of the picked path down to sdmc agrees.
+        assertEquals(expected, AzaharEmulator.overrideDownloadTitleRoot(File(user, "sdmc").path)?.absolutePath)
+        File(user, "sdmc/Nintendo 3DS").mkdirs()
+        assertEquals(expected, AzaharEmulator.overrideDownloadTitleRoot(File(user, "sdmc/Nintendo 3DS").path)?.absolutePath)
+    }
+
+    @Test
+    fun `an override that is missing or has no sdmc gets no download target`() {
+        assertNull(AzaharEmulator.overrideDownloadTitleRoot(File(tmp.root, "unmounted/Azahar").path))
+        val noSdmc = File(tmp.root, "NewAzahar").apply { File(this, "config").mkdirs() }
+        assertNull(AzaharEmulator.overrideDownloadTitleRoot(noSdmc.path))
+        val elsewhere = File(tmp.root, "Downloads").apply { mkdirs() }
+        assertNull(AzaharEmulator.overrideDownloadTitleRoot(elsewhere.path))
+        assertTrue(!File(noSdmc, "sdmc").exists())
+    }
+
+    @Test
+    fun `an override with an existing title tree is its download target`() {
+        val (user, titleRoot) = azaharUserDir()
+        assertEquals(titleRoot.absolutePath, AzaharEmulator.overrideDownloadTitleRoot(user.path)?.absolutePath)
+    }
 }

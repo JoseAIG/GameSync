@@ -48,6 +48,7 @@ import com.savesync.android.sync.SaturnArchiveStateStore
 import com.savesync.android.sync.SaturnSyncFormat
 import com.savesync.android.sync.SegaCdSyncFormat
 import com.savesync.android.sync.SaturnSaveFormatConverter
+import com.savesync.android.sync.isSharedYabaSanshiroSave
 import com.savesync.android.sync.SyncEngine
 import com.savesync.android.sync.SyncResult
 import com.savesync.android.sync.localSyncHash
@@ -78,8 +79,13 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.savesync.android.ui.components.SAVE_MSG_CONFLICT
+import com.savesync.android.ui.components.SAVE_MSG_ERROR
+import com.savesync.android.ui.components.SAVE_MSG_HELD_BACK
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
+import java.io.IOException
 import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
 import java.util.concurrent.TimeUnit
@@ -321,6 +327,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val sync = inputs.syncMap[entry.titleId]
             val cheap = cheapStatusFor(entry, sync, entry.titleId in inputs.conflicts)
             if (cheap != null) return@mapIndexed SaveRow(entry, cheap)
+            // A folder save's fingerprint walks the folder: a superseded run
+            // (each sync-state write during Sync all is one) stops here
+            // rather than walking every save before it can be cancelled.
+            currentCoroutineContext().ensureActive()
             val (mtime, size) = runCatching { entry.statFingerprint() }.getOrDefault(0L to 0L)
             val key = StatusKey(entry.titleId, mtime, size, sync?.lastSyncedHash, inputs.hashRules)
             keys[i] = key
@@ -693,6 +703,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val savesScanning: StateFlow<Boolean> = _savesScanning
     /** Scans in flight; only touched on the main thread (viewModelScope). */
     private var activeSaveScans = 0
+    /** True once a save scan has finished: [_allSaves] carries the games' names from then on. */
+    private val _savesScannedOnce = MutableStateFlow(false)
 
     fun scanSaves() {
         viewModelScope.launch {
@@ -1131,6 +1143,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 activeSaveScans--
                 _savesScanning.value = activeSaveScans > 0
+                if (activeSaveScans == 0) _savesScannedOnce.value = true
                 // A scan is when a missing folder would have mattered.
                 refreshOverrideWarnings()
             }
@@ -1524,16 +1537,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         // root via candidateTitleRoots so defaultSaveDir picks it.
         val override = saveDirOverrides[AzaharEmulator.EMULATOR_KEY]
             ?.takeIf { it.isNotBlank() }
-        // A missing override folder (unmounted SD card, typo) must not get
-        // downloads written into a freshly created stray tree.
-        if (override != null && !File(override).isDirectory) return null
+        // A missing override folder (unmounted SD card, typo), or one with no
+        // sdmc yet, must not get downloads written into a freshly created
+        // stray tree: Azahar would not read it, and once Azahar makes its own
+        // tree the stray copies vanish from the list while their recorded
+        // sync state carries over to Azahar's fresh save.  Under an existing
+        // sdmc the title tree is predicted where Azahar will make it, as
+        // auto-detection does; the override's warning stays shown meanwhile.
         val saveDir = if (override != null) {
+            val titleRoot = AzaharEmulator.overrideDownloadTitleRoot(override) ?: return null
             AzaharEmulator.defaultSaveDir(
                 storageBaseDir = Environment.getExternalStorageDirectory(),
                 titleId = titleInfo.title_id,
-                candidateTitleRoots = listOf(
-                    AzaharEmulator.resolveOverrideTitleRoot(File(override))
-                )
+                candidateTitleRoots = listOf(titleRoot)
             )
         } else {
             AzaharEmulator.defaultSaveDir(
@@ -2377,8 +2393,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Uploads the background worker held back since the app last looked
      * (see SyncWorker), read once; empty when there were none.
      */
-    suspend fun takeHeldBackUploads(): List<String> = withContext(Dispatchers.IO) {
-        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.take() }.getOrDefault(emptyList())
+    suspend fun peekHeldBackUploads(): List<String> = withContext(Dispatchers.IO) {
+        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.peek() }.getOrDefault(emptyList())
+    }
+
+    /** Forgets held-back entries whose notice has been shown. */
+    suspend fun clearHeldBackUploads(shown: List<String>) = withContext(Dispatchers.IO) {
+        runCatching { com.savesync.android.sync.HeldBackUploadStore.app.clear(shown) }
+    }
+
+    /**
+     * Game names for held-back entries: the worker records title ids, which
+     * the scanned list names, else the name the last sync stored (an entry
+     * with neither, or a name an older version recorded, is shown as it is).
+     * On a cold start this runs before the first scan has listed anything,
+     * and a 3DS save's stored name is its bare title id, so the names wait
+     * for that scan (bounded: a scan that never ends doesn't hold the notice).
+     */
+    suspend fun heldBackDisplayNames(entries: List<String>): List<String> {
+        if (!_savesScannedOnce.value) {
+            withTimeoutOrNull(HELD_BACK_NAMES_WAIT_MS) { _savesScannedOnce.first { it } }
+        }
+        val names = _allSaves.value.associate { it.titleId to it.displayName }
+        return withContext(Dispatchers.IO) {
+            entries.map { id ->
+                names[id]?.takeIf { it != id }
+                    ?: runCatching { db.syncStateDao().getById(id)?.displayName }.getOrNull()
+                        ?.takeIf { it.isNotBlank() }
+                    ?: id
+            }
+        }
     }
 
     /** Scans romScanDir subfolders and populates [detectedSystemFolders]. */
@@ -2417,13 +2461,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun loadSettings(): Settings = settingsStore.settingsFlow.first()
 
     /** Commits the server URL and/or API key: client rebuild + ping, no rescan. */
-    fun commitServerConnection(serverUrl: String? = null, apiKey: String? = null): Job =
-        viewModelScope.launch {
-            if (serverUrl == null && apiKey == null) return@launch
+    fun commitServerConnection(serverUrl: String? = null, apiKey: String? = null): Job {
+        if (serverUrl == null && apiKey == null) return viewModelScope.launch { }
+        // The write runs on the app's scope: Settings flushes an edit as it
+        // leaves, and when that is the activity finishing (START → Exit)
+        // this view model's scope is cancelled before DataStore gets to it.
+        val write = com.savesync.android.SaveSyncApp.instance.appScope.launch {
             settingsStore.updateSettings(serverUrl = serverUrl, apiKey = apiKey)
             ApiClient.invalidate()
+        }
+        return viewModelScope.launch {
+            write.join()
             pingServerNow()
         }
+    }
 
     /** Turns auto sync on or off and (re)schedules the background worker. */
     fun setAutoSync(enabled: Boolean): Job = viewModelScope.launch {
@@ -3013,7 +3064,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val backupBefore = latestBackupDir(entry.titleId)
-                val result = engine.sync(listOf(entry))
+                // Hashing, the local backup copy and the fsynced write are
+                // disk work: keep them off the main thread.
+                val result = withContext(Dispatchers.IO) { engine.sync(listOf(entry)) }
                 applyConflictOutcome(result)
                 // A download that replaced an existing save kept a copy: offer Undo.
                 val backedUp = result.downloaded > 0 && latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
@@ -3023,12 +3076,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (result.downloaded > 0) {
                         append(if (backedUp) "Replaced with the server's save · backup kept. " else "↓ Downloaded from server. ")
                     }
-                    if (result.conflicts.isNotEmpty()) append("⚠ Conflict detected — use Upload or Download to force. ")
-                    if (result.errors.isNotEmpty()) append("✗ Error: ${result.errors.first()}. ")
+                    if (result.conflicts.isNotEmpty()) append("$SAVE_MSG_CONFLICT — use Upload or Download to force. ")
+                    if (result.errors.isNotEmpty()) append("$SAVE_MSG_ERROR${result.errors.first()}. ")
                     // Rollback protection: a much smaller save (or one with
                     // fewer files) is never uploaded without being asked.
                     if (result.skippedSuspects.isNotEmpty()) {
-                        append("Not uploaded: this save is much smaller than the server's copy. ")
+                        append("${SAVE_MSG_HELD_BACK}this save is much smaller than the server's copy. ")
                         append("Use Force Upload if it is the one you want. ")
                     }
                     if (result.uploaded == 0 && result.downloaded == 0
@@ -3113,10 +3166,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
-                val ok = engine.uploadSave(entry)
+                // Hashed before the upload reads the save: if the emulator
+                // writes it meanwhile, this is the copy the server got.
+                val hashBefore = withContext(Dispatchers.IO) { engine.syncStateHash(entry) }
+                val ok = withContext(Dispatchers.IO) { engine.uploadSave(entry) }
                 if (ok) {
                     clearConflict(entry.titleId)
-                    engine.recordSyncedState(entry)
+                    withContext(Dispatchers.IO) { engine.recordSyncedState(entry, hashBefore) }
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()  // refresh status icons in the list
                 }
@@ -3149,11 +3205,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val api = ApiClient.create(currentSettings.serverUrl, currentSettings.apiKey)
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
                 val backupBefore = latestBackupDir(entry.titleId)
-                val ok = engine.downloadSave(entry, entry.titleId)
+                val ok = withContext(Dispatchers.IO) { engine.downloadSave(entry, entry.titleId) }
                 var backedUp = false
                 if (ok) {
                     clearConflict(entry.titleId)
-                    engine.recordSyncedStateFromFile(entry)
+                    withContext(Dispatchers.IO) { engine.recordDownloadedState(entry) }
                     backedUp = latestBackupDir(entry.titleId).let { it != null && it != backupBefore }
                     if (backedUp) _backupsVersion.value++
                     fetchServerMeta(entry.titleId, entry.systemName)
@@ -3199,12 +3255,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Undo of a download, and Save detail's "Restore previous copy": puts the
-     * newest local copy of [titleId]'s save back and restores the sync base it
-     * had then (never the restored file's hash — see [LocalBackupStore.restore]),
-     * so the next sync sees what the user had before.  The save it replaces is
+     * newest local copy of [titleId]'s save back and marks it restored (see
+     * [LocalBackupStore.restore]), so no sync — smart sync, Sync all or the
+     * background worker — downloads over it again: it waits as a conflict
+     * until the user chooses Upload or Download.  The save it replaces is
      * kept as a copy too.
+     *
+     * [confirmed] is the copy the user agreed to put back (Save detail's
+     * confirm names it); null = the newest, as Undo right after a download
+     * means.  A confirmed copy that has gone since is not swapped for another.
      */
-    fun restoreLatestBackup(titleId: String) {
+    fun restoreLatestBackup(titleId: String, confirmed: LocalBackup? = null) {
         viewModelScope.launch {
             val entry = _allSaves.value.firstOrNull { it.titleId == titleId }?.reconcileWithDisk()
             if (entry == null) {
@@ -3215,10 +3276,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val restored = withContext(Dispatchers.IO) {
                     val store = LocalBackups.store
-                    val backup = store.latest(titleId) ?: return@withContext null
+                    val backup = if (confirmed != null) {
+                        confirmed.takeIf { it.payload.exists() }
+                    } else {
+                        store.latest(titleId)
+                    } ?: return@withContext null
                     val target = (if (backup.isDirectory) entry.saveDir else entry.saveFile)
                         ?: return@withContext null
-                    if (store.restore(titleId, target, db.syncStateDao(), backup, entry.displayName, entry.systemName)) backup
+                    // YabaSanshiro keeps every Saturn game in one backup.bin:
+                    // put back only this title's archives.
+                    val merge = if (isSharedYabaSanshiroSave(entry, settings.value.saturnSyncFormat)) {
+                        val archives = SaturnArchiveStateStore.get(titleId)
+                        if (archives.isEmpty()) {
+                            throw IOException("This game's Saturn archives aren't chosen yet, so its part of the shared file can't be put back")
+                        }
+                        { old: ByteArray, now: ByteArray? ->
+                            SaturnSaveFormatConverter.replaceArchivesInYabaSanshiro(now, old, archives)
+                        }
+                    } else null
+                    if (store.restore(titleId, target, db.syncStateDao(), backup, entry.displayName, entry.systemName, merge)) backup
                     else null
                 }
                 _backupsVersion.value++
@@ -3228,7 +3304,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()
                     _saveDetailState.value = SaveDetailState.Success(
-                        "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}"
+                        "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}. " +
+                            "It shows as a conflict: sync leaves it alone until you choose Upload or Download."
                     )
                 }
             } catch (e: CancellationException) {
@@ -3361,12 +3438,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Where a catalog download for [system] will land, and the space free there. */
     data class RomDestination(val dir: File, val freeBytes: Long?)
 
-    /** Resolves [system]'s ROM folder the way the download will (off the main thread). */
-    suspend fun romDestination(system: String): RomDestination? = withContext(Dispatchers.IO) {
+    /**
+     * Resolves [system]'s ROM folder the way the download of [filename] will
+     * (off the main thread), including the per-game folder CD systems get
+     * with "CD games per content folder" on.  An MSU pack ([bundleKind]) is
+     * never put in one.
+     */
+    suspend fun romDestination(
+        system: String,
+        filename: String? = null,
+        bundleKind: String? = null,
+    ): RomDestination? = withContext(Dispatchers.IO) {
         val current = settingsStore.settingsFlow.first()
         val scanDir = effectiveRomScanDir(current)
         if (scanDir.isBlank()) return@withContext null
-        val dir = InstalledRomsScanner.resolveRomTargetDir(File(scanDir), system, current.romDirOverrides)
+        val systemDir = InstalledRomsScanner.resolveRomTargetDir(File(scanDir), system, current.romDirOverrides)
+        val safeName = filename?.replace('\\', '/')?.substringAfterLast('/')?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "." && it != ".." }
+        val dir = if (safeName != null && bundleKind == null) {
+            com.savesync.android.sync.DownloadManager.finalRomDir(
+                systemDir, system, safeName, current.cdGamesPerContentFolder
+            )
+        } else systemDir
         // The folder may not exist yet: measure the nearest one that does.
         var probe: File? = dir
         while (probe != null && !probe.isDirectory) probe = probe.parentFile
@@ -3622,9 +3715,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Delete an installed ROM (whole-folder where applicable) and
      *  refresh both the installed list and the saves list. */
-    fun deleteInstalledRom(rom: InstalledRom) {
+    /** [allowWholeFolder]: what the confirm told the user (see [InstalledRomsScanner.deleteInstalled]). */
+    fun deleteInstalledRom(rom: InstalledRom, allowWholeFolder: Boolean = true) {
         viewModelScope.launch {
-            val result = InstalledRomsScanner.deleteInstalled(rom)
+            val result = withContext(Dispatchers.IO) { InstalledRomsScanner.deleteInstalled(rom, allowWholeFolder) }
             _deleteInstalledState.value = if (result.errors.isEmpty()) {
                 DeleteInstalledState.Success(rom, result)
             } else {
@@ -3755,6 +3849,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 /** Header status-dot refresh cadence. */
 private const val SERVER_PING_INTERVAL_MS = 30_000L
+
+/** Longest the held-back notice waits for the first save scan to name its games. */
+private const val HELD_BACK_NAMES_WAIT_MS = 60_000L
 
 /**
  * One page of GET /roms (the server allows up to 20000; smaller pages keep

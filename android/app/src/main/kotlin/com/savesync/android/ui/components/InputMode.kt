@@ -89,7 +89,9 @@ val LocalInputTracker = staticCompositionLocalOf<GsInputTracker?> { null }
 /**
  * Whether a key event comes from a physical pad, D-pad or keyboard — the
  * input that switches the app to Pad mode.  Events from the soft keyboard
- * (Enter / Del while typing a search) are virtual and never switch modes.
+ * (Enter / Del while typing a search) are virtual and never switch modes,
+ * and neither do the phone's own keys (volume, power, camera, headset and
+ * media buttons), which arrive as a "keyboard" too.
  */
 fun isPhysicalPadKey(
     deviceIsVirtual: Boolean?,
@@ -100,6 +102,7 @@ fun isPhysicalPadKey(
 ): Boolean {
     if (deviceIsVirtual == true || deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD) return false
     if ((flags and KeyEvent.FLAG_SOFT_KEYBOARD) != 0) return false
+    if (keyCode in SYSTEM_KEYS) return false
     fun has(mask: Int) = (source and mask) == mask
     val padSource = has(InputDevice.SOURCE_GAMEPAD) || has(InputDevice.SOURCE_DPAD) ||
         has(InputDevice.SOURCE_JOYSTICK) || has(InputDevice.SOURCE_KEYBOARD)
@@ -109,6 +112,18 @@ fun isPhysicalPadKey(
         keyCode in KeyEvent.KEYCODE_BUTTON_1..KeyEvent.KEYCODE_BUTTON_16
     return padSource || padKey
 }
+
+private val SYSTEM_KEYS = setOf(
+    KeyEvent.KEYCODE_VOLUME_UP, KeyEvent.KEYCODE_VOLUME_DOWN, KeyEvent.KEYCODE_VOLUME_MUTE,
+    KeyEvent.KEYCODE_MUTE, KeyEvent.KEYCODE_POWER, KeyEvent.KEYCODE_SLEEP, KeyEvent.KEYCODE_WAKEUP,
+    KeyEvent.KEYCODE_CAMERA, KeyEvent.KEYCODE_FOCUS, KeyEvent.KEYCODE_HEADSETHOOK,
+    KeyEvent.KEYCODE_CALL, KeyEvent.KEYCODE_ENDCALL,
+    KeyEvent.KEYCODE_BRIGHTNESS_UP, KeyEvent.KEYCODE_BRIGHTNESS_DOWN,
+    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PLAY, KeyEvent.KEYCODE_MEDIA_PAUSE,
+    KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_MEDIA_NEXT, KeyEvent.KEYCODE_MEDIA_PREVIOUS,
+    KeyEvent.KEYCODE_MEDIA_REWIND, KeyEvent.KEYCODE_MEDIA_FAST_FORWARD,
+    KeyEvent.KEYCODE_MEDIA_RECORD, KeyEvent.KEYCODE_MEDIA_EJECT, KeyEvent.KEYCODE_MEDIA_CLOSE,
+)
 
 private val DPAD_DIAGONALS = setOf(
     KeyEvent.KEYCODE_DPAD_UP_LEFT, KeyEvent.KEYCODE_DPAD_DOWN_LEFT,

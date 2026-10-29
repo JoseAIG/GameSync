@@ -24,6 +24,14 @@ object AtomicSaveWriter {
     private const val STAGING_SUFFIX = ".gamesync-new"
     private const val BACKUP_SUFFIX = ".gamesync-old"
 
+    /**
+     * One swap at a time, process-wide.  The staging and backup names are
+     * fixed per target, so two writers to the same save (the background
+     * worker and a sync started from the UI, or a restore) would otherwise
+     * delete each other's staging and swap in a half-filled copy.
+     */
+    private val swapLock = Any()
+
     /** Hidden sibling that receives the new contents before the swap. */
     fun stagingFor(target: File): File =
         File(target.absoluteFile.parentFile, ".${target.name}$STAGING_SUFFIX")
@@ -39,7 +47,7 @@ object AtomicSaveWriter {
      * verified by SHA-256 before being renamed over [target], so [target]
      * always holds either the complete old or the complete new contents.
      */
-    fun replaceFile(target: File, bytes: ByteArray) {
+    fun replaceFile(target: File, bytes: ByteArray): Unit = synchronized(swapLock) {
         val parent = target.absoluteFile.parentFile
             ?: throw IOException("No parent directory for $target")
         if (!parent.isDirectory && !parent.mkdirs()) {
@@ -56,6 +64,20 @@ object AtomicSaveWriter {
     }
 
     /**
+     * [replaceFile] with bytes built from [target]'s current contents (null
+     * when there is none), read under the swap lock.  For a file several
+     * titles share (YabaSanshiro's backup.bin): another writer in the app
+     * can't swap in its change between this read and this swap, so neither
+     * merge drops the other's.  Returns the bytes written.
+     */
+    fun replaceFileMerging(target: File, build: (existing: ByteArray?) -> ByteArray): ByteArray =
+        synchronized(swapLock) {
+            val bytes = build(target.takeIf { it.isFile }?.readBytes())
+            replaceFile(target, bytes)
+            bytes
+        }
+
+    /**
      * Writes [files] (relative path → bytes) into a fresh directory and swaps
      * it in place of [targetDir].
      *
@@ -67,11 +89,15 @@ object AtomicSaveWriter {
      *
      * Every entry name must stay inside the directory; an unsafe name aborts
      * the whole write and leaves [targetDir] untouched.
+     *
+     * [onStaged] sees the finished, verified staging directory just before
+     * the swap (under the swap lock): exactly what lands in [targetDir].
      */
     fun replaceDirectory(
         targetDir: File,
         files: List<Pair<String, ByteArray>>,
-        keepExisting: Boolean = false
+        keepExisting: Boolean = false,
+        onStaged: (File) -> Unit = {},
     ) {
         replaceDirectory(targetDir, keepExisting) { staging ->
             for ((name, data) in files) {
@@ -83,6 +109,7 @@ object AtomicSaveWriter {
             for ((name, data) in files) {
                 verify(File(staging, name), sha256(data))
             }
+            onStaged(staging)
         }
     }
 
@@ -97,7 +124,7 @@ object AtomicSaveWriter {
         keepExisting: Boolean,
         rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
         populate: (File) -> Unit
-    ) {
+    ): Unit = synchronized(swapLock) {
         val target = targetDir.absoluteFile
         val parent = target.parentFile ?: throw IOException("No parent directory for $target")
         if (!parent.isDirectory && !parent.mkdirs()) {

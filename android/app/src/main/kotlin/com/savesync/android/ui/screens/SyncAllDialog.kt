@@ -239,7 +239,7 @@ internal fun SyncAllDialog(
                         modifier = Modifier.padding(top = 12.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        previewDetailGroups(p).forEach { (label, names) ->
+                        previewDetailGroups(p, included).forEach { (label, names) ->
                             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                                 Text(label, style = MaterialTheme.typography.labelMedium, color = gsTextMuted())
                                 names.forEach { name ->

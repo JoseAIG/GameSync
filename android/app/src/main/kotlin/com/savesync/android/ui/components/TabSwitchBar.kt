@@ -347,6 +347,14 @@ fun TabSwitchBar(
     }
 
     val target = bounds[shownIndex]
+    // The shown tab's label moved without a tab change (a badge popped in or
+    // out beside an earlier label): the pill snaps to it rather than
+    // trailing behind its label for a whole animation.
+    var targetIndex by remember { mutableIntStateOf(shownIndex) }
+    LaunchedEffect(target) {
+        if (target != null && targetIndex == shownIndex) snapGeneration++
+        targetIndex = shownIndex
+    }
     // Re-keyed on a jump and on the first measurement (also after a rotation
     // between the wide and narrow header, which is a new strip): a fresh
     // animateDpAsState starts at its target, i.e. snaps.

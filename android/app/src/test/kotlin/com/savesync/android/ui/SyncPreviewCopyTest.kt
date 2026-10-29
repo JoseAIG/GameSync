@@ -82,4 +82,17 @@ class SyncPreviewCopyTest {
             previewDetailGroups(p),
         )
     }
+
+    @Test
+    fun `details list a skipped suspect as held back, an included one as upload`() {
+        val p = preview(listOf(t("S", PlannedAction.UPLOAD), t("U", PlannedAction.UPLOAD)), suspects = listOf("S"))
+        assertEquals(
+            listOf("Upload" to listOf("Game U"), "Held back (smaller than the server's copy)" to listOf("Game S")),
+            previewDetailGroups(p),
+        )
+        assertEquals(
+            listOf("Upload" to listOf("Game S", "Game U")),
+            previewDetailGroups(p, includeSuspects = setOf("S")),
+        )
+    }
 }

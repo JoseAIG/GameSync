@@ -1,5 +1,9 @@
 package com.savesync.android.ui.screens
 
+import android.os.SystemClock
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -47,6 +51,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -157,14 +162,17 @@ fun SettingsScreen(
     LaunchedEffect(settings.segaCdSyncFormat) { segaCdSyncFormat = settings.segaCdSyncFormat }
     LaunchedEffect(settings.ps2Emulator) { ps2Emulator = settings.ps2Emulator }
 
-    // One counter per control: a commit bumps it and its "Saved" caption
-    // (re)starts its hold.
-    val savedTicks = remember { mutableStateOf(mapOf<String, Int>()) }
-    fun tickOf(id: String) = savedTicks.value[id] ?: 0
+    // One tick per control: when its last commit landed (uptime ms).  A new
+    // value (re)starts its "Saved" caption's hold; a caption that re-enters
+    // composition later (the URL field leaving its error state) can tell the
+    // hold is over and stays hidden.
+    val savedTicks = remember { mutableStateOf(mapOf<String, Long>()) }
+    fun tickOf(id: String) = savedTicks.value[id] ?: 0L
     fun markSaved(id: String, job: Job) {
         scope.launch {
             job.join()
-            savedTicks.value = savedTicks.value + (id to tickOf(id) + 1)
+            val now = maxOf(SystemClock.uptimeMillis(), tickOf(id) + 1)
+            savedTicks.value = savedTicks.value + (id to now)
         }
     }
 
@@ -197,12 +205,23 @@ fun SettingsScreen(
         markSaved("key", viewModel.commitServerConnection(apiKey = write))
     }
 
-    // Leaving the tab (or rotating) with an uncommitted edit still saves it.
-    // The view model's scope outlives this screen, so the write completes.
+    // Leaving the tab (or rotating, or exiting) with an uncommitted edit
+    // still saves it: the write runs on the app's scope, so it completes.
+    // The app going to the background flushes too, since a process killed
+    // there never disposes this screen.
     val flushUrl by rememberUpdatedState(::commitUrl)
     val flushKey by rememberUpdatedState(::commitKey)
-    DisposableEffect(Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                flushUrl()
+                flushKey()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             flushUrl()
             flushKey()
         }
@@ -287,8 +306,8 @@ fun SettingsScreen(
                     .onFocusChanged {
                         if (urlFocused && !it.isFocused) commitUrl()
                         urlFocused = it.isFocused
-                    }
-                    .gsFocusRing(GsShapes.Field),
+                    },
+                colors = gsFieldColors(),
                 singleLine = true,
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
                 keyboardActions = KeyboardActions(onDone = {
@@ -308,8 +327,8 @@ fun SettingsScreen(
                     .onFocusChanged {
                         if (keyFocused && !it.isFocused) commitKey()
                         keyFocused = it.isFocused
-                    }
-                    .gsFocusRing(GsShapes.Field),
+                    },
+                colors = gsFieldColors(),
                 singleLine = true,
                 visualTransformation = if (apiKeyVisible) VisualTransformation.None
                     else PasswordVisualTransformation(),
@@ -398,9 +417,12 @@ fun SettingsScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Stays enabled (and focusable) while a scan runs, as in
+                // v055: disabling the button A was just pressed on would
+                // drop the pad's focus.  A press during a scan does nothing.
                 Button(
-                    onClick = { viewModel.scanSaves() },
-                    enabled = syncState !is SyncState.Syncing && !savesScanning,
+                    onClick = { if (!savesScanning) viewModel.scanSaves() },
+                    enabled = syncState !is SyncState.Syncing,
                     modifier = Modifier
                         .weight(1f)
                         .gsFocusRing()
@@ -596,8 +618,8 @@ fun SettingsScreen(
                             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(addSystemExpanded) },
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .menuAnchor()
-                                .gsFocusRing(GsShapes.Field),
+                                .menuAnchor(),
+                            colors = gsFieldColors(),
                             textStyle = MaterialTheme.typography.bodySmall
                         )
                         ExposedDropdownMenu(
@@ -970,12 +992,15 @@ private fun WarnCaption(text: String) {
  * so nothing around it moves.
  */
 @Composable
-private fun SavedCaption(tick: Int) {
+private fun SavedCaption(tick: Long) {
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(tick) {
-        if (tick > 0) {
+        // Only what is left of the hold since the commit landed: none for a
+        // caption shown again long after.
+        val left = SAVED_CAPTION_HOLD_MS - (SystemClock.uptimeMillis() - tick)
+        if (tick > 0 && left > 0) {
             visible = true
-            delay(SAVED_CAPTION_HOLD_MS)
+            delay(left)
             visible = false
         }
     }
@@ -1001,7 +1026,7 @@ private fun SavedCaption(tick: Int) {
 
 /** Folder label + path (or "Not set") with its Browse button and "Saved". */
 @Composable
-private fun FolderRow(label: String, path: String, savedTick: Int, onBrowse: () -> Unit) {
+private fun FolderRow(label: String, path: String, savedTick: Long, onBrowse: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -1036,7 +1061,7 @@ private fun <T> SettingsDropdown(
     options: List<T>,
     optionLabel: (T) -> String,
     description: String?,
-    savedTick: Int,
+    savedTick: Long,
     onSelect: (T) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -1055,8 +1080,8 @@ private fun <T> SettingsDropdown(
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded) },
             modifier = Modifier
                 .fillMaxWidth()
-                .menuAnchor()
-                .gsFocusRing(GsShapes.Field)
+                .menuAnchor(),
+            colors = gsFieldColors(),
         )
         ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { option ->
@@ -1081,3 +1106,11 @@ private val SETTINGS_CHROME = GsChromeSpec(
         GsHint(GsButton.START, "Exit"),
     ),
 )
+
+/**
+ * A text field's colours: its own focused outline, in the focus-ring colour,
+ * is the D-pad ring.  A gsFocusRing around the whole field would also ring
+ * the label gap and the caption under it, and double the outline.
+ */
+@Composable
+private fun gsFieldColors() = OutlinedTextFieldDefaults.colors(focusedBorderColor = GsColors.Accent2)

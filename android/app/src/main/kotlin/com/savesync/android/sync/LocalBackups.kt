@@ -5,6 +5,7 @@ import com.google.gson.Gson
 import com.savesync.android.storage.SyncStateDao
 import com.savesync.android.storage.SyncStateEntity
 import java.io.File
+import java.io.FileOutputStream
 import java.io.IOException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -14,9 +15,10 @@ import java.util.Locale
  * A snapshot of a save taken before a download replaced it.
  *
  * [previousLastSyncedHash] / [previousLastSyncedAt] are the title's sync
- * state at snapshot time; a restore puts them back so the next sync sees
- * exactly what the user had before (a conflict, if it was one), instead of
- * "only the server changed" and downloading over the restore again.
+ * state at snapshot time, kept for reference.  A restore does not put that
+ * hash back: after a normal download it equals the restored save's own hash,
+ * which the server reads as "only the server changed" and downloads over the
+ * restore again.  See [LocalBackupStore.restore].
  */
 data class LocalBackup(
     val dir: File,
@@ -65,6 +67,14 @@ class LocalBackupStore(
      * Copies [target] (a file or a folder) into a new snapshot and prunes the
      * title to the newest [keep].  Returns the snapshot folder, or null when
      * there is nothing to keep (no target yet: a first download).
+     *
+     * When the newest snapshot (same [reason]) already holds exactly what
+     * [target] holds — a download that failed after its snapshot and is
+     * retried every auto sync — that snapshot is renewed instead of copied
+     * again, so repeats can't push older, different copies out.
+     *
+     * The copy is flushed to disk before this returns: the write that
+     * follows is fsynced, and must never become durable before its backup.
      * @throws BackupFailedException when the copy can't be made; the caller
      *   must then not overwrite [target].
      */
@@ -90,6 +100,19 @@ class LocalBackupStore(
             var name = stamp
             var n = 2
             while (File(parent, name).exists() || File(parent, "$name$PARTIAL").exists()) name = "$stamp-${n++}"
+            val done = File(parent, name)
+
+            val newest = latest(titleId)
+            if (newest != null && newest.reason == reason && newest.isDirectory == isDir &&
+                sameContent(newest.payload, target, isDir)
+            ) {
+                val meta = SnapshotMeta(now, reason, previousLastSyncedHash, previousLastSyncedAt, newest.payload.name, isDir)
+                writeSynced(File(newest.dir, META), gson.toJson(meta))
+                if (!newest.dir.renameTo(done)) throw IOException("Could not renew snapshot ${newest.dir}")
+                syncDir(parent)
+                return done
+            }
+
             val work = File(parent, "$name$PARTIAL").also { partial = it }
             if (!work.mkdirs()) throw IOException("Could not create $work")
             val payloadName = payloadNameFor(target)
@@ -99,11 +122,14 @@ class LocalBackupStore(
             } else {
                 target.copyTo(copy, overwrite = true)
             }
+            copy.walkTopDown().filter { it.isFile }.forEach(::syncFile)
             val meta = SnapshotMeta(now, reason, previousLastSyncedHash, previousLastSyncedAt, payloadName, isDir)
-            File(work, META).writeText(gson.toJson(meta))
-            val done = File(parent, name)
+            writeSynced(File(work, META), gson.toJson(meta))
             if (!work.renameTo(done)) throw IOException("Could not finish snapshot $done")
             partial = null
+            // The rename itself must reach the disk before the write that
+            // follows: otherwise a power cut can leave only the `.partial`.
+            syncDir(parent)
             prune(titleId, protect)
             return done
         } catch (e: Exception) {
@@ -125,12 +151,27 @@ class LocalBackupStore(
 
     /**
      * Puts [backup] (default: the newest) back over [target] through
-     * [AtomicSaveWriter], then restores the title's last-synced hash to what
-     * it was when the snapshot was taken — deleting the sync-state row when
-     * there was none.  It never records the restored file's hash as synced.
+     * [AtomicSaveWriter], then sets the title's last-synced hash to
+     * [RESTORED_BASE], a value no real save hashes to.
+     *
+     * Neither the restored file's hash nor the base it had at snapshot time
+     * would hold the restore: the snapshot's base equals the restored save's
+     * hash after every "only the server changed" download, and no base at all
+     * is the server's "no history → download" case, so the next sync (or the
+     * background worker) would download the server copy straight back over
+     * it.  With a base that matches neither side the server reports a
+     * conflict (or up to date, if the restored save happens to be the
+     * server's), and nothing moves until the user picks Force Upload or Force
+     * Download.
      *
      * The current save is snapshotted first, so a restore can itself be
      * undone.  Returns false when there is nothing to restore.
+     *
+     * [merge], for a single-file save, builds what is written from the
+     * snapshot's bytes and the current file's (null = none): a container
+     * shared by several titles (YabaSanshiro's backup.bin) must get back only
+     * this title's part, or every other game in it would roll back too and
+     * be uploaded over the server as "only this device changed".
      * @throws BackupFailedException when the current save can't be kept.
      */
     suspend fun restore(
@@ -140,6 +181,7 @@ class LocalBackupStore(
         backup: LocalBackup? = latest(titleId),
         displayName: String = titleId,
         systemName: String = "",
+        merge: ((snapshot: ByteArray, current: ByteArray?) -> ByteArray)? = null,
     ): Boolean {
         val chosen = backup ?: return false
         if (!chosen.payload.exists()) return false
@@ -155,24 +197,84 @@ class LocalBackupStore(
                 }
             }
         } else {
-            AtomicSaveWriter.replaceFile(target, chosen.payload.readBytes())
+            val bytes = chosen.payload.readBytes()
+            if (merge != null) {
+                // The current file is read under the swap lock, so a download
+                // into the same shared container can't be dropped by this merge.
+                AtomicSaveWriter.replaceFileMerging(target) { now -> merge(bytes, now) }
+            } else {
+                AtomicSaveWriter.replaceFile(target, bytes)
+            }
         }
 
-        val previous = chosen.previousLastSyncedHash
-        if (previous == null) {
-            dao.deleteById(titleId)
-        } else {
-            dao.upsert(
-                SyncStateEntity(
-                    titleId = titleId,
-                    lastSyncedHash = previous,
-                    lastSyncedAt = chosen.previousLastSyncedAt ?: current?.lastSyncedAt ?: 0L,
-                    displayName = current?.displayName ?: displayName,
-                    systemName = current?.systemName ?: systemName,
-                )
+        dao.upsert(
+            SyncStateEntity(
+                titleId = titleId,
+                lastSyncedHash = RESTORED_BASE,
+                lastSyncedAt = chosen.previousLastSyncedAt ?: current?.lastSyncedAt ?: 0L,
+                displayName = current?.displayName ?: displayName,
+                systemName = current?.systemName ?: systemName,
             )
-        }
+        )
         return true
+    }
+
+    /**
+     * Deletes snapshots an earlier run left half-built (`.partial`: the app
+     * died mid-copy).  They never count as backups, but they hold a whole
+     * save's worth of space.  Call once at start, before anything takes a
+     * snapshot, so a `.partial` is never one still being built.
+     */
+    fun removeStalePartials() {
+        root.listFiles { f -> f.isDirectory }?.forEach { title ->
+            title.listFiles { f -> f.isDirectory && f.name.endsWith(PARTIAL) }?.forEach { it.deleteRecursively() }
+        }
+    }
+
+    /**
+     * Makes a rename inside [dir] durable.  Best effort: a filesystem that
+     * can't sync a directory still has the snapshot's data synced.
+     */
+    private fun syncDir(dir: File) {
+        runCatching {
+            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+        }
+    }
+
+    /** Flushes [file]'s data to the storage device. */
+    private fun syncFile(file: File) {
+        FileOutputStream(file, true).use { it.fd.sync() }
+    }
+
+    private fun writeSynced(file: File, text: String) {
+        FileOutputStream(file).use { out ->
+            out.write(text.toByteArray(Charsets.UTF_8))
+            out.flush()
+            out.fd.sync()
+        }
+    }
+
+    /** Whether snapshot [payload] holds byte-for-byte what [target] holds now. */
+    private fun sameContent(payload: File, target: File, isDir: Boolean): Boolean {
+        if (!isDir) return payload.isFile && filesEqual(payload, target)
+        if (!payload.isDirectory) return false
+        fun filesOf(root: File) = root.walkTopDown().filter { it.isFile }.associateBy { it.relativeTo(root).path }
+        val kept = filesOf(payload)
+        val now = filesOf(target)
+        return kept.keys == now.keys && kept.all { (path, f) -> filesEqual(f, now.getValue(path)) }
+    }
+
+    private fun filesEqual(a: File, b: File): Boolean {
+        if (a.length() != b.length()) return false
+        a.inputStream().buffered().use { x ->
+            b.inputStream().buffered().use { y ->
+                while (true) {
+                    val c = x.read()
+                    if (c != y.read()) return false
+                    if (c == -1) return true
+                }
+            }
+        }
     }
 
     private fun prune(titleId: String, protect: File? = null) {
@@ -207,6 +309,13 @@ class LocalBackupStore(
         private const val PARTIAL = ".partial"
         const val REASON_DOWNLOAD = "download"
         const val REASON_BEFORE_RESTORE = "before-restore"
+
+        /**
+         * The sync base a restore records: never equal to a save hash, so the
+         * three-way rule sees both sides as changed (a conflict) and leaves the
+         * restored save alone until the user chooses a side.
+         */
+        const val RESTORED_BASE = "restored-from-local-backup"
     }
 }
 
@@ -236,7 +345,11 @@ object LocalBackups {
 
     /** Called once from Application.onCreate. */
     fun init(context: Context) {
-        if (instance == null) instance = LocalBackupStore(File(context.filesDir, "local_backups"))
+        if (instance == null) {
+            instance = LocalBackupStore(File(context.filesDir, "local_backups")).also {
+                runCatching { it.removeStalePartials() }
+            }
+        }
     }
 
     /** The store; throws if [init] never ran, so no download proceeds without backups. */

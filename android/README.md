@@ -200,9 +200,13 @@ first copies the current save to the app's private storage
 (`<app files dir>/local_backups/<title>/<date-time>/`, the newest five per
 game, never in cloud backups). If that copy can't be made the save is not
 overwritten. The result offers *Undo*, and the detail screen gets a *Restore
-previous copy (<when>)* action for the same thing with the controller; the
-restore puts back the sync bookkeeping of that moment too, so the next sync
-sees what you had before rather than downloading over it again.
+previous copy (<when>)* action for the same thing with the controller. A
+restored save is never downloaded over again by a sync (smart sync, Sync all or
+auto sync): it shows as a conflict, in the list and on its detail screen, until
+you choose *Force Upload* (keep it and send it to the server) or *Force
+Download* (take the server's copy after all). Two cases sync settles by itself:
+if the server holds this very save it reads *Synced* again, and if the server
+has no copy of the game the detail shows *Local Newer* and a sync uploads it.
 
 ### Catalog
 
@@ -278,7 +282,11 @@ system folders such as `psx` or `GBA`, or an EmuDeck layout. Picking an
 emulator's save folder runs that emulator's own check instead (Azahar:
 *Found sdmc/Nintendo 3DS/…/title (14 titles)*). When nothing there is
 recognisable the line turns amber and *Select* asks before using the
-folder. The list slides the way you went, and going up returns to where
+folder. An Azahar folder without its 3DS save tree yet keeps a warning on
+the Emulators screen. If Azahar has already made its `sdmc` folder there,
+3DS saves still download to where Azahar will look for them; a folder with
+no `sdmc` gets none until Azahar has created it (start a game in Azahar
+once). The list slides the way you went, and going up returns to where
 you were in the parent folder. With a keyboard or remote on a phone, the
 first key only shows which folder is highlighted; a touch hides it again.
 On a short screen (a handheld in landscape, or large text) the path and
@@ -287,11 +295,12 @@ the folder list keeps its room.
 
 ### Pickers on the save detail screen
 
-*Normalize* (choose the canonical name) and the Saturn archive picker use
-the same dialogs as the rest of the app: Up / Down move the cursor, A
-applies, B cancels. In the Saturn picker X includes or leaves out the
-archive under the cursor (tap a row to do the same by touch). The cursor
-starts on the current choice.
+*Normalize* (choose the canonical name) and the Saturn archive picker keep
+v055's controls: Up / Down move the cursor, A on a row chooses that name
+(Normalize) or includes / leaves out that archive (Saturn), and A on the
+*Apply* / *Use selection* row after the last one applies; B cancels. By
+touch, tap a row to choose or toggle it and use the Apply / Use selection
+button. The cursor starts on the current choice.
 
 ### TalkBack
 

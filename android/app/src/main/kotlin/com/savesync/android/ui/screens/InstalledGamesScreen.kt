@@ -462,7 +462,7 @@ fun InstalledGamesScreen(
     }
 
     GsDialogHost(confirmTarget) { rom, _ ->
-        val wholeFolder = rememberDeletePlan(rom).wholeFolder
+        val wholeFolder = rememberDeletePlan(rom)?.wholeFolder == true
         // Per-rom action sheet: A syncs this game's save, X deletes the ROM
         // (after a second confirmation), B cancels.
         GsDialog(
@@ -533,13 +533,18 @@ fun InstalledGamesScreen(
         val plan = rememberDeletePlan(rom)
         GsConfirmDialog(
             title = "Delete ${rom.displayName}?",
-            message = deleteConfirmMessage(rom, plan),
+            message = plan?.let { deleteConfirmMessage(rom, it) } ?: "Checking what this removes…",
             warning = "This can't be undone.",
             confirmLabel = "Delete",
             destructive = true,
             onConfirm = {
-                viewModel.deleteInstalledRom(rom)
-                deleteTarget = null
+                // Until the check is back the message can't say what goes,
+                // so Delete waits; then it removes exactly what was shown.
+                val shown = plan
+                if (shown != null) {
+                    viewModel.deleteInstalledRom(rom, allowWholeFolder = shown.wholeFolder)
+                    deleteTarget = null
+                }
             },
             onDismiss = { deleteTarget = null },
         )
@@ -661,9 +666,10 @@ private fun filterInstalled(
 /** What a delete of one installed game will remove, worked out off the main thread. */
 internal data class DeletePlan(val wholeFolder: Boolean, val fileCount: Int)
 
+/** Null until the check off the main thread is back. */
 @Composable
-private fun rememberDeletePlan(rom: InstalledRom): DeletePlan {
-    val plan by produceState(DeletePlan(wholeFolder = false, fileCount = 0), rom) {
+private fun rememberDeletePlan(rom: InstalledRom): DeletePlan? {
+    val plan by produceState<DeletePlan?>(null, rom) {
         value = withContext(Dispatchers.IO) {
             val whole = InstalledRomsScanner.wouldRemoveWholeFolder(rom)
             DeletePlan(whole, if (whole) InstalledRomsScanner.wholeFolderFileCount(rom) else rom.totalFiles)

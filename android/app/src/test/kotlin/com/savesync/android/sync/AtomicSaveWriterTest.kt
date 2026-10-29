@@ -37,6 +37,45 @@ class AtomicSaveWriterTest {
     }
 
     @Test
+    fun `two writers to one save never share its staging folder`() {
+        val dir = azaharSaveDir()
+        seedOldSave(dir)
+        val aFilling = java.util.concurrent.CountDownLatch(1)
+        val releaseA = java.util.concurrent.CountDownLatch(1)
+        val bEntered = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        val a = Thread {
+            AtomicSaveWriter.replaceDirectory(dir, keepExisting = false) { staging ->
+                File(staging, "main").writeBytes(byteArrayOf(1))
+                aFilling.countDown()
+                releaseA.await()
+                File(staging, "extdata").writeBytes(byteArrayOf(2))
+            }
+        }
+        val b = Thread {
+            AtomicSaveWriter.replaceDirectory(dir, keepExisting = false) { staging ->
+                bEntered.set(true)
+                File(staging, "main").writeBytes(byteArrayOf(3))
+                File(staging, "extdata").writeBytes(byteArrayOf(4))
+            }
+        }
+        a.start()
+        aFilling.await()
+        b.start()
+        Thread.sleep(200)
+        // B must wait: it would otherwise delete A's half-filled staging.
+        assertFalse(bEntered.get())
+        releaseA.countDown()
+        a.join(); b.join()
+
+        assertTrue(bEntered.get())
+        assertEquals(setOf("main", "extdata"), relativeFiles(dir))
+        assertArrayEquals(byteArrayOf(3), File(dir, "main").readBytes())
+        assertArrayEquals(byteArrayOf(4), File(dir, "extdata").readBytes())
+        noLeftovers(dir)
+    }
+
+    @Test
     fun `replaceDirectory swaps in exactly the bundle files`() {
         val dir = azaharSaveDir()
         seedOldSave(dir)
@@ -176,5 +215,45 @@ class AtomicSaveWriterTest {
 
         assertTrue(file.isFile)
         assertArrayEquals(byteArrayOf(1), file.readBytes())
+    }
+
+    @Test
+    fun `merging writers to one shared file never drop each other's change`() {
+        val shared = File(tmp.root, "backup.bin").apply { writeText("") }
+        val aRead = java.util.concurrent.CountDownLatch(1)
+        val releaseA = java.util.concurrent.CountDownLatch(1)
+
+        // A reads the container, then is held before it swaps; B merges its
+        // own part meanwhile.  B must see A's part, not the copy A read.
+        val a = Thread {
+            AtomicSaveWriter.replaceFileMerging(shared) { now ->
+                aRead.countDown()
+                releaseA.await()
+                ((now?.let { String(it) } ?: "") + "A").toByteArray()
+            }
+        }
+        val b = Thread {
+            AtomicSaveWriter.replaceFileMerging(shared) { now -> ((now?.let { String(it) } ?: "") + "B").toByteArray() }
+        }
+        a.start()
+        aRead.await()
+        b.start()
+        Thread.sleep(200)
+        releaseA.countDown()
+        a.join(); b.join()
+
+        assertEquals("AB", shared.readText())
+        assertFalse(AtomicSaveWriter.stagingFor(shared).exists())
+    }
+
+    @Test
+    fun `merging writer sees no current file as null and returns what it wrote`() {
+        val target = File(tmp.root, "new/backup.bin")
+        val written = AtomicSaveWriter.replaceFileMerging(target) { now ->
+            assertEquals(null, now)
+            byteArrayOf(7)
+        }
+        assertArrayEquals(byteArrayOf(7), written)
+        assertArrayEquals(byteArrayOf(7), target.readBytes())
     }
 }

@@ -85,6 +85,10 @@ class GsNotifierTest {
             noticeKindForSaveMessage("⚠ Conflict detected — use Upload or Download to force."),
         )
         assertEquals(GsNoticeKind.Error, noticeKindForSaveMessage("✗ Error: timeout."))
+        // A game name is not a marker.
+        assertEquals(GsNoticeKind.Success, noticeKindForSaveMessage("✓ Renamed to \"Conflict - Desert Storm (USA)\""))
+        assertEquals(GsNoticeKind.Success, noticeKindForSaveMessage("✓ Renamed to \"Terrors (Japan)\""))
+        assertEquals(GsNoticeKind.Success, noticeKindForSaveMessage("✓ Renamed to \"Magical Error wo Sagase\""))
         assertEquals("Uploaded successfully", stripLeadingGlyph("↑ Uploaded successfully"))
         assertEquals("Already using canonical name", stripLeadingGlyph("✓ Already using canonical name"))
         assertTrue(isServerNotConfigured("Server URL not configured"))

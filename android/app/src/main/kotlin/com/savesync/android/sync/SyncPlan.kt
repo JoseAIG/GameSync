@@ -67,10 +67,12 @@ class SyncPreview internal constructor(
     val sizeCheckSkipped: Int,
     /** Problems found while planning (unreadable saves, server unreachable). */
     val errors: List<String>,
-    /** When the plan was made (uptime-independent wall clock, ms). */
+    /** When planning started, before the first hash (wall clock, ms). */
     val createdAtMs: Long,
     internal val entries: Map<String, SaveEntry>,
     internal val conflictInfo: Map<String, ConflictInfo>,
+    /** The save hash each /sync title was planned with (SyncTitle.save_hash). */
+    internal val sentHashes: Map<String, String> = emptyMap(),
 ) {
     val suspectIds: Set<String> get() = suspects.mapTo(LinkedHashSet()) { it.titleId }
 

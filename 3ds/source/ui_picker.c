@@ -342,7 +342,13 @@ static void pick_enter(Picker *p, int index) {
     if (index < 0 || index >= p->list.count) return;
     char path[FOLDER_PATH_MAX];
     child_path(p, index, path, sizeof(path));
-    PickLevel level = { p->selected, p->scroll, "" };
+    // The row being opened (not always the highlighted one: "Open <best>/"
+    // in the empty-folder dialog opens another), shown on screen, so going
+    // back up finds it here and keeps every saved level
+    int scroll = p->scroll;
+    if (index < scroll || index >= scroll + PICK_ROWS)
+        scroll = index >= PICK_ROWS ? index - PICK_ROWS / 2 : 0;
+    PickLevel level = { index, scroll, "" };
     snprintf(level.name, sizeof(level.name), "%s", p->list.names[index]);
     if (!pick_load(p, path)) {
         cant_open(path);

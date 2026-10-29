@@ -71,10 +71,11 @@ class AzaharEmulator(
             return titleRoot.takeIf { allowNonExistent || it.isDirectory }
         }
         // Only touch Environment (via baseDir) when there is nothing explicit.
-        val candidates = candidateTitleRoots
-            ?: buildCandidateTitleRoots(storageBaseDir ?: baseDir)
-        return if (allowNonExistent) candidates.firstOrNull()
-               else candidates.firstOrNull { it.isDirectory }
+        if (candidateTitleRoots != null) {
+            return if (allowNonExistent) candidateTitleRoots.firstOrNull()
+                   else candidateTitleRoots.firstOrNull { it.isDirectory }
+        }
+        return autoDetectedTitleRoot(buildCandidateTitleRoots(storageBaseDir ?: baseDir), allowNonExistent)
     }
 
     companion object {
@@ -99,7 +100,12 @@ class AzaharEmulator(
          * setup, e.g. ``/storage/emulated/0/Azahar``) rather than browsing
          * five levels down, so every level of
          * ``<user>/sdmc/Nintendo 3DS/<id0>/<id1>/title`` is accepted.  Any
-         * other folder is taken to be the title root itself, as before.
+         * other folder is the title root itself only when it already holds
+         * ``<high>/<low>`` title folders; otherwise it is read as a user
+         * folder whose ``sdmc`` Azahar hasn't created yet, so the root is
+         * predicted under it (missing until then, which [overrideWarning]
+         * reports and which stops downloads from creating a stray tree that
+         * the real one would later replace).
          */
         fun resolveOverrideTitleRoot(overrideDir: File): File {
             if (overrideDir.name.equals("title", ignoreCase = true)) return overrideDir
@@ -117,10 +123,18 @@ class AzaharEmulator(
                     hex32Children(overrideDir)
                         .map { File(it, "title") }
                         .firstOrNull { it.isDirectory }
-                        ?: overrideDir
-                else -> overrideDir
+                        ?: File(overrideDir, "$ZERO_ID/title")
+                looksLikeTitleRoot(overrideDir) -> overrideDir
+                else -> File(overrideDir, "sdmc/Nintendo 3DS/$ZERO_ID/$ZERO_ID/title")
             }
         }
+
+        /** Whether [dir] holds ``<high>/<low>`` hex title folders, as a ``title`` root does. */
+        private fun looksLikeTitleRoot(dir: File): Boolean =
+            (dir.listFiles() ?: emptyArray()).any { high ->
+                high.isDirectory && HEX8_REGEX.matches(high.name) &&
+                    (high.listFiles() ?: emptyArray()).any { it.isDirectory && HEX8_REGEX.matches(it.name) }
+            }
 
         /**
          * Human-readable problem with a configured override, or null when it
@@ -217,12 +231,27 @@ class AzaharEmulator(
             allowNonExistent: Boolean = false,
             candidateTitleRoots: List<File>? = null
         ): File? {
-            val candidates = candidateTitleRoots ?: buildCandidateTitleRoots(storageBaseDir)
-            return when {
-                allowNonExistent -> candidates.firstOrNull()
-                else -> candidates.firstOrNull { it.exists() && it.isDirectory }
+            if (candidateTitleRoots != null) {
+                return if (allowNonExistent) candidateTitleRoots.firstOrNull()
+                       else candidateTitleRoots.firstOrNull { it.isDirectory }
             }
+            return autoDetectedTitleRoot(buildCandidateTitleRoots(storageBaseDir), allowNonExistent)
         }
+
+        /**
+         * The auto-detected title root: the first candidate that exists —
+         * the same one discovery reads.  A download target ([allowNonExistent])
+         * may be predicted only under an ``sdmc`` folder Azahar already made;
+         * guessing the first candidate instead would create a stray tree that
+         * discovery then prefers, hiding the real saves.  Null = no Azahar here.
+         */
+        private fun autoDetectedTitleRoot(candidates: List<File>, allowNonExistent: Boolean): File? =
+            candidates.firstOrNull { it.isDirectory }
+                ?: if (allowNonExistent) candidates.firstOrNull { sdmcOf(it)?.isDirectory == true } else null
+
+        /** ``<sdmc>`` of a ``<sdmc>/Nintendo 3DS/<id0>/<id1>/title`` root. */
+        private fun sdmcOf(titleRoot: File): File? =
+            titleRoot.parentFile?.parentFile?.parentFile?.parentFile
 
         fun defaultSaveDir(
             storageBaseDir: File,

@@ -59,7 +59,8 @@ class DescribeSaveDirTest {
         val empty = tmp.newFolder("empty")
         val check = EmulatorRegistry.describeSaveDir(AzaharEmulator.EMULATOR_KEY, empty)
         assertFalse(check.ok)
-        assertTrue(check.summary, check.summary.startsWith("No 3DS saves in empty yet"))
+        // Read as a user folder whose sdmc doesn't exist yet: the persistent warning.
+        assertEquals(AzaharEmulator.overrideWarning(empty.path), check.summary)
     }
 
     @Test

@@ -122,4 +122,48 @@ class AzaharEmulatorTest {
         fresh.mkdirs()
         assertNotNull(AzaharEmulator.overrideWarning(fresh.parentFile!!.path))
     }
+
+    @Test
+    fun `no override - a download target is never guessed outside azahar's tree`() {
+        // Azahar's user folder is a later candidate; /sdcard/sdmc doesn't exist.
+        val (_, titleRoot) = azaharUserDir()
+        val predicted = AzaharEmulator.defaultSaveDir(storageBaseDir = tmp.root, titleId = "0004000000055D00")
+        assertEquals(
+            File(titleRoot, "00040000/00055d00/data/00000001").absolutePath,
+            predicted?.absolutePath,
+        )
+        assertTrue(!File(tmp.root, "sdmc").exists())
+    }
+
+    @Test
+    fun `no override - azahar's sdmc without a title tree is predicted, nothing at all is not`() {
+        assertNull(AzaharEmulator.defaultSaveDir(storageBaseDir = tmp.root, titleId = "0004000000055D00"))
+
+        File(tmp.root, "Azahar/sdmc").mkdirs()
+        val predicted = AzaharEmulator.defaultSaveDir(storageBaseDir = tmp.root, titleId = "0004000000055D00")
+        assertEquals(
+            File(tmp.root, "Azahar/sdmc/Nintendo 3DS/$zero/$zero/title/00040000/00055d00/data/00000001").absolutePath,
+            predicted?.absolutePath,
+        )
+    }
+
+    @Test
+    fun `an override without sdmc yet is read as azahar's user folder and warned about`() {
+        val user = File(tmp.root, "NewAzahar").apply { mkdirs() }
+        File(user, "config").mkdirs()
+        val root = AzaharEmulator.resolveOverrideTitleRoot(user)
+        assertEquals(File(user, "sdmc/Nintendo 3DS/$zero/$zero/title").absolutePath, root.absolutePath)
+        // Not the folder itself: downloads must not land beside Azahar's future tree.
+        assertNotNull(AzaharEmulator.overrideWarning(user.path))
+        assertTrue(AzaharEmulator(saveDirOverride = user.path).discoverSaves().isEmpty())
+    }
+
+    @Test
+    fun `an override that already holds title folders is the title root`() {
+        val root = File(tmp.root, "copied-titles")
+        File(root, "00040000/00055d00/data/00000001").mkdirs()
+        File(root, "00040000/00055d00/data/00000001/main").writeBytes(byteArrayOf(1))
+        assertEquals(root.absolutePath, AzaharEmulator.resolveOverrideTitleRoot(root).absolutePath)
+        assertNull(AzaharEmulator.overrideWarning(root.path))
+    }
 }

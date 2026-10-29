@@ -23,7 +23,7 @@ import logging
 import os
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.config import settings
@@ -418,6 +418,29 @@ def recover_interrupted_swaps() -> int:
     return restored
 
 
+def _history_archive_dir(history: Path, last_sync: str) -> Path:
+    """Directory that archives the version stored at ``last_sync``.
+
+    Clients address history versions by whole unix seconds, so two versions
+    stored within the same second would be ambiguous (the older one could
+    never be fetched).  Bump the new archive forward to the next free second;
+    it is the newest version, so the order is kept.
+    """
+    name = last_sync.replace(":", "_").replace("+", "_")
+    if not history.is_dir() or (history / name).exists():
+        return history / name
+    try:
+        when = datetime.fromisoformat(last_sync)
+    except ValueError:
+        return history / name
+    taken = {
+        _parse_history_dir_name(d.name)[1] for d in history.iterdir() if d.is_dir()
+    }
+    while int(when.timestamp()) in taken:
+        when += timedelta(seconds=1)
+    return history / when.isoformat().replace(":", "_").replace("+", "_")
+
+
 def store_save(
     bundle: SaveBundle,
     source: str = "3ds",
@@ -457,8 +480,7 @@ def store_save(
         if current.exists():
             old_meta = get_metadata(title_id)
             if old_meta:
-                ts = old_meta.last_sync.replace(":", "_").replace("+", "_")
-                archive_dir = history / ts
+                archive_dir = _history_archive_dir(history, old_meta.last_sync)
                 archive_dir.mkdir(parents=True, exist_ok=True)
                 for item in current.iterdir():
                     if item.is_file():

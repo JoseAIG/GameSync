@@ -722,6 +722,54 @@ class TestHistoryByTimestamp:
         parsed = parse_bundle(r.content)
         assert [(f.path, f.data) for f in parsed.files] == [("main", b"v1")]
 
+    def test_versions_stored_in_the_same_second_stay_distinct(
+        self, client, auth_headers, monkeypatch
+    ):
+        """Two versions stored within one second must each be fetchable."""
+        from datetime import datetime as real_datetime
+        from datetime import timezone
+
+        times = iter(
+            real_datetime(2026, 1, 2, 3, 4, 5, us, tzinfo=timezone.utc)
+            for us in (100000, 400000, 700000)
+        )
+
+        class FrozenDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return next(times)
+
+        monkeypatch.setattr(storage, "datetime", FrozenDatetime)
+        for n in (1, 2, 3):
+            body = _bundle([("main", f"v{n}".encode())], timestamp=n)
+            assert _upload(client, auth_headers, body).status_code == 200
+        monkeypatch.undo()
+
+        versions = client.get(
+            f"/api/v1/saves/{TITLE_HEX}/history", headers=auth_headers
+        ).json()["versions"]
+        stamps = [v["timestamp"] for v in versions]
+        assert len(stamps) == 2 and len(set(stamps)) == 2
+        got = []
+        for ts in stamps:
+            r = client.get(f"/api/v1/saves/{TITLE_HEX}/history/{ts}", headers=auth_headers)
+            assert r.status_code == 200
+            got.append(parse_bundle(r.content).files[0].data)
+        assert got == [b"v2", b"v1"]  # newest first
+
+    def test_archive_dir_bumps_past_a_taken_second(self, tmp_path):
+        history = tmp_path / "history"
+        (history / "2026-01-02T03_04_05.100000_00_00").mkdir(parents=True)
+        (history / "2026-01-02T03_04_06.000001_00_00").mkdir()
+        got = storage._history_archive_dir(history, "2026-01-02T03:04:05.900000+00:00")
+        assert got.name == "2026-01-02T03_04_07.900000_00_00"
+        # The exact same version (a retried store) reuses its directory.
+        same = storage._history_archive_dir(history, "2026-01-02T03:04:05.100000+00:00")
+        assert same.name == "2026-01-02T03_04_05.100000_00_00"
+        # No collision: name unchanged.
+        free = storage._history_archive_dir(history, "2026-01-02T03:05:00.500000+00:00")
+        assert free.name == "2026-01-02T03_05_00.500000_00_00"
+
     def test_unknown_timestamp_is_404(self, client, auth_headers):
         _upload(client, auth_headers, _bundle([("main", b"v1")], timestamp=1))
         _upload(client, auth_headers, _bundle([("main", b"v2")], timestamp=2))

@@ -86,7 +86,7 @@ class LocalBackupsTest {
     }
 
     @Test
-    fun `restore puts the file back and the previous base hash, not the restored hash`() = runBlocking {
+    fun `restore puts the file back and marks it restored, not the old or the restored hash`() = runBlocking {
         val s = store()
         val dao = FakeDao()
         val save = tmp.newFile("zelda.srm").apply { writeText("mine") }
@@ -101,15 +101,16 @@ class LocalBackupsTest {
         assertTrue(s.restore("GBA_zelda", save, dao))
 
         assertEquals("mine", save.readText())
-        assertEquals("base", dao.rows["GBA_zelda"]!!.lastSyncedHash)
+        assertEquals(LocalBackupStore.RESTORED_BASE, dao.rows["GBA_zelda"]!!.lastSyncedHash)
         assertEquals(10L, dao.rows["GBA_zelda"]!!.lastSyncedAt)
+        assertEquals("Zelda", dao.rows["GBA_zelda"]!!.displayName)
         // The replaced copy was kept too, so the restore can be undone.
         assertEquals("server", s.latest("GBA_zelda")!!.payload.readText())
         assertEquals("serverhash", s.latest("GBA_zelda")!!.previousLastSyncedHash)
     }
 
     @Test
-    fun `restore deletes the sync row when there was none`() = runBlocking {
+    fun `restore of a first download is marked restored, not left without history`() = runBlocking {
         val s = store()
         val dao = FakeDao()
         val save = tmp.newFile("first.sav").apply { writeText("local") }
@@ -120,7 +121,8 @@ class LocalBackupsTest {
         assertTrue(s.restore("T", save, dao))
 
         assertEquals("local", save.readText())
-        assertNull(dao.rows["T"])
+        // No history would be the server's "download" case again.
+        assertEquals(LocalBackupStore.RESTORED_BASE, dao.rows["T"]!!.lastSyncedHash)
     }
 
     @Test
@@ -141,7 +143,7 @@ class LocalBackupsTest {
         assertArrayEquals(byteArrayOf(1, 2, 3), File(dir, "a.bin").readBytes())
         assertArrayEquals(byteArrayOf(4), File(dir, "sub/b.bin").readBytes())
         assertFalse("files of the replaced save are gone", File(dir, "c.bin").exists())
-        assertEquals("base", dao.rows["3DS"]!!.lastSyncedHash)
+        assertEquals(LocalBackupStore.RESTORED_BASE, dao.rows["3DS"]!!.lastSyncedHash)
     }
 
     @Test

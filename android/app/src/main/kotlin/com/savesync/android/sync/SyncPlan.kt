@@ -71,6 +71,8 @@ class SyncPreview internal constructor(
     val createdAtMs: Long,
     internal val entries: Map<String, SaveEntry>,
     internal val conflictInfo: Map<String, ConflictInfo>,
+    /** The save hash each /sync title was planned with (SyncTitle.save_hash). */
+    internal val sentHashes: Map<String, String> = emptyMap(),
 ) {
     val suspectIds: Set<String> get() = suspects.mapTo(LinkedHashSet()) { it.titleId }
 

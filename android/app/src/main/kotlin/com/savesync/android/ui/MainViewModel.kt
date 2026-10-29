@@ -3199,9 +3199,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /**
      * Undo of a download, and Save detail's "Restore previous copy": puts the
-     * newest local copy of [titleId]'s save back and restores the sync base it
-     * had then (never the restored file's hash — see [LocalBackupStore.restore]),
-     * so the next sync sees what the user had before.  The save it replaces is
+     * newest local copy of [titleId]'s save back and marks it restored (see
+     * [LocalBackupStore.restore]), so no sync — smart sync, Sync all or the
+     * background worker — downloads over it again: it waits as a conflict
+     * until the user chooses Upload or Download.  The save it replaces is
      * kept as a copy too.
      */
     fun restoreLatestBackup(titleId: String) {
@@ -3228,7 +3229,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()
                     _saveDetailState.value = SaveDetailState.Success(
-                        "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}"
+                        "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}. " +
+                            "Sync leaves it alone until you choose Upload or Download."
                     )
                 }
             } catch (e: CancellationException) {

@@ -14,9 +14,10 @@ import java.util.Locale
  * A snapshot of a save taken before a download replaced it.
  *
  * [previousLastSyncedHash] / [previousLastSyncedAt] are the title's sync
- * state at snapshot time; a restore puts them back so the next sync sees
- * exactly what the user had before (a conflict, if it was one), instead of
- * "only the server changed" and downloading over the restore again.
+ * state at snapshot time, kept for reference.  A restore does not put that
+ * hash back: after a normal download it equals the restored save's own hash,
+ * which the server reads as "only the server changed" and downloads over the
+ * restore again.  See [LocalBackupStore.restore].
  */
 data class LocalBackup(
     val dir: File,
@@ -125,9 +126,18 @@ class LocalBackupStore(
 
     /**
      * Puts [backup] (default: the newest) back over [target] through
-     * [AtomicSaveWriter], then restores the title's last-synced hash to what
-     * it was when the snapshot was taken — deleting the sync-state row when
-     * there was none.  It never records the restored file's hash as synced.
+     * [AtomicSaveWriter], then sets the title's last-synced hash to
+     * [RESTORED_BASE], a value no real save hashes to.
+     *
+     * Neither the restored file's hash nor the base it had at snapshot time
+     * would hold the restore: the snapshot's base equals the restored save's
+     * hash after every "only the server changed" download, and no base at all
+     * is the server's "no history → download" case, so the next sync (or the
+     * background worker) would download the server copy straight back over
+     * it.  With a base that matches neither side the server reports a
+     * conflict (or up to date, if the restored save happens to be the
+     * server's), and nothing moves until the user picks Force Upload or Force
+     * Download.
      *
      * The current save is snapshotted first, so a restore can itself be
      * undone.  Returns false when there is nothing to restore.
@@ -158,20 +168,15 @@ class LocalBackupStore(
             AtomicSaveWriter.replaceFile(target, chosen.payload.readBytes())
         }
 
-        val previous = chosen.previousLastSyncedHash
-        if (previous == null) {
-            dao.deleteById(titleId)
-        } else {
-            dao.upsert(
-                SyncStateEntity(
-                    titleId = titleId,
-                    lastSyncedHash = previous,
-                    lastSyncedAt = chosen.previousLastSyncedAt ?: current?.lastSyncedAt ?: 0L,
-                    displayName = current?.displayName ?: displayName,
-                    systemName = current?.systemName ?: systemName,
-                )
+        dao.upsert(
+            SyncStateEntity(
+                titleId = titleId,
+                lastSyncedHash = RESTORED_BASE,
+                lastSyncedAt = chosen.previousLastSyncedAt ?: current?.lastSyncedAt ?: 0L,
+                displayName = current?.displayName ?: displayName,
+                systemName = current?.systemName ?: systemName,
             )
-        }
+        )
         return true
     }
 
@@ -207,6 +212,13 @@ class LocalBackupStore(
         private const val PARTIAL = ".partial"
         const val REASON_DOWNLOAD = "download"
         const val REASON_BEFORE_RESTORE = "before-restore"
+
+        /**
+         * The sync base a restore records: never equal to a save hash, so the
+         * three-way rule sees both sides as changed (a conflict) and leaves the
+         * restored save alone until the user chooses a side.
+         */
+        const val RESTORED_BASE = "restored-from-local-backup"
     }
 }
 

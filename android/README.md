@@ -200,9 +200,10 @@ first copies the current save to the app's private storage
 (`<app files dir>/local_backups/<title>/<date-time>/`, the newest five per
 game, never in cloud backups). If that copy can't be made the save is not
 overwritten. The result offers *Undo*, and the detail screen gets a *Restore
-previous copy (<when>)* action for the same thing with the controller; the
-restore puts back the sync bookkeeping of that moment too, so the next sync
-sees what you had before rather than downloading over it again.
+previous copy (<when>)* action for the same thing with the controller. A
+restored save is never downloaded over again by a sync (smart sync, Sync all or
+auto sync): it shows as a conflict until you choose *Force Upload* (keep it and
+send it to the server) or *Force Download* (take the server's copy after all).
 
 ### Catalog
 

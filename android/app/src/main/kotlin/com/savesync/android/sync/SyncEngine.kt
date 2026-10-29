@@ -196,6 +196,7 @@ class SyncEngine(
             buildSyncTitle(entry, syncStateByTitle[entry.titleId], errors)
         }
         syncTitles.forEach { sentSize[it.title_id] = it.size }
+        val sentHashes = syncTitles.associate { it.title_id to it.save_hash }
 
         var conflictInfo: Map<String, ConflictInfo> = emptyMap()
         if (syncTitles.isNotEmpty()) {
@@ -240,6 +241,7 @@ class SyncEngine(
             createdAtMs = System.currentTimeMillis(),
             entries = saveMap,
             conflictInfo = conflictInfo,
+            sentHashes = sentHashes,
         )
     }
 
@@ -280,6 +282,7 @@ class SyncEngine(
                 }
                 PlannedAction.UP_TO_DATE -> {
                     resolvedIds.add(title.titleId)
+                    preview.sentHashes[title.titleId]?.let { adoptAgreedBase(title.titleId, it) }
                     continue
                 }
                 else -> Unit
@@ -334,6 +337,18 @@ class SyncEngine(
             skippedSuspects = skippedSuspects,
             changedSincePreview = changed,
         )
+    }
+
+    /**
+     * A restored save carries [LocalBackupStore.RESTORED_BASE] so sync never
+     * moves it unasked.  Once the server reports it up to date (the restored
+     * save is the server's), [hash] is what both sides agree on: record it,
+     * so the title reads Synced again instead of changed here.
+     */
+    private suspend fun adoptAgreedBase(titleId: String, hash: String) {
+        val row = dao.getById(titleId) ?: return
+        if (row.lastSyncedHash != LocalBackupStore.RESTORED_BASE || hash.isEmpty()) return
+        dao.upsert(row.copy(lastSyncedHash = hash, lastSyncedAt = System.currentTimeMillis()))
     }
 
     /** Upload or download one planned title; true when it landed. */

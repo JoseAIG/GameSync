@@ -185,9 +185,10 @@ class AzaharEmulator(
             (titleRoot.listFiles() ?: emptyArray())
                 .filter { it.isDirectory && HEX8_REGEX.matches(it.name) }
                 .sumOf { high ->
+                    // Same rule as discoverSaves: an empty save folder syncs nothing.
                     (high.listFiles() ?: emptyArray()).count { low ->
                         low.isDirectory && HEX8_REGEX.matches(low.name) &&
-                            File(low, "data/00000001").isDirectory
+                            File(low, "data/00000001").walkTopDown().any { it.isFile }
                     }
                 }
 

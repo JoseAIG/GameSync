@@ -248,29 +248,29 @@ private fun EmulatorCard(
             ) {
                 // While the override points nowhere, Change is the way out:
                 // promoted to the filled Accent button.
+                // One composable either way, styled by the warning: swapping
+                // Button for OutlinedButton would drop the focus a pad user
+                // had on it when the warning comes or goes.
                 val browseLabel = if (isOverridden) "Change" else "Set Override"
-                if (overrideWarning != null) {
-                    Button(
-                        onClick = onBrowse,
-                        modifier = Modifier.weight(1f).gsFocusRing(),
-                        colors = ButtonDefaults.buttonColors(
+                val promoted = overrideWarning != null
+                Button(
+                    onClick = onBrowse,
+                    modifier = Modifier.weight(1f).gsFocusRing(),
+                    colors = if (promoted) {
+                        ButtonDefaults.buttonColors(
                             containerColor = GsColors.Accent,
                             contentColor = GsColors.Ink,
-                        ),
-                    ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(browseLabel)
-                    }
-                } else {
-                    OutlinedButton(
-                        onClick = onBrowse,
-                        modifier = Modifier.weight(1f).gsFocusRing(),
-                    ) {
-                        Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(6.dp))
-                        Text(browseLabel)
-                    }
+                        )
+                    } else {
+                        ButtonDefaults.outlinedButtonColors()
+                    },
+                    elevation = if (promoted) ButtonDefaults.buttonElevation() else null,
+                    border = if (promoted) null else ButtonDefaults.outlinedButtonBorder,
+                    contentPadding = ButtonDefaults.ContentPadding,
+                ) {
+                    Icon(Icons.Default.FolderOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(browseLabel)
                 }
                 if (isOverridden) {
                     OutlinedButton(onClick = onClear, modifier = Modifier.gsFocusRing()) {

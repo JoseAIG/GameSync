@@ -67,4 +67,8 @@ mayor seguridad, apunta `GAMESYNC_DATA_DIR` a una ruta fuera del repo.
 - Key solo por header. Las descargas de la web usan un enlace temporal
   firmado (`?token=`, válido un día y solo para ese archivo) en lugar de la
   key en la URL.
+- `SYNC_TRUST_PROXY_AUTH` apagado. Encenderlo solo si el proxy con Basic
+  Auth es el único camino al servidor (sin `ports:` y en una red propia);
+  si no, cualquiera que llegue al puerto 8000 puede hacerse pasar por un
+  usuario.
 - Sin access log de uvicorn.

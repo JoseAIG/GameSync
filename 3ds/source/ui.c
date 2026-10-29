@@ -2503,7 +2503,10 @@ static void choose_nds_dir(AppConfig *config) {
     if (!path[0])
         snprintf(note, sizeof(note), "None: DS games aren't scanned.");
     else if (count.opened)
-        snprintf(note, sizeof(note), "%s \xC2\xB7 %d ROM%s, %d save%s", path, count.items,
+        // Only the first FOLDER_SCAN_CAP entries are counted: then these
+        // are minimums (every ROM is still synced)
+        snprintf(note, sizeof(note), "%s \xC2\xB7 %s%d ROM%s, %d save%s", path,
+                 count.capped ? "at least " : "", count.items,
                  count.items == 1 ? "" : "s", count.saves, count.saves == 1 ? "" : "s");
     else
         snprintf(note, sizeof(note), "%s", path);

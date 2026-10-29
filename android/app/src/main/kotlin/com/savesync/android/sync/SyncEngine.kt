@@ -142,6 +142,10 @@ class SyncEngine(
      * and check planned uploads against the server's size and file count.
      */
     suspend fun plan(saves: List<SaveEntry>): SyncPreview {
+        // The plan is as old as its first hash, not its last server answer:
+        // execute()'s freshness window must count the hashing and network
+        // time too, or a minute-old hash could pass as "fresh".
+        val startedAtMs = System.currentTimeMillis()
         // The list may predate a download or an emulator session: a "server-only"
         // row whose predicted file now exists is a local save with possibly newer
         // play on it, and must go through the three-way check, not a blind download.
@@ -248,7 +252,7 @@ class SyncEngine(
             suspects = suspects,
             sizeCheckSkipped = sizeCheckSkipped,
             errors = errors,
-            createdAtMs = System.currentTimeMillis(),
+            createdAtMs = startedAtMs,
             entries = saveMap,
             conflictInfo = conflictInfo,
             sentHashes = sentHashes,

@@ -67,7 +67,7 @@ class SyncPreview internal constructor(
     val sizeCheckSkipped: Int,
     /** Problems found while planning (unreadable saves, server unreachable). */
     val errors: List<String>,
-    /** When the plan was made (uptime-independent wall clock, ms). */
+    /** When planning started, before the first hash (wall clock, ms). */
     val createdAtMs: Long,
     internal val entries: Map<String, SaveEntry>,
     internal val conflictInfo: Map<String, ConflictInfo>,

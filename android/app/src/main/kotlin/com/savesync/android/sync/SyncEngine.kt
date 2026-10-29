@@ -372,26 +372,37 @@ class SyncEngine(
     }
 
     /**
-     * A restored save carries [LocalBackupStore.RESTORED_BASE] so sync never
-     * moves it unasked.  Once the server reports it up to date (the restored
-     * save is the server's), [hash] is what both sides agree on: record it,
-     * so the title reads Synced again instead of changed here.
+     * The server reports [titleId] up to date: [hash] is what both sides
+     * agree on, so it is the base.  Recorded when the stored base differs:
+     * a restored save carries [LocalBackupStore.RESTORED_BASE] so sync never
+     * moves it unasked, and an upload during which the save changed records
+     * the copy hashed before it (see [updateSyncState]); once the server
+     * matches, the title reads Synced again instead of changed here.
      */
     private suspend fun adoptAgreedBase(titleId: String, hash: String) {
         val row = dao.getById(titleId) ?: return
-        if (row.lastSyncedHash != LocalBackupStore.RESTORED_BASE || hash.isEmpty()) return
+        if (row.lastSyncedHash == hash || hash.isEmpty()) return
         dao.upsert(row.copy(lastSyncedHash = hash, lastSyncedAt = System.currentTimeMillis()))
     }
 
     /** Upload or download one planned title; true when it landed. */
-    private suspend fun runPlanned(title: PlannedTitle, entry: SaveEntry): Boolean = when (title.route) {
+    private suspend fun runPlanned(title: PlannedTitle, entry: SaveEntry): Boolean {
+        // Hashed just before an upload reads the save: if the emulator writes
+        // it during the transfer, this (not the newer copy) is what the
+        // server got, and recording the newer one would make the next sync
+        // download the server's older copy over it.
+        val hashBeforeUpload = if (title.action == PlannedAction.UPLOAD) syncStateHash(entry) else null
+        return runPlanned(title, entry, hashBeforeUpload)
+    }
+
+    private suspend fun runPlanned(title: PlannedTitle, entry: SaveEntry, hashBeforeUpload: String?): Boolean = when (title.route) {
         PlanRoute.RAW_CARD -> {
             val ok = when (title.action) {
                 PlannedAction.UPLOAD -> uploadRawCard(entry)
                 else -> downloadRawCard(entry)
             }
             if (!ok) throw IOException(if (title.action == PlannedAction.UPLOAD) "Upload failed" else "Download failed")
-            if (title.action == PlannedAction.UPLOAD) updateSyncState(entry) else updateSyncStateFromFile(entry)
+            if (title.action == PlannedAction.UPLOAD) updateSyncState(entry, hashBeforeUpload) else updateSyncStateFromFile(entry)
             true
         }
         PlanRoute.SERVER_ONLY -> {
@@ -406,7 +417,7 @@ class SyncEngine(
         }
         PlanRoute.SYNC -> {
             val ok = if (title.action == PlannedAction.UPLOAD) uploadSave(entry) else downloadSave(entry, entry.titleId)
-            if (ok) updateSyncState(entry)
+            if (ok) updateSyncState(entry, hashBeforeUpload)
             ok
         }
     }
@@ -1105,18 +1116,32 @@ class SyncEngine(
         }
     }
 
-    suspend fun recordSyncedState(entry: SaveEntry) {
-        updateSyncState(entry.reconcileWithDisk())
+    suspend fun recordSyncedState(entry: SaveEntry, hashBeforeUpload: String? = null) {
+        updateSyncState(entry.reconcileWithDisk(), hashBeforeUpload)
     }
+
+    /** The hash sync state would record for [entry] as it is on disk now; null if it can't be read. */
+    suspend fun syncStateHash(entry: SaveEntry): String? = runCatching {
+        val e = entry.reconcileWithDisk()
+        saturnCanonicalSnapshot(e)?.let { HashUtils.sha256Bytes(it.bytes) } ?: e.computeHash()
+    }.getOrNull()?.takeIf { it.isNotEmpty() }
 
     suspend fun recordSyncedStateFromFile(entry: SaveEntry) {
         updateSyncStateFromFile(entry)
     }
 
-    private suspend fun updateSyncState(entry: SaveEntry) {
+    /**
+     * Records [entry] as synced.  [hashBeforeUpload] is the save's hash just
+     * before it was uploaded: when the save has changed since (the emulator
+     * wrote it during the transfer), that copy is the one the server got,
+     * so it is the base, and the next sync uploads the newer play (or finds
+     * the server already has it) rather than downloading over it.
+     */
+    private suspend fun updateSyncState(entry: SaveEntry, hashBeforeUpload: String? = null) {
         try {
             val saturnSnapshot = saturnCanonicalSnapshot(entry)
-            val hash = saturnSnapshot?.let { HashUtils.sha256Bytes(it.bytes) } ?: entry.computeHash()
+            val onDisk = saturnSnapshot?.let { HashUtils.sha256Bytes(it.bytes) } ?: entry.computeHash()
+            val hash = if (hashBeforeUpload != null && hashBeforeUpload != onDisk) hashBeforeUpload else onDisk
             saturnSnapshot?.archiveNames?.let { SaturnArchiveStateStore.put(entry.titleId, it) }
             val now = System.currentTimeMillis()
             dao.upsert(

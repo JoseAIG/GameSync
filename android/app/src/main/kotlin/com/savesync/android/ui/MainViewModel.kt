@@ -3156,10 +3156,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     return@launch
                 }
                 val engine = SyncEngine(api, db, consoleId, currentSettings.saturnSyncFormat)
+                // Hashed before the upload reads the save: if the emulator
+                // writes it meanwhile, this is the copy the server got.
+                val hashBefore = withContext(Dispatchers.IO) { engine.syncStateHash(entry) }
                 val ok = withContext(Dispatchers.IO) { engine.uploadSave(entry) }
                 if (ok) {
                     clearConflict(entry.titleId)
-                    withContext(Dispatchers.IO) { engine.recordSyncedState(entry) }
+                    withContext(Dispatchers.IO) { engine.recordSyncedState(entry, hashBefore) }
                     fetchServerMeta(entry.titleId, entry.systemName)
                     scanSaves()  // refresh status icons in the list
                 }

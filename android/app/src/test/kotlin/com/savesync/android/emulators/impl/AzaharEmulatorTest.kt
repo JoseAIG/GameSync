@@ -166,4 +166,33 @@ class AzaharEmulatorTest {
         assertEquals(root.absolutePath, AzaharEmulator.resolveOverrideTitleRoot(root).absolutePath)
         assertNull(AzaharEmulator.overrideWarning(root.path))
     }
+
+    @Test
+    fun `an override with sdmc but no title tree yet predicts downloads where azahar will put them`() {
+        val user = File(tmp.root, "FreshAzahar").apply { File(this, "sdmc").mkdirs() }
+        // Still warned about: there are no saves to sync yet.
+        assertNotNull(AzaharEmulator.overrideWarning(user.path))
+        val expected = File(user, "sdmc/Nintendo 3DS/$zero/$zero/title").absolutePath
+        assertEquals(expected, AzaharEmulator.overrideDownloadTitleRoot(user.path)?.absolutePath)
+        // Every level of the picked path down to sdmc agrees.
+        assertEquals(expected, AzaharEmulator.overrideDownloadTitleRoot(File(user, "sdmc").path)?.absolutePath)
+        File(user, "sdmc/Nintendo 3DS").mkdirs()
+        assertEquals(expected, AzaharEmulator.overrideDownloadTitleRoot(File(user, "sdmc/Nintendo 3DS").path)?.absolutePath)
+    }
+
+    @Test
+    fun `an override that is missing or has no sdmc gets no download target`() {
+        assertNull(AzaharEmulator.overrideDownloadTitleRoot(File(tmp.root, "unmounted/Azahar").path))
+        val noSdmc = File(tmp.root, "NewAzahar").apply { File(this, "config").mkdirs() }
+        assertNull(AzaharEmulator.overrideDownloadTitleRoot(noSdmc.path))
+        val elsewhere = File(tmp.root, "Downloads").apply { mkdirs() }
+        assertNull(AzaharEmulator.overrideDownloadTitleRoot(elsewhere.path))
+        assertTrue(!File(noSdmc, "sdmc").exists())
+    }
+
+    @Test
+    fun `an override with an existing title tree is its download target`() {
+        val (user, titleRoot) = azaharUserDir()
+        assertEquals(titleRoot.absolutePath, AzaharEmulator.overrideDownloadTitleRoot(user.path)?.absolutePath)
+    }
 }

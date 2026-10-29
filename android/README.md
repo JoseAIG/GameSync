@@ -283,8 +283,10 @@ emulator's save folder runs that emulator's own check instead (Azahar:
 *Found sdmc/Nintendo 3DS/…/title (14 titles)*). When nothing there is
 recognisable the line turns amber and *Select* asks before using the
 folder. An Azahar folder without its 3DS save tree yet keeps a warning on
-the Emulators screen, and no 3DS save is downloaded into it until Azahar
-has created that tree (start a game in Azahar once). The list slides the way you went, and going up returns to where
+the Emulators screen. If Azahar has already made its `sdmc` folder there,
+3DS saves still download to where Azahar will look for them; a folder with
+no `sdmc` gets none until Azahar has created it (start a game in Azahar
+once). The list slides the way you went, and going up returns to where
 you were in the parent folder. With a keyboard or remote on a phone, the
 first key only shows which folder is highlighted; a touch hides it again.
 On a short screen (a handheld in landscape, or large text) the path and

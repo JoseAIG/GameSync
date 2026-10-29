@@ -158,6 +158,29 @@ class AzaharEmulator(
         }
 
         /**
+         * The title root a server-only download may be predicted under for
+         * the override [overridePath], or null when it must not be.  Same
+         * rule as auto-detection ([autoDetectedTitleRoot]): an existing
+         * title root, or the one Azahar will create under an ``sdmc`` folder
+         * it already made (``<sdmc>/Nintendo 3DS/<id0>/<id1>/title``).  A
+         * missing folder, or one with no ``sdmc`` yet, is refused: Azahar
+         * would not read a tree made there.  [overrideWarning] still reports
+         * a title root that doesn't exist yet.
+         */
+        fun overrideDownloadTitleRoot(overridePath: String): File? {
+            val overrideDir = File(overridePath)
+            if (!overrideDir.isDirectory) return null
+            val titleRoot = resolveOverrideTitleRoot(overrideDir)
+            if (titleRoot.isDirectory) return titleRoot
+            val nintendo3ds = titleRoot.parentFile?.parentFile?.parentFile
+            val sdmc = sdmcOf(titleRoot)
+            val underSdmc = titleRoot.name.equals("title", ignoreCase = true) &&
+                nintendo3ds?.name.equals("Nintendo 3DS", ignoreCase = true) &&
+                sdmc != null && sdmc.name.equals("sdmc", ignoreCase = true) && sdmc.isDirectory
+            return titleRoot.takeIf { underSdmc }
+        }
+
+        /**
          * What the folder picker shows for a candidate override: the
          * [overrideWarning] when there is one, else where the saves were
          * found and how many titles, e.g. "Found sdmc/Nintendo 3DS/…/title

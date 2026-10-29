@@ -1534,18 +1534,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val override = saveDirOverrides[AzaharEmulator.EMULATOR_KEY]
             ?.takeIf { it.isNotBlank() }
         // A missing override folder (unmounted SD card, typo), or one with no
-        // 3DS title tree yet, must not get downloads written into a freshly
-        // created stray tree: Azahar would not read it, and once Azahar makes
-        // its own tree the stray copies vanish from the list while their
-        // recorded sync state carries over to Azahar's fresh save.
-        if (override != null && AzaharEmulator.overrideWarning(override) != null) return null
+        // sdmc yet, must not get downloads written into a freshly created
+        // stray tree: Azahar would not read it, and once Azahar makes its own
+        // tree the stray copies vanish from the list while their recorded
+        // sync state carries over to Azahar's fresh save.  Under an existing
+        // sdmc the title tree is predicted where Azahar will make it, as
+        // auto-detection does; the override's warning stays shown meanwhile.
         val saveDir = if (override != null) {
+            val titleRoot = AzaharEmulator.overrideDownloadTitleRoot(override) ?: return null
             AzaharEmulator.defaultSaveDir(
                 storageBaseDir = Environment.getExternalStorageDirectory(),
                 titleId = titleInfo.title_id,
-                candidateTitleRoots = listOf(
-                    AzaharEmulator.resolveOverrideTitleRoot(File(override))
-                )
+                candidateTitleRoots = listOf(titleRoot)
             )
         } else {
             AzaharEmulator.defaultSaveDir(

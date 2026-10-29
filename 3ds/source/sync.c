@@ -47,6 +47,7 @@ const char *sync_result_str(SyncResult result) {
         case SYNC_ERR_BACKUP:   return "Backup failed, save untouched";
         case SYNC_ERR_RESTORED: return "Write failed, old save restored";
         case SYNC_ERR_RESTORE_FAILED: return "Write and restore failed!";
+        case SYNC_ERR_LOCAL_UNREADABLE: return "Can't read this console's save, left untouched";
         default:                return "Unknown error";
     }
 }
@@ -299,8 +300,9 @@ static SyncResult write_save_safely(const AppConfig *config, const TitleInfo *ti
     int old_count = read_title_save(title, old_files);
     if (old_count == ARCHIVE_ERR_TOO_MANY_FILES || old_count == ARCHIVE_ERR_READ) {
         // A save exists but can't be copied completely: don't overwrite it
+        // (whatever Local backups is set to: it couldn't be put back either)
         free(old_files);
-        return SYNC_ERR_BACKUP;
+        return SYNC_ERR_LOCAL_UNREADABLE;
     }
     if (old_count < 0) old_count = 0;  // No current save, nothing to lose
 

@@ -17,6 +17,7 @@ typedef enum {
     SYNC_ERR_BACKUP,         // Current save couldn't be backed up; nothing written
     SYNC_ERR_RESTORED,       // Write failed; the previous save was put back
     SYNC_ERR_RESTORE_FAILED, // Write failed and so did restoring the previous save
+    SYNC_ERR_LOCAL_UNREADABLE, // Current save can't be read completely; nothing written
 } SyncResult;
 
 // Sync action decided by smart sync

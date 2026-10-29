@@ -393,6 +393,11 @@ static SyncFailText sync_fail_text(SyncResult r, bool upload) {
             f.safety = "Your current save couldn't be backed up, so nothing was written.";
             f.next = "Free some SD space, or turn Local backups off.";
             break;
+        case SYNC_ERR_LOCAL_UNREADABLE:
+            f.safety = "This console's save can't be read completely, so it was left untouched.";
+            f.next = "Check the save with a save manager such as Checkpoint.";
+            f.retry = false;
+            break;
         case SYNC_ERR_RESTORED:
             f.safety = "Writing failed; your previous save was put back.";
             break;
@@ -542,6 +547,20 @@ static void do_history(void) {
         if (!read || cr == CMP_CANCELLED) {
             if (cr == CMP_CANCELLED) set_status(UI_TONE_ACCENT, "Restore cancelled, nothing changed");
             else set_status(UI_TONE_ERR, "Restore not started, nothing changed");
+            free(selected_ts);
+            return;
+        }
+        if (last_details.local_exists && last_details.local_file_count == 0 &&
+            strncmp(last_details.local_hash, "ERROR", 5) == 0) {
+            // A save is there but can't be read completely: it can't be backed
+            // up or put back, so the restore would be refused anyway
+            SyncFailText f = sync_fail_text(SYNC_ERR_LOCAL_UNREADABLE, false);
+            char why[96];
+            snprintf(why, sizeof(why), "This console's save can't be read (%.40s).",
+                     last_details.local_hash + (strncmp(last_details.local_hash, "ERROR: ", 7) == 0 ? 7 : 0));
+            ui_error_card("Can't restore this version", why, f.safety, f.next, false);
+            set_status(UI_TONE_ERR, "Restore not started, nothing changed");
+            last_details_idx = -1;
             free(selected_ts);
             return;
         }

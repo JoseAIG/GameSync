@@ -654,6 +654,10 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
 
     // Per-title state for the save list
     for (int j = 0; j < title_count && j < MAX_TITLES; j++) {
+        // A title left out of the request (a cartridge, or a save that
+        // couldn't be read) keeps its own state even when an installed copy
+        // with the same title ID is up to date or in conflict
+        if (hash_cache[j][0] == '\0') continue;
         for (int i = 0; i < up_to_date_count; i++)
             if (strcmp(titles[j].title_id_hex, up_to_date_ids[i]) == 0)
                 local_summary.title_state[j] = TSTATE_SYNCED;

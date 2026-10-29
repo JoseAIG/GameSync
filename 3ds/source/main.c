@@ -1106,10 +1106,13 @@ static void do_sync_all(void) {
         run_failures[i] = (RunFailure){ (u8)r, summary.title_upload[i] };
     }
 
-    // Mark conflicting titles in our list
+    // Mark conflicting titles in our list. Only an entry that took part in
+    // the sync: a cartridge sharing the title ID of an installed copy in
+    // conflict must never be marked (and so batch-uploaded) with it.
     for (int i = 0; i < summary.conflicts && i < MAX_CONFLICT_DISPLAY; i++) {
-        for (int j = 0; j < title_count; j++) {
-            if (strcmp(titles[j].title_id_hex, summary.conflict_titles[i]) == 0) {
+        for (int j = 0; j < title_count && j < MAX_TITLES; j++) {
+            if (summary.title_state[j] == TSTATE_CONFLICT &&
+                strcmp(titles[j].title_id_hex, summary.conflict_titles[i]) == 0) {
                 titles[j].in_conflict = true;
                 break;
             }

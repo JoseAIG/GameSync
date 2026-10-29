@@ -51,6 +51,7 @@ import com.savesync.android.ui.theme.gsTextMuted
 import kotlinx.coroutines.flow.first
 import androidx.compose.material.icons.filled.History
 import com.savesync.android.sync.LocalBackup
+import com.savesync.android.sync.isSharedYabaSanshiroSave
 import com.savesync.android.ui.components.GsConfirmDialog
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
@@ -777,17 +778,20 @@ fun SaveDetailScreen(
         )
     }
     GsDialogHost(confirmRestore) { backup, _ ->
-        val shared = entry.systemName == "SAT" && entry.saveFile?.name.equals("backup.bin", ignoreCase = true)
+        // Same test restoreLatestBackup uses to put back only this game's part.
+        val shared = isSharedYabaSanshiroSave(
+            entry, viewModel.settings.value.saturnSyncFormat
+        )
         GsConfirmDialog(
             title = "Put back the copy from ${formatWhen(backup.takenAt)}?",
             message = "The save on this device now is kept as a copy too, so this can be undone." +
-                if (shared) " This file holds other Saturn games' saves as well; they go back to that copy too." else "",
+                if (shared) " This file holds other Saturn games' saves as well; only this game's part goes back." else "",
             confirmLabel = "Restore",
             dismissLabel = "Keep current",
             destructive = true,
             onConfirm = {
                 confirmRestore = null
-                viewModel.restoreLatestBackup(entry.titleId)
+                viewModel.restoreLatestBackup(entry.titleId, backup)
             },
             onDismiss = { confirmRestore = null },
         )

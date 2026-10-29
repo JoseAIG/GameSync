@@ -110,6 +110,35 @@ object SaturnSaveFormatConverter {
         )
     }
 
+    /**
+     * A YabaSanshiro container ([currentBytes]) with only [archiveNames]
+     * taken from [sourceBytes] (an older copy of the same container): those
+     * archives come back as they were there, or go if it lacked them, and
+     * every other game's archives stay as they are now.  Throws when either
+     * container can't be read, rather than drop archives it couldn't parse.
+     */
+    fun replaceArchivesInYabaSanshiro(
+        currentBytes: ByteArray?,
+        sourceBytes: ByteArray,
+        archiveNames: Collection<String>,
+    ): ByteArray {
+        val names = archiveNames.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+        require(names.isNotEmpty()) { "At least one Saturn archive name is required" }
+        val source = parseAnySaturn(sourceBytes)
+            ?: throw IllegalArgumentException("Saturn backup copy is not valid")
+        val current = currentBytes?.let {
+            parseAnySaturn(it) ?: throw IllegalArgumentException("Current Saturn save is not valid")
+        }.orEmpty()
+
+        val merged = LinkedHashMap<String, SaturnSaveFile>()
+        current.filter { it.name !in names }.forEach { merged[it.name] = it }
+        source.filter { it.name in names }.forEach { merged[it.name] = it }
+        return byteExpand(
+            buildNativeSaturn(merged.values.toList(), YABASANSHIRO_COLLAPSED_SIZE),
+            0xFF
+        )
+    }
+
     private fun parseAnySaturn(bytes: ByteArray): List<SaturnSaveFile>? {
         parseNativeSaturn(bytes)?.let { return it }
         val collapsed = byteCollapse(bytes) ?: return null

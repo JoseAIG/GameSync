@@ -48,6 +48,7 @@ import com.savesync.android.sync.SaturnArchiveStateStore
 import com.savesync.android.sync.SaturnSyncFormat
 import com.savesync.android.sync.SegaCdSyncFormat
 import com.savesync.android.sync.SaturnSaveFormatConverter
+import com.savesync.android.sync.isSharedYabaSanshiroSave
 import com.savesync.android.sync.SyncEngine
 import com.savesync.android.sync.SyncResult
 import com.savesync.android.sync.localSyncHash
@@ -80,6 +81,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
 import java.time.OffsetDateTime
 import java.time.format.DateTimeParseException
 import java.util.concurrent.TimeUnit
@@ -3207,8 +3209,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * background worker — downloads over it again: it waits as a conflict
      * until the user chooses Upload or Download.  The save it replaces is
      * kept as a copy too.
+     *
+     * [confirmed] is the copy the user agreed to put back (Save detail's
+     * confirm names it); null = the newest, as Undo right after a download
+     * means.  A confirmed copy that has gone since is not swapped for another.
      */
-    fun restoreLatestBackup(titleId: String) {
+    fun restoreLatestBackup(titleId: String, confirmed: LocalBackup? = null) {
         viewModelScope.launch {
             val entry = _allSaves.value.firstOrNull { it.titleId == titleId }?.reconcileWithDisk()
             if (entry == null) {
@@ -3219,10 +3225,25 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             try {
                 val restored = withContext(Dispatchers.IO) {
                     val store = LocalBackups.store
-                    val backup = store.latest(titleId) ?: return@withContext null
+                    val backup = if (confirmed != null) {
+                        confirmed.takeIf { it.payload.exists() }
+                    } else {
+                        store.latest(titleId)
+                    } ?: return@withContext null
                     val target = (if (backup.isDirectory) entry.saveDir else entry.saveFile)
                         ?: return@withContext null
-                    if (store.restore(titleId, target, db.syncStateDao(), backup, entry.displayName, entry.systemName)) backup
+                    // YabaSanshiro keeps every Saturn game in one backup.bin:
+                    // put back only this title's archives.
+                    val merge = if (isSharedYabaSanshiroSave(entry, settings.value.saturnSyncFormat)) {
+                        val archives = SaturnArchiveStateStore.get(titleId)
+                        if (archives.isEmpty()) {
+                            throw IOException("This game's Saturn archives aren't chosen yet, so its part of the shared file can't be put back")
+                        }
+                        { old: ByteArray, now: ByteArray? ->
+                            SaturnSaveFormatConverter.replaceArchivesInYabaSanshiro(now, old, archives)
+                        }
+                    } else null
+                    if (store.restore(titleId, target, db.syncStateDao(), backup, entry.displayName, entry.systemName, merge)) backup
                     else null
                 }
                 _backupsVersion.value++

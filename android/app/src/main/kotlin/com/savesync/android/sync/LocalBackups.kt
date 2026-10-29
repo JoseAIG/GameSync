@@ -162,6 +162,12 @@ class LocalBackupStore(
      *
      * The current save is snapshotted first, so a restore can itself be
      * undone.  Returns false when there is nothing to restore.
+     *
+     * [merge], for a single-file save, builds what is written from the
+     * snapshot's bytes and the current file's (null = none): a container
+     * shared by several titles (YabaSanshiro's backup.bin) must get back only
+     * this title's part, or every other game in it would roll back too and
+     * be uploaded over the server as "only this device changed".
      * @throws BackupFailedException when the current save can't be kept.
      */
     suspend fun restore(
@@ -171,6 +177,7 @@ class LocalBackupStore(
         backup: LocalBackup? = latest(titleId),
         displayName: String = titleId,
         systemName: String = "",
+        merge: ((snapshot: ByteArray, current: ByteArray?) -> ByteArray)? = null,
     ): Boolean {
         val chosen = backup ?: return false
         if (!chosen.payload.exists()) return false
@@ -186,7 +193,9 @@ class LocalBackupStore(
                 }
             }
         } else {
-            AtomicSaveWriter.replaceFile(target, chosen.payload.readBytes())
+            val bytes = chosen.payload.readBytes()
+            val toWrite = merge?.invoke(bytes, target.takeIf { it.isFile }?.readBytes()) ?: bytes
+            AtomicSaveWriter.replaceFile(target, toWrite)
         }
 
         dao.upsert(

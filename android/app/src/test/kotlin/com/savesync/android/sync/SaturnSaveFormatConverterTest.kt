@@ -2,6 +2,7 @@ package com.savesync.android.sync
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.charset.Charset
@@ -114,6 +115,31 @@ class SaturnSaveFormatConverterTest {
 
         assertArrayEquals(grandiaCanonical, extracted)
         assertEquals(listOf("GRANDIA_001"), SaturnSaveFormatConverter.archiveNames(extracted))
+    }
+
+    @Test
+    fun `replacing one title's archives leaves the other games in the container as they are now`() {
+        val draculaOld = buildCanonicalSample("DRACULAX_01", "Richter", ByteArray(64) { 1 })
+        val grandiaOld = buildCanonicalSample("GRANDIA_001", "Feena's Ho", ByteArray(64) { 2 })
+        val draculaNow = buildCanonicalSample("DRACULAX_01", "Richter", ByteArray(64) { 3 })
+        val grandiaNow = buildCanonicalSample("GRANDIA_001", "Feena's Ho", ByteArray(64) { 4 })
+        fun container(vararg c: ByteArray) = c.drop(1).fold(
+            SaturnSaveFormatConverter.fromCanonical(c[0], SaturnSyncFormat.YABASANSHIRO)
+        ) { acc, next -> SaturnSaveFormatConverter.mergeCanonicalIntoYabaSanshiro(acc, next) }
+
+        val snapshot = container(draculaOld, grandiaOld)
+        val current = container(draculaNow, grandiaNow)
+        val restored = SaturnSaveFormatConverter.replaceArchivesInYabaSanshiro(current, snapshot, listOf("DRACULAX_01"))
+
+        fun archive(c: ByteArray, name: String) = SaturnSaveFormatConverter.extractCanonical(c, listOf(name))
+        assertArrayEquals(archive(snapshot, "DRACULAX_01"), archive(restored, "DRACULAX_01"))
+        assertArrayEquals(archive(current, "GRANDIA_001"), archive(restored, "GRANDIA_001"))
+        assertFalse(archive(snapshot, "GRANDIA_001").contentEquals(archive(restored, "GRANDIA_001")))
+
+        // An archive the old copy didn't have yet goes; the others stay.
+        val withoutDracula = container(grandiaOld)
+        val removed = SaturnSaveFormatConverter.replaceArchivesInYabaSanshiro(current, withoutDracula, listOf("DRACULAX_01"))
+        assertEquals(listOf("GRANDIA_001"), parseArchiveNames(removed))
     }
 
     private fun buildCanonicalSample(

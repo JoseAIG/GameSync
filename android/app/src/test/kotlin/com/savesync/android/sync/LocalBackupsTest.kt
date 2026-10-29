@@ -157,6 +157,22 @@ class LocalBackupsTest {
     }
 
     @Test
+    fun `restore with a merge writes the merge of the copy and the current file`() = runBlocking {
+        val s = store()
+        val dao = FakeDao()
+        val shared = tmp.newFile("backup.bin").apply { writeText("A0|B0") }
+        s.snapshot("SAT_A", shared, "download", "a0")
+        shared.writeText("A1|B1")
+
+        assertTrue(s.restore("SAT_A", shared, dao, merge = { old, now ->
+            // Take A from the copy, keep B as it is now.
+            (String(old).substringBefore('|') + "|" + String(now!!).substringAfter('|')).toByteArray()
+        }))
+
+        assertEquals("A0|B1", shared.readText())
+    }
+
+    @Test
     fun `restore of a folder save is exact`() = runBlocking {
         val s = store()
         val dao = FakeDao()

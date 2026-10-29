@@ -201,4 +201,19 @@ class LocalBackupsTest {
         assertFalse(s.restore("none", save, dao))
         assertEquals("keep", save.readText())
     }
+
+    @Test
+    fun `stale partial snapshots are removed at start, finished ones kept`() {
+        val root = tmp.newFolder("start-backups")
+        val store = LocalBackupStore(root)
+        val save = tmp.newFile("start.srm").apply { writeText("v1") }
+        val done = store.snapshot("T", save, LocalBackupStore.REASON_DOWNLOAD, null)!!
+        val stale = File(root, "T/20260101-000000.partial").apply { mkdirs(); File(this, "start.srm").writeText("half") }
+
+        store.removeStalePartials()
+
+        assertFalse(stale.exists())
+        assertTrue(done.isDirectory)
+        assertEquals(listOf(done), store.list("T").map { it.dir })
+    }
 }

@@ -109,6 +109,7 @@ class LocalBackupStore(
                 val meta = SnapshotMeta(now, reason, previousLastSyncedHash, previousLastSyncedAt, newest.payload.name, isDir)
                 writeSynced(File(newest.dir, META), gson.toJson(meta))
                 if (!newest.dir.renameTo(done)) throw IOException("Could not renew snapshot ${newest.dir}")
+                syncDir(parent)
                 return done
             }
 
@@ -126,6 +127,9 @@ class LocalBackupStore(
             writeSynced(File(work, META), gson.toJson(meta))
             if (!work.renameTo(done)) throw IOException("Could not finish snapshot $done")
             partial = null
+            // The rename itself must reach the disk before the write that
+            // follows: otherwise a power cut can leave only the `.partial`.
+            syncDir(parent)
             prune(titleId, protect)
             return done
         } catch (e: Exception) {
@@ -213,6 +217,28 @@ class LocalBackupStore(
             )
         )
         return true
+    }
+
+    /**
+     * Deletes snapshots an earlier run left half-built (`.partial`: the app
+     * died mid-copy).  They never count as backups, but they hold a whole
+     * save's worth of space.  Call once at start, before anything takes a
+     * snapshot, so a `.partial` is never one still being built.
+     */
+    fun removeStalePartials() {
+        root.listFiles { f -> f.isDirectory }?.forEach { title ->
+            title.listFiles { f -> f.isDirectory && f.name.endsWith(PARTIAL) }?.forEach { it.deleteRecursively() }
+        }
+    }
+
+    /**
+     * Makes a rename inside [dir] durable.  Best effort: a filesystem that
+     * can't sync a directory still has the snapshot's data synced.
+     */
+    private fun syncDir(dir: File) {
+        runCatching {
+            java.nio.channels.FileChannel.open(dir.toPath(), java.nio.file.StandardOpenOption.READ).use { it.force(true) }
+        }
     }
 
     /** Flushes [file]'s data to the storage device. */
@@ -319,7 +345,11 @@ object LocalBackups {
 
     /** Called once from Application.onCreate. */
     fun init(context: Context) {
-        if (instance == null) instance = LocalBackupStore(File(context.filesDir, "local_backups"))
+        if (instance == null) {
+            instance = LocalBackupStore(File(context.filesDir, "local_backups")).also {
+                runCatching { it.removeStalePartials() }
+            }
+        }
     }
 
     /** The store; throws if [init] never ran, so no download proceeds without backups. */

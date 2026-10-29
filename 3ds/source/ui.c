@@ -2623,8 +2623,14 @@ SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action) {
                                        in.rep & (KEY_UP | KEY_DOWN));
         if (ev.kind != UI_LIST_REATTACHED && (in.rep & UI_LIST_KEYS)) {
             ui_list_keys(&config_anim, in.rep, CFG_ITEMS, CFG_ITEMS, &v.selected);
-            if (v.selected < v.scroll) v.scroll = v.selected;
-            if (v.selected >= v.scroll + CFG_ROWS) v.scroll = v.selected - CFG_ROWS + 1;
+            if ((in.rep & (KEY_LEFT | KEY_RIGHT)) && !config_anim.tracking) {
+                // Stop a coast still running from a flick: when it settled
+                // it would scroll the new selection off screen again
+                ui_list_reveal(&config_anim, CFG_ITEMS, v.selected, &v.scroll);
+            } else {
+                if (v.selected < v.scroll) v.scroll = v.selected;
+                if (v.selected >= v.scroll + CFG_ROWS) v.scroll = v.selected - CFG_ROWS + 1;
+            }
         }
 
         UiBarItem item;

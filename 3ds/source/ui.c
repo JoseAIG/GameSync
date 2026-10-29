@@ -2298,6 +2298,13 @@ static void set_cfg_note(int row, UiTone tone, const char *text) {
     cfg_note_row = row;
 }
 
+void ui_settings_action_note(SettingsResult action, UiTone tone, const char *text) {
+    int row = action == SETTINGS_RESCAN ? CFG_RESCAN
+            : action == SETTINGS_REFRESH_CATALOG ? CFG_REFRESH_CATALOG
+            : action == SETTINGS_UPDATE ? CFG_UPDATE : -1;
+    if (row >= 0) set_cfg_note(row, tone, text);
+}
+
 static void config_top(void *ctx) {
     const ConfigView *v = ctx;
     ui_tab_header(UI_TAB_SETTINGS);

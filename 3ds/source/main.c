@@ -1192,7 +1192,10 @@ static bool do_update(void) {
         p.status = "Checking for updates...";
         p.frac = -1;
         checked = ui_run_job(update_job, j, &p, true, &cancelled);
-        if (cancelled) return false;   // nothing changed
+        if (cancelled) {
+            ui_settings_action_note(SETTINGS_UPDATE, UI_TONE_ACCENT, "Update check cancelled, nothing changed.");
+            return false;
+        }
         update_info = j->info;
         ui_job_release(j);
     } else {

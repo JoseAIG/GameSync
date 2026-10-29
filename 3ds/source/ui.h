@@ -390,6 +390,9 @@ typedef bool (*SettingsActionFn)(SettingsResult action);
 // they are confirmed. Returns SETTINGS_NAV_PREV / _NEXT / _EXIT when the
 // user leaves the tab.
 SettingsResult ui_settings_tab(AppConfig *config, SettingsActionFn run_action);
+// A short outcome for an action row, shown in the help panel while that
+// row is selected (e.g. "Update check cancelled, nothing changed")
+void ui_settings_action_note(SettingsResult action, UiTone tone, const char *text);
 
 // ---------------------------------------------------------------------------
 // Folder picker

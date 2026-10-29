@@ -614,6 +614,93 @@ class TestAtomicStore:
         assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
         assert sorted(p.name for p in title_dir.iterdir()) == ["current"]
 
+    def test_startup_recovers_interrupted_swap(self, tmp_save_dir, monkeypatch):
+        """A swap cut short must not wait for the title's next upload."""
+        from fastapi.testclient import TestClient
+
+        from app.main import create_app
+
+        monkeypatch.setattr(settings, "allow_weak_key", True)
+        monkeypatch.setattr(settings, "rom_dir", None)
+
+        storage.store_save(_save_bundle([("a", b"old")]))
+        title_dir = tmp_save_dir / TITLE_HEX
+        (title_dir / "current").rename(title_dir / f"{storage._RETIRED_PREFIX}x")
+        (title_dir / f"{storage._STAGING_PREFIX}y").mkdir()
+        assert storage.load_save_files(TITLE_HEX) is None
+
+        with TestClient(create_app()):  # runs the lifespan startup
+            pass
+
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
+        assert sorted(p.name for p in title_dir.iterdir()) == ["current"]
+
+    def test_recover_all_counts_restored_titles(self, tmp_save_dir):
+        storage.store_save(_save_bundle([("a", b"old")]))
+        title_dir = tmp_save_dir / TITLE_HEX
+        (title_dir / "current").rename(title_dir / f"{storage._RETIRED_PREFIX}x")
+        (tmp_save_dir / "OTHER").mkdir()
+        (tmp_save_dir / "stray.txt").write_text("not a title")
+        assert storage.recover_interrupted_swaps() == 1
+        assert storage.recover_interrupted_swaps() == 0
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
+
+    def test_new_save_is_flushed_before_swap_and_old_one_deleted(
+        self, tmp_save_dir, monkeypatch
+    ):
+        """Power loss after the swap must not leave empty files in current/."""
+        storage.store_save(_save_bundle([("a", b"old"), ("d/b", b"old-b")]))
+
+        events: list[tuple[str, str]] = []
+        real_fsync, real_open = storage.os.fsync, storage.os.open
+        real_rename, real_rmtree = storage.Path.rename, storage.shutil.rmtree
+        opened: dict[int, str] = {}
+
+        def spy_open(path, *a, **kw):
+            fd = real_open(path, *a, **kw)
+            opened[fd] = str(path)
+            return fd
+
+        def spy_fsync(fd):
+            events.append(("fsync", opened.get(fd, "?")))
+            return real_fsync(fd)
+
+        def spy_rename(self, target):
+            events.append(("rename", self.name))
+            return real_rename(self, target)
+
+        def spy_rmtree(path, *a, **kw):
+            events.append(("rmtree", str(path)))
+            return real_rmtree(path, *a, **kw)
+
+        monkeypatch.setattr(storage.os, "open", spy_open)
+        monkeypatch.setattr(storage.os, "fsync", spy_fsync)
+        monkeypatch.setattr(storage.Path, "rename", spy_rename)
+        monkeypatch.setattr(storage.shutil, "rmtree", spy_rmtree)
+        storage.store_save(_save_bundle([("a", b"new"), ("d/b", b"new-b")], 2))
+        monkeypatch.undo()
+
+        stage_rename = next(
+            i for i, e in enumerate(events)
+            if e[0] == "rename" and e[1].startswith(storage._STAGING_PREFIX)
+        )
+        flushed_before = {p for kind, p in events[:stage_rename] if kind == "fsync"}
+        for rel in ("a", "b"):
+            assert any(
+                p.endswith(rel) and storage._STAGING_PREFIX in p for p in flushed_before
+            ), rel
+        # The history copy is on disk before the swap too.
+        assert any("history" in p and p.endswith("a") for p in flushed_before)
+        # The title dir (holding both renames) is flushed before the old
+        # save is deleted.
+        retired_rm = next(
+            i for i, e in enumerate(events)
+            if e[0] == "rmtree" and storage._RETIRED_PREFIX in e[1]
+        )
+        title_dir = str(tmp_save_dir / TITLE_HEX)
+        assert ("fsync", title_dir) in events[stage_rename:retired_rm]
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"new"), ("d/b", b"new-b")]
+
 
 # ── History download by timestamp ───────────────────────────────────────────
 

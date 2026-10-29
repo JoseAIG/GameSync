@@ -398,9 +398,12 @@ fun SettingsScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                // Stays enabled (and focusable) while a scan runs, as in
+                // v055: disabling the button A was just pressed on would
+                // drop the pad's focus.  A press during a scan does nothing.
                 Button(
-                    onClick = { viewModel.scanSaves() },
-                    enabled = syncState !is SyncState.Syncing && !savesScanning,
+                    onClick = { if (!savesScanning) viewModel.scanSaves() },
+                    enabled = syncState !is SyncState.Syncing,
                     modifier = Modifier
                         .weight(1f)
                         .gsFocusRing()

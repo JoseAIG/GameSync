@@ -3676,9 +3676,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Delete an installed ROM (whole-folder where applicable) and
      *  refresh both the installed list and the saves list. */
-    fun deleteInstalledRom(rom: InstalledRom) {
+    /** [allowWholeFolder]: what the confirm told the user (see [InstalledRomsScanner.deleteInstalled]). */
+    fun deleteInstalledRom(rom: InstalledRom, allowWholeFolder: Boolean = true) {
         viewModelScope.launch {
-            val result = InstalledRomsScanner.deleteInstalled(rom)
+            val result = withContext(Dispatchers.IO) { InstalledRomsScanner.deleteInstalled(rom, allowWholeFolder) }
             _deleteInstalledState.value = if (result.errors.isEmpty()) {
                 DeleteInstalledState.Success(rom, result)
             } else {

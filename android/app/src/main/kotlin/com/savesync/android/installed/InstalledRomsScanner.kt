@@ -314,11 +314,16 @@ object InstalledRomsScanner {
      *  dedicated per-game subfolder (not the system root), the whole
      *  subfolder is rmtree'd in one pass — readmes, box art, thumbnail
      *  caches and all.  Otherwise falls back to file-by-file delete. */
-    fun deleteInstalled(rom: InstalledRom): DeleteResult {
+    /**
+     * [allowWholeFolder] = false keeps the delete to the ROM and its
+     * companions even where the folder could go whole: the confirm said
+     * so, and the delete must not remove more than the user agreed to.
+     */
+    fun deleteInstalled(rom: InstalledRom, allowWholeFolder: Boolean = true): DeleteResult {
         val parent = rom.path.parentFile ?: return DeleteResult(0, listOf("Missing parent"), null)
         val group = listOf(rom.path) + rom.companionFiles
 
-        if (canRemoveWholeFolder(parent, rom.systemRoot, group)) {
+        if (allowWholeFolder && canRemoveWholeFolder(parent, rom.systemRoot, group)) {
             val fileCount = countFilesRecursive(parent)
             val ok = parent.deleteRecursively()
             return if (ok) {

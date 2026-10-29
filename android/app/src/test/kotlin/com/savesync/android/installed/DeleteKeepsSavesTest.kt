@@ -90,6 +90,24 @@ class DeleteKeepsSavesTest {
     }
 
     @Test
+    fun `a delete confirmed as file-only never removes the folder`() {
+        val (systemRoot, game) = gameFolder("game.chd", "readme.txt")
+        val rom = InstalledRom(
+            path = File(game, "game.chd"),
+            system = "PS1",
+            displayName = "game",
+            filename = "game.chd",
+            size = 64,
+            systemRoot = systemRoot,
+            companionFiles = emptyList(),
+        )
+        val result = InstalledRomsScanner.deleteInstalled(rom, allowWholeFolder = false)
+        assertNull(result.removedDir)
+        assertFalse(File(game, "game.chd").exists())
+        assertTrue(File(game, "readme.txt").exists())
+    }
+
+    @Test
     fun `a folder with only the game and clutter is still removed whole`() {
         val (systemRoot, game) = gameFolder("game.chd", "readme.txt")
         val rom = InstalledRom(

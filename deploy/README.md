@@ -47,6 +47,10 @@ Todo el estado vive en `GAMESYNC_DATA_DIR/saves`: las partidas, su historial
 y las bases SQLite. Para respaldar, copia esa carpeta con el contenedor en
 pausa (`docker compose pause` / `unpause`).
 
+El `./data` por defecto está dentro del checkout y git lo ignora, así que un
+`git add -A` no lo sube. Pero un `git clean -fdx` sí lo borraría: para
+mayor seguridad, apunta `GAMESYNC_DATA_DIR` a una ruta fuera del repo.
+
 ## Blindaje aplicado
 
 - Usuario sin privilegios (`GAMESYNC_UID`, 10001 por defecto).

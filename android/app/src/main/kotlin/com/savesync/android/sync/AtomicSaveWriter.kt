@@ -24,6 +24,14 @@ object AtomicSaveWriter {
     private const val STAGING_SUFFIX = ".gamesync-new"
     private const val BACKUP_SUFFIX = ".gamesync-old"
 
+    /**
+     * One swap at a time, process-wide.  The staging and backup names are
+     * fixed per target, so two writers to the same save (the background
+     * worker and a sync started from the UI, or a restore) would otherwise
+     * delete each other's staging and swap in a half-filled copy.
+     */
+    private val swapLock = Any()
+
     /** Hidden sibling that receives the new contents before the swap. */
     fun stagingFor(target: File): File =
         File(target.absoluteFile.parentFile, ".${target.name}$STAGING_SUFFIX")
@@ -39,7 +47,7 @@ object AtomicSaveWriter {
      * verified by SHA-256 before being renamed over [target], so [target]
      * always holds either the complete old or the complete new contents.
      */
-    fun replaceFile(target: File, bytes: ByteArray) {
+    fun replaceFile(target: File, bytes: ByteArray): Unit = synchronized(swapLock) {
         val parent = target.absoluteFile.parentFile
             ?: throw IOException("No parent directory for $target")
         if (!parent.isDirectory && !parent.mkdirs()) {
@@ -97,7 +105,7 @@ object AtomicSaveWriter {
         keepExisting: Boolean,
         rename: (File, File) -> Boolean = { from, to -> from.renameTo(to) },
         populate: (File) -> Unit
-    ) {
+    ): Unit = synchronized(swapLock) {
         val target = targetDir.absoluteFile
         val parent = target.parentFile ?: throw IOException("No parent directory for $target")
         if (!parent.isDirectory && !parent.mkdirs()) {

@@ -37,6 +37,45 @@ class AtomicSaveWriterTest {
     }
 
     @Test
+    fun `two writers to one save never share its staging folder`() {
+        val dir = azaharSaveDir()
+        seedOldSave(dir)
+        val aFilling = java.util.concurrent.CountDownLatch(1)
+        val releaseA = java.util.concurrent.CountDownLatch(1)
+        val bEntered = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        val a = Thread {
+            AtomicSaveWriter.replaceDirectory(dir, keepExisting = false) { staging ->
+                File(staging, "main").writeBytes(byteArrayOf(1))
+                aFilling.countDown()
+                releaseA.await()
+                File(staging, "extdata").writeBytes(byteArrayOf(2))
+            }
+        }
+        val b = Thread {
+            AtomicSaveWriter.replaceDirectory(dir, keepExisting = false) { staging ->
+                bEntered.set(true)
+                File(staging, "main").writeBytes(byteArrayOf(3))
+                File(staging, "extdata").writeBytes(byteArrayOf(4))
+            }
+        }
+        a.start()
+        aFilling.await()
+        b.start()
+        Thread.sleep(200)
+        // B must wait: it would otherwise delete A's half-filled staging.
+        assertFalse(bEntered.get())
+        releaseA.countDown()
+        a.join(); b.join()
+
+        assertTrue(bEntered.get())
+        assertEquals(setOf("main", "extdata"), relativeFiles(dir))
+        assertArrayEquals(byteArrayOf(3), File(dir, "main").readBytes())
+        assertArrayEquals(byteArrayOf(4), File(dir, "extdata").readBytes())
+        noLeftovers(dir)
+    }
+
+    @Test
     fun `replaceDirectory swaps in exactly the bundle files`() {
         val dir = azaharSaveDir()
         seedOldSave(dir)

@@ -815,13 +815,7 @@ class DownloadManager(
             system = system,
             romDirOverrides = romDirOverrides,
         )
-        val canonicalSystem = SystemAliases.normalizeSystemCode(system)
-        val finalDir = if (cdGamesPerContentFolder && canonicalSystem in CD_FOLDER_SYSTEMS) {
-            val stem = safeName.substringBeforeLast('.', safeName)
-            File(outDir, stem)
-        } else {
-            outDir
-        }
+        val finalDir = finalRomDir(outDir, system, safeName, cdGamesPerContentFolder)
         val finalFile = File(finalDir, safeName)
         val partFile = File(finalDir, "$safeName.part")
         return finalFile to partFile
@@ -875,5 +869,20 @@ class DownloadManager(
         // CD systems share the layout convention with SyncEngine — duplicated
         // here so DownloadManager stays a leaf module (no SyncEngine dep).
         private val CD_FOLDER_SYSTEMS: Set<String> = setOf("SEGACD", "SAT", "DC", "PS1")
+
+        /**
+         * The folder a ROM named [safeName] lands in under [outDir]: a
+         * per-game subfolder (the name's stem) for a CD system when
+         * [cdGamesPerContentFolder] is on, else [outDir] itself.  The
+         * download confirm shows the same folder.
+         */
+        internal fun finalRomDir(outDir: File, system: String, safeName: String, cdGamesPerContentFolder: Boolean): File {
+            val canonicalSystem = SystemAliases.normalizeSystemCode(system)
+            return if (cdGamesPerContentFolder && canonicalSystem in CD_FOLDER_SYSTEMS) {
+                File(outDir, safeName.substringBeforeLast('.', safeName))
+            } else {
+                outDir
+            }
+        }
     }
 }

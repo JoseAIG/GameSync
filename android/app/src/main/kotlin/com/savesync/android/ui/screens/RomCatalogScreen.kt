@@ -647,8 +647,12 @@ fun RomCatalogScreen(
         // apart, so one tap queues the whole set in install order.
         val group = rom.withRelated(catalog)
         // The real destination and the space left there (read off the main thread).
-        val destination by produceState<MainViewModel.RomDestination?>(null, rom.system) {
-            value = viewModel.romDestination(rom.system)
+        val destination by produceState<MainViewModel.RomDestination?>(null, rom) {
+            value = viewModel.romDestination(
+                rom.system,
+                rom.preferredDownloadFilename(rom.preferredDownloadExtractFormat()),
+                rom.msuPackKind,
+            )
         }
         val totalSize = group.sumOf { it.size }
         val tooBig = destination?.freeBytes?.let { free -> totalSize > 0 && totalSize > free } == true

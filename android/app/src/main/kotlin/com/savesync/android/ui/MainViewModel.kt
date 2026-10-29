@@ -3415,12 +3415,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Where a catalog download for [system] will land, and the space free there. */
     data class RomDestination(val dir: File, val freeBytes: Long?)
 
-    /** Resolves [system]'s ROM folder the way the download will (off the main thread). */
-    suspend fun romDestination(system: String): RomDestination? = withContext(Dispatchers.IO) {
+    /**
+     * Resolves [system]'s ROM folder the way the download of [filename] will
+     * (off the main thread), including the per-game folder CD systems get
+     * with "CD games per content folder" on.  An MSU pack ([bundleKind]) is
+     * never put in one.
+     */
+    suspend fun romDestination(
+        system: String,
+        filename: String? = null,
+        bundleKind: String? = null,
+    ): RomDestination? = withContext(Dispatchers.IO) {
         val current = settingsStore.settingsFlow.first()
         val scanDir = effectiveRomScanDir(current)
         if (scanDir.isBlank()) return@withContext null
-        val dir = InstalledRomsScanner.resolveRomTargetDir(File(scanDir), system, current.romDirOverrides)
+        val systemDir = InstalledRomsScanner.resolveRomTargetDir(File(scanDir), system, current.romDirOverrides)
+        val safeName = filename?.replace('\\', '/')?.substringAfterLast('/')?.trim()
+            ?.takeIf { it.isNotEmpty() && it != "." && it != ".." }
+        val dir = if (safeName != null && bundleKind == null) {
+            com.savesync.android.sync.DownloadManager.finalRomDir(
+                systemDir, system, safeName, current.cdGamesPerContentFolder
+            )
+        } else systemDir
         // The folder may not exist yet: measure the nearest one that does.
         var probe: File? = dir
         while (probe != null && !probe.isDirectory) probe = probe.parentFile

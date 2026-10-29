@@ -674,6 +674,9 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         for (int j = 0; j < title_count; j++) {
             if (strcmp(titles[j].title_id_hex, upload_ids[i]) == 0) {
                 if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
+                // No save here (e.g. a DS ROM that was never played): there
+                // is nothing to upload, and it isn't a failure
+                if (strcmp(hash_cache[j], ZERO_HASH) == 0) break;
                 snprintf(msg, sizeof(msg), "Uploading %d/%d: %s",
                     i + 1, upload_count, upload_ids[i]);
                 if (progress) progress(msg);

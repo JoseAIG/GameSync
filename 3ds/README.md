@@ -83,7 +83,8 @@ keyboard, or a D-pad editor if the keyboard applet can't start).
 
 These keys can be edited in `config.txt`; all but `utc_offset_minutes` are
 also rows in the Settings tab. Saving from Settings keeps every key, including
-the ones it doesn't show.
+the ones it doesn't show. Switches take `1` or `0` (also `true`/`false`,
+`yes`/`no`, `on`/`off`); any other value keeps the default.
 
 | Key | Default | Meaning |
 |---|---|---|

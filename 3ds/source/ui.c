@@ -1043,7 +1043,11 @@ float ui_bar_layout(const UiBarItem *items, int n, GuiRect *draw, GuiRect *touch
     for (int i = 0; i < n; i++) {
         float w = i == 0 ? w0 : (items[i].width > 0 ? items[i].width : rest);
         draw[i] = gui_rect_make(x, by, w, GUI_BTN_H);
-        float tx0 = i == 0 ? 0 : x - gap / 2, tx1 = i == n - 1 ? GUI_BOT_W : x + w + gap / 2;
+        // The last item's touch area runs to the screen edge, unless it has
+        // a fixed width: then whatever is drawn beside it (Settings' "LR
+        // First / last" hint) isn't part of the button
+        bool to_edge = i == n - 1 && items[i].width <= 0;
+        float tx0 = i == 0 ? 0 : x - gap / 2, tx1 = to_edge ? GUI_BOT_W : x + w + gap / 2;
         touch[i] = gui_rect_make(tx0, GUI_BAR_Y, tx1 - tx0, GUI_BAR_H);
         x += w + gap;
     }

@@ -4,6 +4,7 @@
 *
 !server/pyproject.toml
 !server/uv.lock
+!server/*.py
 !server/app/
 !server/data/
 !server/third_party/

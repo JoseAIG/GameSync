@@ -32,8 +32,11 @@ WORKDIR /app/server
 COPY server/pyproject.toml server/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 
-# Código. Solo lo que el servidor necesita en tiempo de ejecución.
+# Código. Lo que el servidor necesita en tiempo de ejecución, más los
+# scripts de server/ (migraciones, ra_login.py) para poder correrlos contra
+# /data con `docker compose exec gamesync python <script>.py`.
 COPY shared/ /app/shared/
+COPY server/*.py ./
 COPY server/app/ ./app/
 COPY server/data/ ./data/
 COPY server/third_party/ ./third_party/

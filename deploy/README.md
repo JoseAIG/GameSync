@@ -41,6 +41,14 @@ sincronice por LAN, contra `http://<ip-del-servidor>:8000`, y usa
 git pull && cd deploy && docker compose up -d --build
 ```
 
+Si la versión nueva pide una migración (un `server/migrate_*.py`), córrela
+dentro del contenedor, que ya trae los scripts y ve los datos en `/data`.
+Pausa los clientes mientras tanto y respalda antes:
+
+```bash
+docker compose exec gamesync python migrate_<nombre>.py --help
+```
+
 ## Datos y respaldo
 
 Todo el estado vive en `GAMESYNC_DATA_DIR/saves`: las partidas, su historial

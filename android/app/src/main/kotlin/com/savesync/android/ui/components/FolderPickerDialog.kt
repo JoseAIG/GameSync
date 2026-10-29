@@ -121,24 +121,30 @@ fun FolderPickerDialog(
         if (target == null) target = start
         storageRoots = withContext(Dispatchers.IO) { discoverStorageRoots() }
     }
+    // The folder last asked for before [target] (loaded or still loading):
+    // coming up from it, its row takes focus.
+    var cameFrom by remember { mutableStateOf<File?>(null) }
     LaunchedEffect(target) {
         val dir = target ?: return@LaunchedEffect
-        val previous = listing?.dir
+        val previous = cameFrom
         val loaded = withContext(Dispatchers.IO) { loadListing(dir, emulatorKey) }
         loaded.focusChild = previous?.let { childToward(dir.absolutePath, it.absolutePath) }
         listing = loaded
     }
 
     fun open(dir: File) {
-        val from = listing?.dir ?: target
+        val from = target ?: listing?.dir
         if (from != null && !isAncestor(dir.absolutePath, from.absolutePath)) {
             positions.remove(dir.absolutePath)
         }
+        cameFrom = from
         target = dir
     }
 
+    // Up from the folder asked for, not the one still on screen while it
+    // loads: a quick X after drilling in goes back one level, not two.
     fun goUp() {
-        listing?.parent?.let { open(it) }
+        target?.absoluteFile?.parentFile?.takeIf { it.canRead() }?.let { open(it) }
     }
 
     // Keys pressed in a Dialog window never reach MainActivity, so the app's
@@ -455,22 +461,30 @@ private fun FolderList(
     onOpen: (File) -> Unit,
 ) {
     val path = listing.dir.absolutePath
-    val state = remember(path) {
-        val saved = positions[path]
-        LazyListState(saved?.first ?: 0, saved?.second ?: 0)
-    }
-    DisposableEffect(state) {
-        onDispose { positions[path] = state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
-    }
     val hasParent = listing.parent != null
     val focusIndex = remember(listing) {
         val child = listing.focusChild?.let { name -> listing.subDirs.indexOfFirst { it.name == name } } ?: -1
         if (child >= 0) child + (if (hasParent) 1 else 0) else 0
     }
+    // A parent never listed has no saved place: open it with the row we
+    // came from in view, so it can take focus.
+    val state = remember(path) {
+        val saved = positions[path]
+        LazyListState(saved?.first ?: (focusIndex - 2).coerceAtLeast(0), saved?.second ?: 0)
+    }
+    DisposableEffect(state) {
+        onDispose { positions[path] = state.firstVisibleItemIndex to state.firstVisibleItemScrollOffset }
+    }
     val focusRequester = remember(listing) { FocusRequester() }
     LaunchedEffect(listing) {
         withFrameNanos { }
-        runCatching { focusRequester.requestFocus() }
+        // The row isn't composed while it is off screen: bring it in and try
+        // again, or focus (and with it X and A) would be lost.
+        if (runCatching { focusRequester.requestFocus() }.isFailure) {
+            state.scrollToItem(focusIndex)
+            withFrameNanos { }
+            runCatching { focusRequester.requestFocus() }
+        }
     }
 
     LazyColumn(state = state, modifier = Modifier.fillMaxWidth()) {

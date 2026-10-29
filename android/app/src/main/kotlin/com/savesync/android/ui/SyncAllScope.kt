@@ -79,9 +79,22 @@ fun suspectSizeText(s: com.savesync.android.sync.SuspectUpload, formatBytes: (Lo
     }
 }
 
-/** A plan's titles grouped for "Details", in the summary's order; empty groups left out. */
-fun previewDetailGroups(preview: com.savesync.android.sync.SyncPreview): List<Pair<String, List<String>>> {
-    val by = preview.titles.groupBy { it.action }
+/**
+ * A plan's titles grouped for "Details", in the summary's order; empty groups
+ * left out.  A suspect upload counts under "Upload" only once it is in
+ * [includeSuspects]; until then it is listed as held back, as the summary
+ * and its row say.
+ */
+fun previewDetailGroups(
+    preview: com.savesync.android.sync.SyncPreview,
+    includeSuspects: Set<String> = emptySet(),
+): List<Pair<String, List<String>>> {
+    val suspects = preview.suspectIds
+    val heldBack = preview.titles.filter {
+        it.action == com.savesync.android.sync.PlannedAction.UPLOAD &&
+            it.titleId in suspects && it.titleId !in includeSuspects
+    }
+    val by = (preview.titles - heldBack.toSet()).groupBy { it.action }
     return listOf(
         com.savesync.android.sync.PlannedAction.UPLOAD to "Upload",
         com.savesync.android.sync.PlannedAction.DOWNLOAD to "Replace local save",
@@ -90,5 +103,8 @@ fun previewDetailGroups(preview: com.savesync.android.sync.SyncPreview): List<Pa
         com.savesync.android.sync.PlannedAction.UP_TO_DATE to "Up to date",
     ).mapNotNull { (action, label) ->
         by[action]?.map { it.displayName }?.sorted()?.takeIf { it.isNotEmpty() }?.let { label to it }
-    }
+    } + listOfNotNull(
+        heldBack.map { it.displayName }.sorted().takeIf { it.isNotEmpty() }
+            ?.let { "Held back (smaller than the server's copy)" to it }
+    )
 }

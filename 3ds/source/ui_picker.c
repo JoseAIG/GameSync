@@ -500,7 +500,7 @@ static bool pick_open_start(Picker *p, const char *start) {
             return true;
         }
         char parent[FOLDER_PATH_MAX];
-        if (!folder_path_parent(path, parent, sizeof(parent))) break;
+        if (!folder_path_parent(path, parent, sizeof(parent)) || strcmp(parent, path) == 0) break;
         snprintf(path, sizeof(path), "%s", parent);
     }
     return false;

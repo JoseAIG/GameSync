@@ -97,9 +97,14 @@ bool folder_path_parent(const char *path, char *out, size_t out_size) {
     const char *slash = strrchr(path, '/');
     if (!slash) return false;
     size_t keep = (size_t)(slash - path);
-    // "sdmc:/roms" -> "sdmc:/" (the root keeps its slash)
-    if (keep > 0 && path[keep - 1] == ':') keep++;
+    // "sdmc:/roms" -> "sdmc:/" (the root keeps its slash). Only the slash
+    // right after the device: a stray ':' further on ("sdmc:/a:/b") is just
+    // part of a name, or the parent of "sdmc:/a:/" would be itself.
+    size_t dev = device_len(path);
+    if (dev > 0 && keep == dev) keep++;
     if (keep == 0) return false;
+    // Never "up" to the same path: callers walk up until this says no
+    if (keep >= strlen(path)) return false;
     snprintf(out, out_size, "%.*s", (int)keep, path);
     return true;
 }

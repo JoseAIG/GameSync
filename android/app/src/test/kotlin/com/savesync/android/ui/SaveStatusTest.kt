@@ -151,6 +151,11 @@ class SaveStatusTest {
         assertEquals("android · 1234", serverSourceLabel(null, "android", "abcdef1234"))
         assertEquals("android", serverSourceLabel("", "android", null))
         assertEquals("Unknown device", serverSourceLabel(null, null, null))
+        // A route, not a device: the console id says more.
+        assertEquals("android · 1234", serverSourceLabel("raw", "android", "abcdef1234"))
+        assertEquals("Device 1234", serverSourceLabel("gc_card", null, "abcdef1234"))
+        assertEquals("GameCube memory card", serverSourceLabel("gc_card", null, null))
+        assertEquals("Raw save upload", serverSourceLabel("raw", "GBA", null))
     }
 
     @Test

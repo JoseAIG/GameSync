@@ -164,19 +164,36 @@ fun resolveSelection(titleIds: List<String>, selectedTitleId: String?, lastIndex
 /**
  * The detail screen's "From" for the server copy: the server's
  * last_sync_source, else the platform plus the last four characters of the
- * console id ("android · 3f9a"), else "Unknown device".
+ * console id ("android · 3f9a"), else "Unknown device".  Some sources name
+ * only the route the save came in by ("raw", "gc_card"), not the device:
+ * for those the platform and console id say more, and the route is put in
+ * words when they are missing.
  */
 fun serverSourceLabel(lastSyncSource: String?, platform: String?, consoleId: String?): String {
-    lastSyncSource?.trim()?.takeIf { it.isNotEmpty() }?.let { return it }
+    val source = lastSyncSource?.trim()?.takeIf { it.isNotEmpty() }
+    val transport = source?.let { TRANSPORT_SOURCES[it.lowercase()] }
+    if (source != null && transport == null) return source
     val tail = consoleId?.trim()?.takeIf { it.isNotEmpty() }?.takeLast(4)
     val plat = platform?.trim()?.takeIf { it.isNotEmpty() }
     return when {
         plat != null && tail != null -> "$plat · $tail"
-        plat != null -> plat
         tail != null -> "Device $tail"
+        transport != null -> transport
+        plat != null -> plat
         else -> "Unknown device"
     }
 }
+
+/** Server sources that name an upload route rather than a device. */
+private val TRANSPORT_SOURCES = mapOf(
+    "raw" to "Raw save upload",
+    "ps1_card" to "PS1 memory card",
+    "ps2_card" to "PS2 memory card",
+    "gc_card" to "GameCube memory card",
+    "ps1_vmc" to "PS1 virtual memory card",
+    "ps2_vmc" to "PS2 virtual memory card",
+    "gc_vmc" to "GameCube virtual memory card",
+)
 
 /**
  * Which side's time is later, for the "Newer" pill: -1 this device, 1 the

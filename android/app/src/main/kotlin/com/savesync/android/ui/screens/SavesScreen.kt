@@ -157,6 +157,7 @@ import com.savesync.android.ui.components.LocalGsHaptics
 import com.savesync.android.ui.components.LocalGsNotifier
 import com.savesync.android.ui.components.isServerNotConfigured
 import com.savesync.android.ui.components.noticeKindForSaveMessage
+import com.savesync.android.ui.components.SAVE_MSG_CONFLICT
 import com.savesync.android.ui.components.stripLeadingGlyph
 import com.savesync.android.ui.components.firstLetter
 import com.savesync.android.ui.components.handleHorizontalHoldKeyEvent
@@ -326,7 +327,7 @@ fun SavesScreen(
                 val conflictTitle = pendingSyncTitle
                 pendingSyncTitle = null
                 viewModel.resetDetailState()
-                if (conflictTitle != null && s.message.contains("Conflict")) {
+                if (conflictTitle != null && s.message.contains(SAVE_MSG_CONFLICT)) {
                     // Conflict found: reject haptic on the same frame as the
                     // navigation that shows it.
                     haptics?.perform(GsHaptic.Reject)

@@ -79,6 +79,9 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import com.savesync.android.ui.components.SAVE_MSG_CONFLICT
+import com.savesync.android.ui.components.SAVE_MSG_ERROR
+import com.savesync.android.ui.components.SAVE_MSG_HELD_BACK
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -3056,12 +3059,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     if (result.downloaded > 0) {
                         append(if (backedUp) "Replaced with the server's save · backup kept. " else "↓ Downloaded from server. ")
                     }
-                    if (result.conflicts.isNotEmpty()) append("⚠ Conflict detected — use Upload or Download to force. ")
-                    if (result.errors.isNotEmpty()) append("✗ Error: ${result.errors.first()}. ")
+                    if (result.conflicts.isNotEmpty()) append("$SAVE_MSG_CONFLICT — use Upload or Download to force. ")
+                    if (result.errors.isNotEmpty()) append("$SAVE_MSG_ERROR${result.errors.first()}. ")
                     // Rollback protection: a much smaller save (or one with
                     // fewer files) is never uploaded without being asked.
                     if (result.skippedSuspects.isNotEmpty()) {
-                        append("Not uploaded: this save is much smaller than the server's copy. ")
+                        append("${SAVE_MSG_HELD_BACK}this save is much smaller than the server's copy. ")
                         append("Use Force Upload if it is the one you want. ")
                     }
                     if (result.uploaded == 0 && result.downloaded == 0

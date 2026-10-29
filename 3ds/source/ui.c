@@ -1857,8 +1857,10 @@ static void compare_top(void *ctx) {
         snprintf(line, sizeof(line), "Console %.16s  \xC2\xB7  Server %.16s",
                  d->local_exists ? d->local_hash : "-", d->server_exists ? d->server_hash : "-");
         gui_text_fit(10, y, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
-        snprintf(line, sizeof(line), "Last synced %s", d->has_last_synced ? d->last_synced_hash : "never");
-        gui_text_fit(10, y + lh, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
+        // The full 64-digit hash: at GUI_S_SMALL with "Last synced " it
+        // needs ~400 px of the 380 and lost its tail to the ellipsis
+        snprintf(line, sizeof(line), "Synced %s", d->has_last_synced ? d->last_synced_hash : "never");
+        gui_text_fit(10, y + lh, GUI_S_TINY, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20, line);
     }
 
     // Verdict banner

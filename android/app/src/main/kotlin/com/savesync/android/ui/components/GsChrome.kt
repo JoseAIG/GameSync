@@ -99,9 +99,18 @@ fun chromeKeyFor(routePattern: String?, titleId: String?): String = when {
 fun GsScreenChrome(key: String, spec: GsChromeSpec) {
     val chrome = LocalGsChrome.current
     val owner = remember { Any() }
+    // Claimed once, when this instance first shows [key].  A screen that
+    // recomposes during its exit animation must not take the key back from
+    // the one that replaced it: it would overwrite that one's spec, and its
+    // dispose would then drop the chrome of the screen still showing.  A key
+    // nobody owns any more (its owner left) is claimed again.
+    val claimed = remember(key) { booleanArrayOf(false) }
     SideEffect {
-        chrome.owners[key] = owner
-        if (chrome.specs[key] != spec) chrome.specs[key] = spec
+        if (!claimed[0] || chrome.owners[key] == null) {
+            chrome.owners[key] = owner
+            claimed[0] = true
+        }
+        if (chrome.owners[key] === owner && chrome.specs[key] != spec) chrome.specs[key] = spec
     }
     if (key !in NAV_TAB_ROUTES) {
         // Only the instance that wrote the key drops it: the same screen

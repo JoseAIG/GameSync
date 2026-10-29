@@ -506,8 +506,12 @@ def store_save(
             [(f.path, f.data) for f in bundle.files]
         )
     else:
-        all_data = b"".join(f.data for f in bundle.files)
-        bundle_hash = hashlib.sha256(all_data).hexdigest()
+        # Same digest as hashing the concatenation, without a second copy of
+        # the whole save in memory.
+        digest = hashlib.sha256()
+        for f in bundle.files:
+            digest.update(f.data)
+        bundle_hash = digest.hexdigest()
         save_size = bundle.total_size
         file_count = len(bundle.files)
 

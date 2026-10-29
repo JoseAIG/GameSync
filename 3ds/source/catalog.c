@@ -75,6 +75,12 @@ typedef struct {
 
     CatEntry *win;           // loaded window of the filtered list
     int win_off, win_count;
+    // Live mode: the selected entry as it was when a new window replaced
+    // the one holding it (a drag can scroll far from the selection), so
+    // the top screen and A still have it
+    CatEntry kept;
+    int kept_idx;
+    bool kept_valid;
     int total;               // filtered count, -1 before the first page
     bool filter_ignored;     // server didn't apply has_ra (too old)
     char error[96];
@@ -305,6 +311,7 @@ static void unload_lists(Catalog *cat) {
     cat->win_off = cat->win_count = 0;
     cat->ew_first = cat->ew_off = cat->ew_total = -1;
     cat->selected = cat->scroll = 0;
+    cat->kept_valid = false;
     ui_list_reset(&cat->anim);
 }
 
@@ -466,6 +473,12 @@ static bool page_job(void *ctx) {
 
 // Load the page starting at `offset` into the window
 static void fetch_window(Catalog *cat, int offset) {
+    if (!cat->cached && cat->selected >= cat->win_off && cat->selected < cat->win_off + cat->win_count) {
+        // The window is about to be replaced: keep the selection's entry
+        cat->kept = cat->win[cat->selected - cat->win_off];
+        cat->kept_idx = cat->selected;
+        cat->kept_valid = true;
+    }
     if (cat->cached) {
         const CatList *list = &cat->lists[cat->sys];
         int n = 0;
@@ -533,6 +546,7 @@ static void fetch_window(Catalog *cat, int offset) {
 // drag left behind) is converted on the fly, valid until the next call.
 static const CatEntry *entry_at(const Catalog *cat, int index) {
     if (index >= cat->win_off && index < cat->win_off + cat->win_count) return &cat->win[index - cat->win_off];
+    if (!cat->cached && cat->kept_valid && index == cat->kept_idx) return &cat->kept;
     if (cat->cached && cat->filtered && index >= 0 && index < cat->filtered_count &&
         cat->list_loaded[cat->sys]) {
         static CatEntry scratch;
@@ -587,6 +601,7 @@ static void ensure_loaded(Catalog *cat) {
 
 // New filter/system: start over from the top
 static void reset_list(Catalog *cat) {
+    cat->kept_valid = false;   // indexes now mean another list
     cat->total = -1;
     cat->win_off = cat->win_count = 0;
     cat->ew_first = cat->ew_off = cat->ew_total = -1;

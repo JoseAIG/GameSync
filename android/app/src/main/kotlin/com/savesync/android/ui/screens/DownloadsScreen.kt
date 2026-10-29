@@ -226,10 +226,13 @@ fun DownloadsScreen(
         }
     }
 
-    // Derived, so the footer (and this screen) only recompose when the
-    // selected row's identity or status changes, not on every D-pad step.
-    val selected by remember { derivedStateOf { downloads.getOrNull(selectedIndex) } }
-    val primaryLabel = when (selected?.status) {
+    // Only the selected row's status is derived (not the row itself, which
+    // is a different object on almost every step), so the footer and this
+    // screen recompose when that status changes, not on every D-pad step;
+    // the rows' own highlight follows selectedIndex inside DownloadsList.
+    val selectedStatus by remember { derivedStateOf { downloads.getOrNull(selectedIndex)?.status } }
+    val selectedTerminal by remember { derivedStateOf { downloads.getOrNull(selectedIndex)?.isTerminal } }
+    val primaryLabel = when (selectedStatus) {
         DownloadEntity.Status.DOWNLOADING, DownloadEntity.Status.QUEUED -> "Pause"
         DownloadEntity.Status.PAUSED -> "Resume"
         DownloadEntity.Status.FAILED, DownloadEntity.Status.CANCELLED -> "Retry"
@@ -238,8 +241,6 @@ fun DownloadsScreen(
 
     // Header actions and footer hints, drawn by MainApp's persistent chrome.
     // Keyed on counts and the selected row's status, not on every D-pad step.
-    val selectedStatus = selected?.status
-    val selectedTerminal = selected?.isTerminal
     val chromeSpec = remember(finishedCount, activeCount, primaryLabel, selectedStatus, selectedTerminal) {
         GsChromeSpec(
             actions = {

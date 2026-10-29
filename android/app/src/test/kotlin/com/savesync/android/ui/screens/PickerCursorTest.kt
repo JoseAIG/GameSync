@@ -20,4 +20,14 @@ class PickerCursorTest {
         assertEquals(0, movePickerCursor(0, -1, 3))
         assertEquals(0, movePickerCursor(0, +1, 0))
     }
+
+    @Test
+    fun `A acts on the row under the cursor and confirms only on the stop after them`() {
+        // Pad, three rows: rows 0..2 select or toggle, 3 is "Apply" / "Use selection".
+        assertEquals(false, pickerAConfirms(0, 3, pad = true))
+        assertEquals(false, pickerAConfirms(2, 3, pad = true))
+        assertEquals(true, pickerAConfirms(3, 3, pad = true))
+        // Touch has no cursor: its A button confirms.
+        assertEquals(true, pickerAConfirms(0, 3, pad = false))
+    }
 }

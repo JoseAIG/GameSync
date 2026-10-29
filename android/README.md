@@ -290,11 +290,12 @@ the folder list keeps its room.
 
 ### Pickers on the save detail screen
 
-*Normalize* (choose the canonical name) and the Saturn archive picker use
-the same dialogs as the rest of the app: Up / Down move the cursor, A
-applies, B cancels. In the Saturn picker X includes or leaves out the
-archive under the cursor (tap a row to do the same by touch). The cursor
-starts on the current choice.
+*Normalize* (choose the canonical name) and the Saturn archive picker keep
+v055's controls: Up / Down move the cursor, A on a row chooses that name
+(Normalize) or includes / leaves out that archive (Saturn), and A on the
+*Apply* / *Use selection* row after the last one applies; B cancels. By
+touch, tap a row to choose or toggle it and use the Apply / Use selection
+button. The cursor starts on the current choice.
 
 ### TalkBack
 

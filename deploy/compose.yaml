@@ -22,7 +22,12 @@ services:
       SYNC_SAVE_DIR: /data/saves
       SYNC_TMP_DIR: /tmp
       SYNC_LAN_ADMIN: "false"          # nunca expuesto a Internet: inyecta la key en la web
-      SYNC_TRUST_PROXY_AUTH: "false"   # solo si un proxy con Basic Auth pone X-Remote-User
+      # Confía en X-Remote-User sin comprobar de dónde viene. Activarlo solo
+      # si el proxy con Basic Auth es el ÚNICO camino al servidor: quitar
+      # `ports:` y no compartir la red con otros contenedores. Si no,
+      # cualquiera que llegue al puerto 8000 se hace pasar por un usuario y
+      # la web le entrega la API key.
+      SYNC_TRUST_PROXY_AUTH: "false"
       SYNC_RA_ENABLED: "false"         # sin catálogo de ROMs, no hace falta RetroAchievements
       SYNC_DISABLE_DOCS: "true"        # sin /docs ni /openapi.json públicos
       SYNC_ALLOW_QUERY_API_KEY: "false" # la key solo por header X-API-Key

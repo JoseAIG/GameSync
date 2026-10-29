@@ -41,11 +41,23 @@ sincronice por LAN, contra `http://<ip-del-servidor>:8000`, y usa
 git pull && cd deploy && docker compose up -d --build
 ```
 
+Si la versión nueva pide una migración (un `server/migrate_*.py`), córrela
+dentro del contenedor, que ya trae los scripts y ve los datos en `/data`.
+Pausa los clientes mientras tanto y respalda antes:
+
+```bash
+docker compose exec gamesync python migrate_<nombre>.py --help
+```
+
 ## Datos y respaldo
 
 Todo el estado vive en `GAMESYNC_DATA_DIR/saves`: las partidas, su historial
 y las bases SQLite. Para respaldar, copia esa carpeta con el contenedor en
 pausa (`docker compose pause` / `unpause`).
+
+El `./data` por defecto está dentro del checkout y git lo ignora, así que un
+`git add -A` no lo sube. Pero un `git clean -fdx` sí lo borraría: para
+mayor seguridad, apunta `GAMESYNC_DATA_DIR` a una ruta fuera del repo.
 
 ## Blindaje aplicado
 
@@ -56,7 +68,15 @@ pausa (`docker compose pause` / `unpause`).
 - Sin catálogo de ROMs (`SYNC_ROM_DIR` sin definir).
 - Sin RetroAchievements.
 - Sin documentación pública.
-- Sin proxy de actualizaciones.
+- Sin proxy de actualizaciones. La 3DS muestra "Update check failed" al
+  buscar actualizaciones: el servidor responde 503 en vez de fingir que no
+  hay versión nueva.
 - Sin índice de juegos para emuladores (`GameIndex.yaml` de PS5SX2).
-- Key solo por header.
+- Key solo por header. Las descargas de la web usan un enlace temporal
+  firmado (`?token=`, válido un día y solo para ese archivo) en lugar de la
+  key en la URL.
+- `SYNC_TRUST_PROXY_AUTH` apagado. Encenderlo solo si el proxy con Basic
+  Auth es el único camino al servidor (sin `ports:` y en una red propia);
+  si no, cualquiera que llegue al puerto 8000 puede hacerse pasar por un
+  usuario.
 - Sin access log de uvicorn.

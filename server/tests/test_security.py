@@ -59,6 +59,12 @@ BAD_PATHS = [
     "a//b",
     "a/",
     "dir\\..\\escape",
+    "..\\escape",
+    "a\\..",
+    "\\abs",
+    "\\\\server\\share\\x",
+    "a\\\\b",
+    "C:\\windows\\evil",
     "C:/windows/evil",
     "C:evil",
     "a\x00b",
@@ -72,7 +78,15 @@ class TestSafePath:
             validate_relative_path(path)
 
     @pytest.mark.parametrize(
-        "path", ["main", "SAVEDATA/slot0.bin", "user/80000001/save.dat", "a.b-c_d"]
+        "path",
+        [
+            "main",
+            "SAVEDATA/slot0.bin",
+            "user/80000001/save.dat",
+            "a.b-c_d",
+            # Original Xbox client: E:\\UDATA\\<tid>\\<saveid>\\<file>.
+            "A1B2C3D4E5F6\\SaveMeta.xbx",
+        ],
     )
     def test_accepts_normal_paths(self, path):
         assert validate_relative_path(path) == path
@@ -80,6 +94,8 @@ class TestSafePath:
     def test_component_rejects_separator(self):
         with pytest.raises(UnsafePathError):
             validate_path_component("GC_A/..")
+        with pytest.raises(UnsafePathError):
+            validate_path_component("GC_A\\B")
         assert validate_path_component("GC_GM8E") == "GC_GM8E"
 
     def test_safe_join_blocks_symlink_escape(self, tmp_path):
@@ -95,11 +111,23 @@ class TestSafePath:
 
 class TestBundlePathTraversal:
     @pytest.mark.parametrize("compress", [True, False])
-    @pytest.mark.parametrize("path", ["../../escape.bin", "/tmp/escape.bin", "a\\b"])
+    @pytest.mark.parametrize(
+        "path", ["../../escape.bin", "/tmp/escape.bin", "a\\..\\b", "..\\escape.bin"]
+    )
     def test_parse_rejects_traversal(self, path, compress):
         data = _bundle([(path, b"pwned")], compress=compress)
         with pytest.raises(BundleError, match="Invalid file path"):
             parse_bundle(data)
+
+    def test_xbox_backslash_path_round_trips(self, client, auth_headers):
+        """The Xbox client joins sub-folders with ``\\`` (v055 accepted it)."""
+        path = "A1B2C3D4E5F6\\SaveMeta.xbx"
+        r = _upload(client, auth_headers, _bundle([(path, b"xbox save")]))
+        assert r.status_code == 200, r.text
+        r = client.get(f"/api/v1/saves/{TITLE_HEX}", headers=auth_headers)
+        assert r.status_code == 200
+        files = parse_bundle(r.content).files
+        assert [(f.path, f.data) for f in files] == [(path, b"xbox save")]
 
     def test_parse_rejects_non_ascii_title_id(self):
         data = bytearray(_bundle([("main", b"x")]))
@@ -386,9 +414,11 @@ class TestUpdateProxySSRF:
             "/api/v1/update/download", params={"url": ASSET_URL}, headers=auth_headers
         )
         assert r.status_code == 404
+        # Disabled is an error, not "no update": the 3DS would otherwise say
+        # "You have the latest version" without anything having been checked.
         r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
-        assert r.status_code == 200
-        assert r.json()["available"] is False
+        assert r.status_code == 503
+        assert "disabled" in r.json()["detail"]
         assert github_mock["seen"] == []
 
     def test_check_uses_configured_repo(self, client, auth_headers, github_mock, monkeypatch):
@@ -412,6 +442,37 @@ class TestUpdateProxySSRF:
         )
         r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
         assert r.json()["available"] is True
+        assert r.json()["sha256"] is None  # no digest published
+
+    @pytest.mark.parametrize(
+        "digest, expected",
+        [
+            ("sha256:" + "AB" * 32, "ab" * 32),
+            ("sha256:" + "ab" * 31, None),  # wrong length
+            ("md5:" + "ab" * 16, None),
+            (None, None),
+        ],
+    )
+    def test_check_passes_asset_sha256(
+        self, client, auth_headers, github_mock, monkeypatch, digest, expected
+    ):
+        import httpx
+
+        monkeypatch.setattr(settings, "update_repo", "JoseAIG/GameSync")
+        api = "https://api.github.com/repos/JoseAIG/GameSync/releases/latest"
+        asset = {
+            "name": "3dssync.cia",
+            "browser_download_url": "https://github.com/JoseAIG/GameSync/releases/download/v9.9.9/3dssync.cia",
+            "size": 1,
+        }
+        if digest is not None:
+            asset["digest"] = digest
+        github_mock["routes"][api] = httpx.Response(
+            200, json={"tag_name": "v9.9.9", "body": "", "assets": [asset]}
+        )
+        r = client.get("/api/v1/update/check", params={"current": "0.0.1"}, headers=auth_headers)
+        assert r.json()["available"] is True
+        assert r.json()["sha256"] == expected
 
 
 # ── Auth ────────────────────────────────────────────────────────────────────
@@ -449,6 +510,45 @@ class TestApiKeyAuth:
         assert r.status_code == 401
         r = client.get("/api/v1/titles", headers={"X-API-Key": api_key})
         assert r.status_code == 200
+
+    def test_web_ui_download_uses_share_token_when_query_key_is_off(
+        self, client, auth_headers, monkeypatch
+    ):
+        """The web UI's ↓ buttons mint a token (downloadHref in index.html)."""
+        monkeypatch.setattr(settings, "allow_query_api_key", False)
+        assert _upload(client, auth_headers, _bundle([("main", b"save")])).status_code == 200
+        path = f"/api/v1/saves/{TITLE_HEX}"
+        assert client.get(path, params={"api_key": settings.api_key}).status_code == 401
+
+        r = client.get(
+            "/api/v1/roms/share-link",
+            params={"ttl_days": 1, "path": path},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        r = client.get(path, params={"token": r.json()["token"]})
+        assert r.status_code == 200
+        assert parse_bundle(r.content).files[0].data == b"save"
+
+    def test_share_token_matches_percent_encoded_request_path(
+        self, client, auth_headers, monkeypatch
+    ):
+        """downloadHref signs the decoded path; the browser sends it encoded."""
+        monkeypatch.setattr(settings, "allow_query_api_key", False)
+        token = client.get(
+            "/api/v1/roms/share-link",
+            params={"path": "/api/v1/roms/Some Game (USA)"},
+            headers=auth_headers,
+        ).json()["token"]
+        r = client.get("/api/v1/roms/Some%20Game%20%28USA%29", params={"token": token})
+        assert r.status_code != 401
+
+    def test_web_ui_downloads_do_not_put_the_key_in_the_url(self):
+        from pathlib import Path
+
+        html = (Path(__file__).parents[1] / "app" / "templates" / "index.html").read_text()
+        assert "a.href = await downloadHref(url)" in html
+        assert "&api_key=${" not in html
 
 
 # ── Public API docs ─────────────────────────────────────────────────────────
@@ -586,6 +686,93 @@ class TestAtomicStore:
         assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
         assert sorted(p.name for p in title_dir.iterdir()) == ["current"]
 
+    def test_startup_recovers_interrupted_swap(self, tmp_save_dir, monkeypatch):
+        """A swap cut short must not wait for the title's next upload."""
+        from fastapi.testclient import TestClient
+
+        from app.main import create_app
+
+        monkeypatch.setattr(settings, "allow_weak_key", True)
+        monkeypatch.setattr(settings, "rom_dir", None)
+
+        storage.store_save(_save_bundle([("a", b"old")]))
+        title_dir = tmp_save_dir / TITLE_HEX
+        (title_dir / "current").rename(title_dir / f"{storage._RETIRED_PREFIX}x")
+        (title_dir / f"{storage._STAGING_PREFIX}y").mkdir()
+        assert storage.load_save_files(TITLE_HEX) is None
+
+        with TestClient(create_app()):  # runs the lifespan startup
+            pass
+
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
+        assert sorted(p.name for p in title_dir.iterdir()) == ["current"]
+
+    def test_recover_all_counts_restored_titles(self, tmp_save_dir):
+        storage.store_save(_save_bundle([("a", b"old")]))
+        title_dir = tmp_save_dir / TITLE_HEX
+        (title_dir / "current").rename(title_dir / f"{storage._RETIRED_PREFIX}x")
+        (tmp_save_dir / "OTHER").mkdir()
+        (tmp_save_dir / "stray.txt").write_text("not a title")
+        assert storage.recover_interrupted_swaps() == 1
+        assert storage.recover_interrupted_swaps() == 0
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"old")]
+
+    def test_new_save_is_flushed_before_swap_and_old_one_deleted(
+        self, tmp_save_dir, monkeypatch
+    ):
+        """Power loss after the swap must not leave empty files in current/."""
+        storage.store_save(_save_bundle([("a", b"old"), ("d/b", b"old-b")]))
+
+        events: list[tuple[str, str]] = []
+        real_fsync, real_open = storage.os.fsync, storage.os.open
+        real_rename, real_rmtree = storage.Path.rename, storage.shutil.rmtree
+        opened: dict[int, str] = {}
+
+        def spy_open(path, *a, **kw):
+            fd = real_open(path, *a, **kw)
+            opened[fd] = str(path)
+            return fd
+
+        def spy_fsync(fd):
+            events.append(("fsync", opened.get(fd, "?")))
+            return real_fsync(fd)
+
+        def spy_rename(self, target):
+            events.append(("rename", self.name))
+            return real_rename(self, target)
+
+        def spy_rmtree(path, *a, **kw):
+            events.append(("rmtree", str(path)))
+            return real_rmtree(path, *a, **kw)
+
+        monkeypatch.setattr(storage.os, "open", spy_open)
+        monkeypatch.setattr(storage.os, "fsync", spy_fsync)
+        monkeypatch.setattr(storage.Path, "rename", spy_rename)
+        monkeypatch.setattr(storage.shutil, "rmtree", spy_rmtree)
+        storage.store_save(_save_bundle([("a", b"new"), ("d/b", b"new-b")], 2))
+        monkeypatch.undo()
+
+        stage_rename = next(
+            i for i, e in enumerate(events)
+            if e[0] == "rename" and e[1].startswith(storage._STAGING_PREFIX)
+        )
+        flushed_before = {p for kind, p in events[:stage_rename] if kind == "fsync"}
+        for rel in ("a", "b"):
+            assert any(
+                p.endswith(rel) and storage._STAGING_PREFIX in p for p in flushed_before
+            ), rel
+        # The history copy is on disk before the swap too.
+        assert any("history" in p and p.endswith("a") for p in flushed_before)
+        # The title dir (holding both renames) is flushed before the old
+        # save is deleted.
+        retired_rm = next(
+            i for i, e in enumerate(events)
+            if e[0] == "rmtree" and storage._RETIRED_PREFIX in e[1]
+        )
+        title_dir = str(tmp_save_dir / TITLE_HEX)
+        assert ("fsync", title_dir) in events[stage_rename:retired_rm]
+        assert storage.load_save_files(TITLE_HEX) == [("a", b"new"), ("d/b", b"new-b")]
+
 
 # ── History download by timestamp ───────────────────────────────────────────
 
@@ -606,6 +793,54 @@ class TestHistoryByTimestamp:
         assert r.status_code == 200
         parsed = parse_bundle(r.content)
         assert [(f.path, f.data) for f in parsed.files] == [("main", b"v1")]
+
+    def test_versions_stored_in_the_same_second_stay_distinct(
+        self, client, auth_headers, monkeypatch
+    ):
+        """Two versions stored within one second must each be fetchable."""
+        from datetime import datetime as real_datetime
+        from datetime import timezone
+
+        times = iter(
+            real_datetime(2026, 1, 2, 3, 4, 5, us, tzinfo=timezone.utc)
+            for us in (100000, 400000, 700000)
+        )
+
+        class FrozenDatetime(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return next(times)
+
+        monkeypatch.setattr(storage, "datetime", FrozenDatetime)
+        for n in (1, 2, 3):
+            body = _bundle([("main", f"v{n}".encode())], timestamp=n)
+            assert _upload(client, auth_headers, body).status_code == 200
+        monkeypatch.undo()
+
+        versions = client.get(
+            f"/api/v1/saves/{TITLE_HEX}/history", headers=auth_headers
+        ).json()["versions"]
+        stamps = [v["timestamp"] for v in versions]
+        assert len(stamps) == 2 and len(set(stamps)) == 2
+        got = []
+        for ts in stamps:
+            r = client.get(f"/api/v1/saves/{TITLE_HEX}/history/{ts}", headers=auth_headers)
+            assert r.status_code == 200
+            got.append(parse_bundle(r.content).files[0].data)
+        assert got == [b"v2", b"v1"]  # newest first
+
+    def test_archive_dir_bumps_past_a_taken_second(self, tmp_path):
+        history = tmp_path / "history"
+        (history / "2026-01-02T03_04_05.100000_00_00").mkdir(parents=True)
+        (history / "2026-01-02T03_04_06.000001_00_00").mkdir()
+        got = storage._history_archive_dir(history, "2026-01-02T03:04:05.900000+00:00")
+        assert got.name == "2026-01-02T03_04_07.900000_00_00"
+        # The exact same version (a retried store) reuses its directory.
+        same = storage._history_archive_dir(history, "2026-01-02T03:04:05.100000+00:00")
+        assert same.name == "2026-01-02T03_04_05.100000_00_00"
+        # No collision: name unchanged.
+        free = storage._history_archive_dir(history, "2026-01-02T03:05:00.500000+00:00")
+        assert free.name == "2026-01-02T03_05_00.500000_00_00"
 
     def test_unknown_timestamp_is_404(self, client, auth_headers):
         _upload(client, auth_headers, _bundle([("main", b"v1")], timestamp=1))

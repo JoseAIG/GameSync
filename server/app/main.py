@@ -24,6 +24,17 @@ async def lifespan(app: FastAPI):
     settings.save_dir.mkdir(parents=True, exist_ok=True)
     db.init_db(settings.save_dir)
 
+    # A save swap cut short by a crash or kill leaves a title with no
+    # current/ until its next upload; put the previous save back first.
+    from app.services import storage
+
+    try:
+        restored = storage.recover_interrupted_swaps()
+        if restored:
+            logger.warning("[storage] restored %d save(s) left mid-swap", restored)
+    except OSError:
+        logger.exception("[storage] interrupted-swap recovery failed")
+
     data_dir = Path(__file__).parent.parent / "data"
     dats_dir = data_dir / "dats"
 

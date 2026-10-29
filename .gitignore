@@ -185,3 +185,5 @@ ps2/include/irx_mods.h
 
 # inciarte fork: versionar el lockfile del servidor para despliegues reproducibles
 !server/uv.lock
+# inciarte fork: datos del despliegue Docker (partidas, historial, bases SQLite)
+deploy/data/

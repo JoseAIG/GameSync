@@ -15,20 +15,22 @@ class UnsafePathError(ValueError):
 
 
 def validate_relative_path(path: str) -> str:
-    """Return ``path`` if it is a safe, relative, ``/``-separated path.
+    """Return ``path`` if it is a safe, relative path.
 
     Rejects empty paths, absolute paths (POSIX or Windows drive/UNC),
-    backslashes, NUL bytes and empty / ``.`` / ``..`` components.
+    NUL bytes and empty / ``.`` / ``..`` components.  ``\\`` counts as a
+    separator too: the Xbox client sends ``<saveid>\\savedata.dat``, which
+    v055 stored as-is, so it stays accepted, but every component on either
+    separator must be a plain name.  The path is returned unchanged so names
+    already stored on disk keep round-tripping.
     """
     if not path:
         raise UnsafePathError("empty path")
     if "\x00" in path:
         raise UnsafePathError(f"NUL byte in path {path!r}")
-    if "\\" in path:
-        raise UnsafePathError(f"backslash in path {path!r}")
     if PurePosixPath(path).is_absolute() or PureWindowsPath(path).drive:
         raise UnsafePathError(f"absolute path {path!r}")
-    for part in path.split("/"):
+    for part in path.replace("\\", "/").split("/"):
         if part in ("", ".", ".."):
             raise UnsafePathError(f"invalid path component in {path!r}")
     return path
@@ -37,7 +39,7 @@ def validate_relative_path(path: str) -> str:
 def validate_path_component(name: str) -> str:
     """Return ``name`` if it is safe to use as a single directory entry."""
     validate_relative_path(name)
-    if "/" in name:
+    if "/" in name or "\\" in name:
         raise UnsafePathError(f"path separator in name {name!r}")
     return name
 

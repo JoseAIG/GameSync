@@ -54,20 +54,20 @@ All settings are via environment variables with the `SYNC_` prefix, or in a `ser
 | Variable | Default | Description |
 |---|---|---|
 | `SYNC_ALLOW_WEAK_KEY` | `false` | Boot even with a placeholder or short `SYNC_API_KEY` (not recommended) |
-| `SYNC_ALLOW_QUERY_API_KEY` | `true` | Accept the key as `?api_key=` in the URL. The web UI uses this for direct download links; set `false` to require the `X-API-Key` header and keep the key out of proxy/tunnel logs (share links via `?token=` keep working) |
+| `SYNC_ALLOW_QUERY_API_KEY` | `true` | Accept the key as `?api_key=` in the URL (older clients and hand-made links). The web UI's download buttons use a one-day `?token=` share link instead, so they keep working with `false`, which requires the `X-API-Key` header and keeps the key out of proxy/tunnel logs |
 | `SYNC_DISABLE_DOCS` | `false` | Don't serve `/docs`, `/redoc` and `/openapi.json` (they need no API key) |
 | `SYNC_MAX_UPLOAD_BYTES` | `67108864` (64 MiB) | Largest accepted request body; bigger uploads get `413`. `0` disables the limit |
 | `SYNC_MAX_DECOMPRESSED_BYTES` | `268435456` (256 MiB) | Largest uncompressed payload accepted in a compressed save bundle. `0` disables the limit |
 | `SYNC_UPDATE_REPO` | `pepasjc/GameSync` | GitHub `owner/repo` whose releases `/update/check` reports and `/update/download` may proxy for the 3DS/NDS clients |
-| `SYNC_UPDATE_PROXY_ENABLED` | `true` | Set `false` to disable both update endpoints (no outbound requests) |
+| `SYNC_UPDATE_PROXY_ENABLED` | `true` | Set `false` to disable both update endpoints (no outbound requests). `/update/check` then answers 503, so clients report the check as failed rather than "up to date" |
 | `SYNC_EMULATOR_INDEX_ENABLED` | `true` | `GET /emulators/ps5sx2/game-index` fetches PCSX2's `GameIndex.yaml` from GitHub on request (cached under `SYNC_SAVE_DIR/.emulator_cache/`). Set `false` to turn the endpoint off: it answers `404` and makes no outbound requests |
 | `SYNC_TRUST_PROXY_AUTH` | `false` | Trust the `X-Remote-User` header set by nginx Basic Auth (see [User Roles](#user-roles)). Only enable it when clients cannot reach the server except through that proxy |
 | `SYNC_LAN_ADMIN` | `false` | Treat every web UI visitor as admin and embed the API key in the page. Only for a LAN that is never exposed to the internet |
 
 For a server reachable from the internet, set `SYNC_DISABLE_DOCS=true`,
 `SYNC_RELOAD=false` (or run uvicorn directly as the systemd unit does), keep
-`SYNC_LAN_ADMIN=false`, and consider `SYNC_ALLOW_QUERY_API_KEY=false` if you
-don't use the web UI's download buttons.
+`SYNC_LAN_ADMIN=false`, and set `SYNC_ALLOW_QUERY_API_KEY=false` (the web
+UI's download buttons don't need it).
 
 Example `server/.env`:
 

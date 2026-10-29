@@ -45,7 +45,7 @@ Configuration is done via environment variables:
 | `SYNC_MAX_HISTORY_VERSIONS` | `10` | Number of previous save versions to keep |
 | `SYNC_RELOAD` | `true` | Auto-reload on code changes (`run.py`); set `false` in production |
 | `SYNC_DISABLE_DOCS` | `false` | Hide `/docs`, `/redoc` and `/openapi.json` |
-| `SYNC_ALLOW_QUERY_API_KEY` | `true` | Accept `?api_key=` in URLs (web UI download links) |
+| `SYNC_ALLOW_QUERY_API_KEY` | `true` | Accept `?api_key=` in URLs (web UI downloads use `?token=` links and work either way) |
 | `SYNC_MAX_UPLOAD_BYTES` | `67108864` | Largest accepted request body (64 MiB) |
 | `SYNC_MAX_DECOMPRESSED_BYTES` | `268435456` | Largest uncompressed bundle payload (256 MiB) |
 | `SYNC_UPDATE_REPO` | `pepasjc/GameSync` | GitHub repo used by the 3DS/NDS update proxy |

@@ -1,0 +1,17 @@
+# Contexto de build de deploy/Dockerfile (la raíz del repo). Solo entra lo
+# que la imagen copia; nunca deploy/.env, deploy/data, venvs ni binarios
+# compilados en el host (un mcr2vmp de macOS/Windows no corre en Linux).
+*
+!server/pyproject.toml
+!server/uv.lock
+!server/*.py
+!server/app/
+!server/data/
+!server/third_party/
+!shared/
+server/third_party/mcr2vmp/mcr2vmp
+server/third_party/mcr2vmp/mcr2vmp.exe
+server/data/archive/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/

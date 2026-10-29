@@ -199,8 +199,9 @@ def parse_bundle(data: bytes) -> SaveBundle:
         # v1: uncompressed
         payload = data[offset:]
     else:
-        # v2/v3: zlib compressed
-        compressed_payload = data[offset:]
+        # v2/v3: zlib compressed.  A view, not a slice: slicing would copy
+        # the whole upload once more before it is inflated.
+        compressed_payload = memoryview(data)[offset:]
         max_size = settings.max_decompressed_bytes
         if max_size > 0 and size_field > max_size:
             raise BundleError(

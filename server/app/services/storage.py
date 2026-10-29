@@ -20,9 +20,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from app.config import settings
@@ -316,14 +317,44 @@ _STAGING_PREFIX = ".current-new-"
 _RETIRED_PREFIX = ".current-old-"
 
 
+def _fsync_path(path: str | Path) -> None:
+    """Flush one file or directory to disk; a no-op where unsupported."""
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _fsync_tree(root: Path) -> None:
+    """Flush every file and directory under ``root`` to disk.
+
+    Renaming a directory of freshly written files is only crash-safe once
+    their data is on disk: otherwise a power cut can leave ``current/`` with
+    empty files while the DB already holds the new hash.
+    """
+    for dirpath, _dirnames, filenames in os.walk(root, topdown=False):
+        for name in filenames:
+            _fsync_path(os.path.join(dirpath, name))
+        _fsync_path(dirpath)
+
+
 def _swap_into_place(staging: Path, current: Path) -> None:
     """Replace ``current`` with ``staging`` using renames only.
 
-    If the second rename fails the previous save is moved back, so
-    ``current`` is always either the old or the new save.
+    ``staging`` must already be flushed (``_fsync_tree``).  If the second
+    rename fails the previous save is moved back, so ``current`` is always
+    either the old or the new save.  The parent directory is flushed before
+    the old save is deleted, so a power cut cannot lose both.
     """
     if not current.exists():
         staging.rename(current)
+        _fsync_path(current.parent)
         return
     retired = current.with_name(f"{_RETIRED_PREFIX}{uuid.uuid4().hex}")
     current.rename(retired)
@@ -332,6 +363,7 @@ def _swap_into_place(staging: Path, current: Path) -> None:
     except BaseException:
         retired.rename(current)
         raise
+    _fsync_path(current.parent)
     shutil.rmtree(retired, ignore_errors=True)
 
 
@@ -353,6 +385,60 @@ def _recover_interrupted_swap(title_dir: Path) -> None:
                 shutil.rmtree(entry, ignore_errors=True)
         elif entry.name.startswith(_STAGING_PREFIX):
             shutil.rmtree(entry, ignore_errors=True)
+
+
+def recover_interrupted_swaps() -> int:
+    """Run ``_recover_interrupted_swap`` for every title; call at startup.
+
+    Without it a title whose upload died between the two renames has no
+    ``current/`` (so every download 404s) until someone uploads it again.
+    Returns the number of titles whose save was restored.
+    """
+    restored = 0
+    if not settings.save_dir.is_dir():
+        return 0
+    for title_dir in settings.save_dir.iterdir():
+        try:
+            if not title_dir.is_dir():
+                continue
+            leftovers = [
+                e
+                for e in title_dir.iterdir()
+                if e.name.startswith((_RETIRED_PREFIX, _STAGING_PREFIX))
+            ]
+            if not leftovers:
+                continue
+            had_current = (title_dir / "current").exists()
+            _recover_interrupted_swap(title_dir)
+            if not had_current and (title_dir / "current").exists():
+                restored += 1
+                logger.warning("Restored interrupted save swap for %s", title_dir.name)
+        except OSError as e:
+            logger.warning("Could not check %s for an interrupted swap: %s", title_dir, e)
+    return restored
+
+
+def _history_archive_dir(history: Path, last_sync: str) -> Path:
+    """Directory that archives the version stored at ``last_sync``.
+
+    Clients address history versions by whole unix seconds, so two versions
+    stored within the same second would be ambiguous (the older one could
+    never be fetched).  Bump the new archive forward to the next free second;
+    it is the newest version, so the order is kept.
+    """
+    name = last_sync.replace(":", "_").replace("+", "_")
+    if not history.is_dir() or (history / name).exists():
+        return history / name
+    try:
+        when = datetime.fromisoformat(last_sync)
+    except ValueError:
+        return history / name
+    taken = {
+        _parse_history_dir_name(d.name)[1] for d in history.iterdir() if d.is_dir()
+    }
+    while int(when.timestamp()) in taken:
+        when += timedelta(seconds=1)
+    return history / when.isoformat().replace(":", "_").replace("+", "_")
 
 
 def store_save(
@@ -388,19 +474,21 @@ def store_save(
             file_path = safe_join(staging, f.path)
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_bytes(f.data)
+        _fsync_tree(staging)
 
         # Archive existing save to history
         if current.exists():
             old_meta = get_metadata(title_id)
             if old_meta:
-                ts = old_meta.last_sync.replace(":", "_").replace("+", "_")
-                archive_dir = history / ts
+                archive_dir = _history_archive_dir(history, old_meta.last_sync)
                 archive_dir.mkdir(parents=True, exist_ok=True)
                 for item in current.iterdir():
                     if item.is_file():
                         shutil.copy2(item, archive_dir / item.name)
                     elif item.is_dir():
                         shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
+                _fsync_tree(archive_dir)
+                _fsync_path(history)
 
                 _prune_history(title_id)
 
@@ -418,8 +506,12 @@ def store_save(
             [(f.path, f.data) for f in bundle.files]
         )
     else:
-        all_data = b"".join(f.data for f in bundle.files)
-        bundle_hash = hashlib.sha256(all_data).hexdigest()
+        # Same digest as hashing the concatenation, without a second copy of
+        # the whole save in memory.
+        digest = hashlib.sha256()
+        for f in bundle.files:
+            digest.update(f.data)
+        bundle_hash = digest.hexdigest()
         save_size = bundle.total_size
         file_count = len(bundle.files)
 

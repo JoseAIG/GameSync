@@ -2759,7 +2759,9 @@ static bool dpad_editor(const UiTextField *f, char *buffer, int max_len) {
     ui_input_latch_touch();
     UiInput in;
     while (ui_input_scan(&in)) {
-        u32 down = in.down, rep = in.rep;
+        // The plain hardware repeat, as in v055: the accelerated one (made
+        // for list rows) cycles characters too fast to stop on one
+        u32 down = in.down, rep = hidKeysDownRepeat();
         if (rep & KEY_LEFT && e.cursor > 0) e.cursor--;
         if (rep & KEY_RIGHT && e.cursor < e.len) e.cursor++;
         if (rep & (KEY_UP | KEY_DOWN)) {

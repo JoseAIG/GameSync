@@ -1,3 +1,6 @@
+// Spring response/damping parameterisation from Apple's "Designing Fluid
+// Interfaces" (WWDC 2018). Written from the talk's description; no code
+// copied.
 package com.savesync.android.ui.theme
 
 import androidx.compose.animation.EnterTransition
@@ -24,7 +27,8 @@ import kotlin.math.pow
  * The app's only motion vocabulary.  Screens never write a `spring(...)` or
  * `tween(...)` literal; they pick one of these.
  *
- * Apple describes a spring by damping ratio and *response* r (seconds);
+ * Apple (*Designing Fluid Interfaces*, WWDC 2018) describes a spring by
+ * damping ratio and *response* r (seconds);
  * Compose takes stiffness, which for unit mass is (2π / r)².  Everything is
  * critically damped (damping ratio 1): nothing in this app is thrown with
  * momentum, so nothing overshoots.

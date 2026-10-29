@@ -323,6 +323,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             val sync = inputs.syncMap[entry.titleId]
             val cheap = cheapStatusFor(entry, sync, entry.titleId in inputs.conflicts)
             if (cheap != null) return@mapIndexed SaveRow(entry, cheap)
+            // A folder save's fingerprint walks the folder: a superseded run
+            // (each sync-state write during Sync all is one) stops here
+            // rather than walking every save before it can be cancelled.
+            currentCoroutineContext().ensureActive()
             val (mtime, size) = runCatching { entry.statFingerprint() }.getOrDefault(0L to 0L)
             val key = StatusKey(entry.titleId, mtime, size, sync?.lastSyncedHash, inputs.hashRules)
             keys[i] = key

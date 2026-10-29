@@ -2451,13 +2451,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     suspend fun loadSettings(): Settings = settingsStore.settingsFlow.first()
 
     /** Commits the server URL and/or API key: client rebuild + ping, no rescan. */
-    fun commitServerConnection(serverUrl: String? = null, apiKey: String? = null): Job =
-        viewModelScope.launch {
-            if (serverUrl == null && apiKey == null) return@launch
+    fun commitServerConnection(serverUrl: String? = null, apiKey: String? = null): Job {
+        if (serverUrl == null && apiKey == null) return viewModelScope.launch { }
+        // The write runs on the app's scope: Settings flushes an edit as it
+        // leaves, and when that is the activity finishing (START → Exit)
+        // this view model's scope is cancelled before DataStore gets to it.
+        val write = com.savesync.android.SaveSyncApp.instance.appScope.launch {
             settingsStore.updateSettings(serverUrl = serverUrl, apiKey = apiKey)
             ApiClient.invalidate()
+        }
+        return viewModelScope.launch {
+            write.join()
             pingServerNow()
         }
+    }
 
     /** Turns auto sync on or off and (re)schedules the background worker. */
     fun setAutoSync(enabled: Boolean): Job = viewModelScope.launch {

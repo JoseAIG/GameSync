@@ -1,5 +1,9 @@
 package com.savesync.android.ui.screens
 
+import android.os.SystemClock
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
@@ -158,14 +162,17 @@ fun SettingsScreen(
     LaunchedEffect(settings.segaCdSyncFormat) { segaCdSyncFormat = settings.segaCdSyncFormat }
     LaunchedEffect(settings.ps2Emulator) { ps2Emulator = settings.ps2Emulator }
 
-    // One counter per control: a commit bumps it and its "Saved" caption
-    // (re)starts its hold.
-    val savedTicks = remember { mutableStateOf(mapOf<String, Int>()) }
-    fun tickOf(id: String) = savedTicks.value[id] ?: 0
+    // One tick per control: when its last commit landed (uptime ms).  A new
+    // value (re)starts its "Saved" caption's hold; a caption that re-enters
+    // composition later (the URL field leaving its error state) can tell the
+    // hold is over and stays hidden.
+    val savedTicks = remember { mutableStateOf(mapOf<String, Long>()) }
+    fun tickOf(id: String) = savedTicks.value[id] ?: 0L
     fun markSaved(id: String, job: Job) {
         scope.launch {
             job.join()
-            savedTicks.value = savedTicks.value + (id to tickOf(id) + 1)
+            val now = maxOf(SystemClock.uptimeMillis(), tickOf(id) + 1)
+            savedTicks.value = savedTicks.value + (id to now)
         }
     }
 
@@ -198,12 +205,23 @@ fun SettingsScreen(
         markSaved("key", viewModel.commitServerConnection(apiKey = write))
     }
 
-    // Leaving the tab (or rotating) with an uncommitted edit still saves it.
-    // The view model's scope outlives this screen, so the write completes.
+    // Leaving the tab (or rotating, or exiting) with an uncommitted edit
+    // still saves it: the write runs on the app's scope, so it completes.
+    // The app going to the background flushes too, since a process killed
+    // there never disposes this screen.
     val flushUrl by rememberUpdatedState(::commitUrl)
     val flushKey by rememberUpdatedState(::commitKey)
-    DisposableEffect(Unit) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                flushUrl()
+                flushKey()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
         onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
             flushUrl()
             flushKey()
         }
@@ -974,12 +992,15 @@ private fun WarnCaption(text: String) {
  * so nothing around it moves.
  */
 @Composable
-private fun SavedCaption(tick: Int) {
+private fun SavedCaption(tick: Long) {
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(tick) {
-        if (tick > 0) {
+        // Only what is left of the hold since the commit landed: none for a
+        // caption shown again long after.
+        val left = SAVED_CAPTION_HOLD_MS - (SystemClock.uptimeMillis() - tick)
+        if (tick > 0 && left > 0) {
             visible = true
-            delay(SAVED_CAPTION_HOLD_MS)
+            delay(left)
             visible = false
         }
     }
@@ -1005,7 +1026,7 @@ private fun SavedCaption(tick: Int) {
 
 /** Folder label + path (or "Not set") with its Browse button and "Saved". */
 @Composable
-private fun FolderRow(label: String, path: String, savedTick: Int, onBrowse: () -> Unit) {
+private fun FolderRow(label: String, path: String, savedTick: Long, onBrowse: () -> Unit) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically
@@ -1040,7 +1061,7 @@ private fun <T> SettingsDropdown(
     options: List<T>,
     optionLabel: (T) -> String,
     description: String?,
-    savedTick: Int,
+    savedTick: Long,
     onSelect: (T) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }

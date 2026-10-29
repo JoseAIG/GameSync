@@ -1006,6 +1006,7 @@ private fun SyncingPill() {
             fontWeight = FontWeight.Bold,
             color = GsColors.InfoText,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -1111,9 +1112,13 @@ fun SyncStatusBadge(status: SaveSyncStatus?, decorative: Boolean = false) {
     if (status == null) {
         GsPill(text = "Checking…", color = GsColors.Muted, textColor = gsTextMuted(), decorative = decorative)
     } else {
+        val color = statusChipColor(status)
         GsPill(
             text = status.label,
-            color = statusChipColor(status),
+            color = color,
+            // Muted / Dim text isn't legible on its own tint (or a lifted
+            // row): step it up to TextMuted, as Downloads' pill does.
+            textColor = if (color == GsColors.Muted || color == GsColors.Dim) gsTextMuted() else textVariantOf(color),
             decorative = decorative,
             icon = statusIconVector(status),
         )

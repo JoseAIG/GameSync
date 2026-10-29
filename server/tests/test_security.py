@@ -511,6 +511,45 @@ class TestApiKeyAuth:
         r = client.get("/api/v1/titles", headers={"X-API-Key": api_key})
         assert r.status_code == 200
 
+    def test_web_ui_download_uses_share_token_when_query_key_is_off(
+        self, client, auth_headers, monkeypatch
+    ):
+        """The web UI's ↓ buttons mint a token (downloadHref in index.html)."""
+        monkeypatch.setattr(settings, "allow_query_api_key", False)
+        assert _upload(client, auth_headers, _bundle([("main", b"save")])).status_code == 200
+        path = f"/api/v1/saves/{TITLE_HEX}"
+        assert client.get(path, params={"api_key": settings.api_key}).status_code == 401
+
+        r = client.get(
+            "/api/v1/roms/share-link",
+            params={"ttl_days": 1, "path": path},
+            headers=auth_headers,
+        )
+        assert r.status_code == 200
+        r = client.get(path, params={"token": r.json()["token"]})
+        assert r.status_code == 200
+        assert parse_bundle(r.content).files[0].data == b"save"
+
+    def test_share_token_matches_percent_encoded_request_path(
+        self, client, auth_headers, monkeypatch
+    ):
+        """downloadHref signs the decoded path; the browser sends it encoded."""
+        monkeypatch.setattr(settings, "allow_query_api_key", False)
+        token = client.get(
+            "/api/v1/roms/share-link",
+            params={"path": "/api/v1/roms/Some Game (USA)"},
+            headers=auth_headers,
+        ).json()["token"]
+        r = client.get("/api/v1/roms/Some%20Game%20%28USA%29", params={"token": token})
+        assert r.status_code != 401
+
+    def test_web_ui_downloads_do_not_put_the_key_in_the_url(self):
+        from pathlib import Path
+
+        html = (Path(__file__).parents[1] / "app" / "templates" / "index.html").read_text()
+        assert "a.href = await downloadHref(url)" in html
+        assert "&api_key=${" not in html
+
 
 # ── Public API docs ─────────────────────────────────────────────────────────
 

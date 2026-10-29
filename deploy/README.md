@@ -60,5 +60,7 @@ pausa (`docker compose pause` / `unpause`).
   buscar actualizaciones: el servidor responde 503 en vez de fingir que no
   hay versión nueva.
 - Sin índice de juegos para emuladores (`GameIndex.yaml` de PS5SX2).
-- Key solo por header.
+- Key solo por header. Las descargas de la web usan un enlace temporal
+  firmado (`?token=`, válido un día y solo para ese archivo) en lugar de la
+  key en la URL.
 - Sin access log de uvicorn.

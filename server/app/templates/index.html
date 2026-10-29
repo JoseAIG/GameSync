@@ -776,6 +776,27 @@ function withAuth(url) {
   return url + (url.includes('?') ? '&' : '?') + 'api_key=' + encodeURIComponent(API_KEY);
 }
 
+// href for a native download.  <a href> can't send the X-API-Key header and
+// the server may refuse the key in the URL (SYNC_ALLOW_QUERY_API_KEY=false,
+// the Docker default), so ask for a short-lived share token bound to the
+// path (the same kind the 🔗 button mints).  It also keeps the key out of
+// browser history and proxy logs.  ?api_key= is only the fallback.
+async function downloadHref(url) {
+  const path = url.split('?', 1)[0];
+  // The server checks the token against the decoded request path.
+  let signPath = path;
+  try { signPath = decodeURIComponent(path); } catch (_) { /* keep as is */ }
+  try {
+    const data = await api(
+      `/api/v1/roms/share-link?ttl_days=1&path=${encodeURIComponent(signPath)}`
+    );
+    if (data && data.token) {
+      return url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(data.token);
+    }
+  } catch (_) { /* fall back to the key */ }
+  return withAuth(url);
+}
+
 // Raw ROM / save downloads now use a native browser download instead of
 // fetch().blob(). Reasons:
 //   - fetch().blob() buffers the WHOLE response in browser RAM — fatal for
@@ -787,9 +808,9 @@ function withAuth(url) {
 // This means we can't show a per-button spinner during the transfer (the
 // browser owns the UI now), but we briefly flash a "started" hint so the
 // user knows the click registered.
-function dlFile(url, filename, btn) {
+async function dlFile(url, filename, btn) {
   const a = document.createElement('a');
-  a.href = withAuth(url);
+  a.href = await downloadHref(url);
   if (filename) a.download = filename;
   // Some mobile browsers ignore the download attribute on cross-origin /
   // proxied responses but still trigger a download because of the server's
@@ -1239,7 +1260,7 @@ async function runNextQueuedExtract() {
     //             whole thing in browser memory and either OOMs the tab or
     //             stalls forever, depending on the platform).
     //
-    //   Phase 2 — trigger an <a download href="…?api_key=…"> click. The
+    //   Phase 2 — trigger an <a download href="…?token=…"> click. The
     //             browser handles the actual transfer with its native
     //             download manager: streams to disk, shows real progress,
     //             survives tab backgrounding, supports its own retry. The
@@ -1277,9 +1298,9 @@ async function runNextQueuedExtract() {
     renderQueue();
 
     // Phase 2: hand off to the browser's native download manager.
-    // The API key has to ride in the URL because <a href> can't carry
-    // custom headers; the server's auth middleware accepts ?api_key=.
-    const downloadUrl = `${baseUrl}&api_key=${encodeURIComponent(API_KEY)}`;
+    // <a href> can't carry custom headers, so a path-bound share token
+    // rides in the URL instead (see downloadHref).
+    const downloadUrl = await downloadHref(baseUrl);
     const a = Object.assign(document.createElement('a'), {
       href: downloadUrl,
       download: filename,

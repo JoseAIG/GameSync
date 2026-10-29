@@ -12,6 +12,8 @@
 
 #define MAX_SAVE_FILES 256
 #define STATE_DIR "sdmc:/3ds/3dssync/state"
+// The hash Sync All sends for a title with no save on this console
+#define ZERO_HASH "0000000000000000000000000000000000000000000000000000000000000000"
 #define MAX_UPLOAD_SIZE 0x70000  // 448KB compressed - bundles are zlib compressed
 
 // Stringify a numeric macro for messages
@@ -419,10 +421,16 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     // Cache for computed hashes (needed for upload later)
     char (*hash_cache)[65] = (char (*)[65])malloc(title_count * 65);
     if (!hash_cache) return false;
+    // Titles sent with a real save but no sync history (never synced from
+    // this console). The server plans "download" for these when its copy
+    // differs, which would overwrite progress made here: they become
+    // conflicts instead, as in sync_decide().
+    bool *no_history = (bool *)calloc(title_count > 0 ? title_count : 1, sizeof(bool));
+    if (!no_history) { free(hash_cache); return false; }
 
     // Heap-allocate files array to avoid stack overflow
     ArchiveFile *files = (ArchiveFile *)malloc(MAX_SAVE_FILES * sizeof(ArchiveFile));
-    if (!files) { free(hash_cache); return false; }
+    if (!files) { free(no_history); free(hash_cache); return false; }
 
     // Build JSON for sync request
     // Largest entry: 73 bytes of keys/punctuation + 16 (title id) + 2 * 64
@@ -430,7 +438,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     // Header and "]}" are under 64 bytes.
     int json_cap = title_count * 256 + 64;
     char *json = (char *)malloc(json_cap);
-    if (!json) { free(files); free(hash_cache); return false; }
+    if (!json) { free(files); free(no_history); free(hash_cache); return false; }
 
     int pos = snprintf(json, json_cap, "{\"console_id\":\"%s\",\"titles\":[", config->console_id);
     bool first_title = true;
@@ -516,7 +524,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
                 if (has_stat && stat_sz > 0)
                     config_set_cached_hash(titles[i].title_id_hex, stat_fc, stat_sz, stat_mtime, current_hash);
             } else {
-                strcpy(current_hash, "0000000000000000000000000000000000000000000000000000000000000000");
+                strcpy(current_hash, ZERO_HASH);
             }
         }
 
@@ -526,6 +534,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         // Load last synced hash (if exists)
         char last_synced[65] = {0};
         bool has_last_synced = load_last_synced_hash(titles[i].title_id_hex, last_synced);
+        no_history[i] = !has_last_synced && strcmp(current_hash, ZERO_HASH) != 0;
 
         if (!first_title) pos += snprintf(json + pos, json_cap - pos, ",");
         first_title = false;
@@ -546,12 +555,12 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
     u8 *resp = network_post_json(config, "/sync", json, &resp_size, &status);
     free(json);
 
-    if (!resp) { free(hash_cache); return false; }
-    if (status != 200) { free(resp); free(hash_cache); return false; }
+    if (!resp) { free(no_history); free(hash_cache); return false; }
+    if (status != 200) { free(resp); free(no_history); free(hash_cache); return false; }
 
     // Null-terminate response for string parsing
     u8 *resp_str = (u8 *)realloc(resp, resp_size + 1);
-    if (!resp_str) { free(resp); free(hash_cache); return false; }
+    if (!resp_str) { free(resp); free(no_history); free(hash_cache); return false; }
     resp_str[resp_size] = '\0';
     char *plan = (char *)resp_str;
 
@@ -569,6 +578,7 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         free(conflict_ids);
         free(up_to_date_ids);
         free(resp_str);
+        free(no_history);
         free(hash_cache);
         return false;
     }
@@ -603,6 +613,28 @@ bool sync_all(const AppConfig *config, const TitleInfo *titles, int title_count,
         }
         if (!resolved) i++;
     }
+
+    // A "download" for a title this console has never synced but has a save
+    // for means the server's copy differs and nobody knows which is newer
+    // (the server prefers its own copy then). Downloading would silently
+    // replace this console's progress: ask instead, like Smart Sync does.
+    for (int i = 0; i < download_count; ) {
+        bool guarded = false;
+        for (int j = 0; j < title_count; j++) {
+            if (strcmp(titles[j].title_id_hex, download_ids[i]) != 0) continue;
+            if (hash_cache[j][0] == '\0') continue;  // Not part of this sync
+            if (no_history[j] && conflict_count < MAX_TITLES) {
+                strcpy(conflict_ids[conflict_count++], download_ids[i]);
+                for (int k = i; k < download_count - 1; k++)
+                    strcpy(download_ids[k], download_ids[k + 1]);
+                download_count--;
+                guarded = true;
+            }
+            break;
+        }
+        if (!guarded) i++;
+    }
+    free(no_history);
 
     // Record counts in summary
     local_summary.up_to_date = up_to_date_count;

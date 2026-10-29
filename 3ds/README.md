@@ -200,6 +200,7 @@ show the year instead.
 - The current save is backed up to the SD card first (see `local_backups`). If it cannot be read or backed up completely, nothing is written.
 - A History restore always asks first and says whether the current save will be backed up.
 - A restored version counts as a change made on this console: the next sync sends it to the server (or reports a conflict if another device uploaded since), instead of downloading the server's copy back over it.
+- *Sync all* never downloads over a save this console has never synced when the server's copy differs (for example one uploaded by an emulator first): it reports a conflict instead, like the single-save sync.
 - Uploading marked saves that are in conflict (Sync All marks them) asks "Replace N server copies?" in red and names them; the server keeps the replaced copies in its history.
 - If writing or committing the new save fails, the previous save is written back. To recover by hand, copy the files from the backup folder into the save with a save manager such as Checkpoint.
 - A save with more than 256 files is refused instead of being uploaded incompletely.

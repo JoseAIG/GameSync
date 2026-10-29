@@ -940,7 +940,8 @@ int sync_get_history(const AppConfig *config, const char *title_id_hex,
 }
 
 SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title,
-                                 const char *timestamp, SyncProgressCb progress) {
+                                 const char *timestamp, const char *server_hash,
+                                 SyncProgressCb progress) {
     char msg[128];
     snprintf(msg, sizeof(msg), "Downloading history version...");
     if (progress) progress(msg);
@@ -981,8 +982,25 @@ SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title
 
     if (result != SYNC_OK) return result;
 
-    // Update last synced hash with the downloaded version
-    save_last_synced_hash(title->title_id_hex, hash);
+    // Never record the restored version as last synced: the server's current
+    // copy is still the other one, so the next sync would see "only the
+    // server changed" and download it back over the restore. Record the
+    // server's current copy instead: the restore is then a change made on
+    // this console, and the next sync uploads it (or reports a conflict if
+    // another device uploaded meanwhile).
+    if (server_hash && strlen(server_hash) == 64) {
+        save_last_synced_hash(title->title_id_hex, server_hash);
+    } else {
+        // Server copy unknown: keep the old record, unless it is the restored
+        // version itself (that would read "only the server changed" too).
+        // With no record the next sync asks instead of downloading.
+        char last[65];
+        if (load_last_synced_hash(title->title_id_hex, last) && strcmp(last, hash) == 0) {
+            char path[256];
+            snprintf(path, sizeof(path), STATE_DIR "/%s.txt", title->title_id_hex);
+            remove(path);
+        }
+    }
 
     return SYNC_OK;
 }

@@ -119,9 +119,15 @@ SyncAction sync_decide(const SaveDetails *details);
 int sync_get_history(const AppConfig *config, const char *title_id_hex,
                      HistoryVersion *versions, int max_versions);
 
-// Download a specific history version.
+// Download a specific history version and write it to the console.
+// `server_hash` is the hash of the server's current save when the restore was
+// confirmed ("" or NULL when unknown or there is none). The console's sync
+// state then reads "changed here since that copy", so the next sync sends the
+// restored version to the server (or reports a conflict if the server moved
+// on meanwhile) instead of downloading the current copy back over it.
 // Returns SYNC_OK on success, error code on failure.
 SyncResult sync_download_history(const AppConfig *config, const TitleInfo *title,
-                                 const char *timestamp, SyncProgressCb progress);
+                                 const char *timestamp, const char *server_hash,
+                                 SyncProgressCb progress);
 
 #endif // SYNC_H

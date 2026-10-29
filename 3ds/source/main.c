@@ -481,6 +481,7 @@ typedef struct {
     XferKind kind;
     const TitleInfo *title;
     const char *timestamp;   // XFER_HISTORY
+    const char *server_hash; // XFER_HISTORY: the server's current copy ("" = none / unknown)
     SyncResult res;
 } XferJob;
 
@@ -489,14 +490,16 @@ static bool xfer_job(void *ctx) {
     switch (j->kind) {
         case XFER_UPLOAD:   j->res = sync_title(&config, j->title, sync_progress); break;
         case XFER_DOWNLOAD: j->res = sync_download_title(&config, j->title, sync_progress); break;
-        case XFER_HISTORY:  j->res = sync_download_history(&config, j->title, j->timestamp, sync_progress); break;
+        case XFER_HISTORY:  j->res = sync_download_history(&config, j->title, j->timestamp,
+                                                           j->server_hash, sync_progress); break;
     }
     return j->res == SYNC_OK;
 }
 
 // `first` = the card shown until the transfer reports its own progress
-static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timestamp, const char *first) {
-    XferJob j = { kind, t, timestamp, SYNC_ERR_NETWORK };
+static SyncResult run_xfer_ex(XferKind kind, const TitleInfo *t, const char *timestamp,
+                              const char *server_hash, const char *first) {
+    XferJob j = { kind, t, timestamp, server_hash, SYNC_ERR_NETWORK };
     UiProgress p = { 0 };
     p.title = op_title;
     p.name = t->name;
@@ -504,6 +507,10 @@ static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timest
     p.frac = -1;
     ui_run_job(xfer_job, &j, &p, false, NULL);
     return j.res;
+}
+
+static SyncResult run_xfer(XferKind kind, const TitleInfo *t, const char *timestamp, const char *first) {
+    return run_xfer_ex(kind, t, timestamp, NULL, first);
 }
 
 static void do_history(void) {
@@ -565,6 +572,11 @@ static void do_history(void) {
             return;
         }
         bool had_save = last_details.local_exists && last_details.local_file_count > 0;
+        // The server's current copy: the restore is recorded as a change
+        // made here since it, so the next sync uploads the restored version
+        char server_hash[65] = "";
+        if (last_details.server_exists && !last_details.server_error)
+            snprintf(server_hash, sizeof(server_hash), "%s", last_details.server_hash);
         if (!ui_confirm_restore(&titles[idx], &last_details, &versions[vi], vi, count, config.local_backups)) {
             set_status(UI_TONE_ACCENT, "Restore cancelled");
             free(selected_ts);
@@ -572,7 +584,8 @@ static void do_history(void) {
         }
         for (;;) {
             op_title = "Restoring";
-            SyncResult res = run_xfer(XFER_HISTORY, &titles[idx], selected_ts, "Downloading history version...");
+            SyncResult res = run_xfer_ex(XFER_HISTORY, &titles[idx], selected_ts, server_hash,
+                                         "Downloading history version...");
             if (res == SYNC_OK) {
                 set_status(UI_TONE_OK, "Restored %.40s%s", titles[idx].name,
                            had_save && config.local_backups > 0 ? " \xC2\xB7 previous save backed up to SD" : "");

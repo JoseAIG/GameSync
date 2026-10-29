@@ -2134,7 +2134,7 @@ static void restore_top(void *ctx) {
     ui_save_card(CARD_X_RIGHT, CARD_Y, &right, 0);
 
     gui_text_fit(10, CARD_Y + CARD_H + 6, GUI_S_SMALL, gui_rgb(HEX_DIM), GUI_LEFT, GUI_TOP_W - 20,
-                 "The server keeps every version: restoring one doesn't remove any.");
+                 "The next sync sends it to the server, which keeps every version.");
 
     // Thin footer so the top screen looks finished
     gui_rect(0, GUI_FOOTER_Y + 8, GUI_TOP_W, GUI_FOOTER_H - 8, gui_rgb(HEX_BG2));

@@ -1466,20 +1466,30 @@ static bool settings_action(SettingsResult action) {
 // ---------------------------------------------------------------------------
 
 // Probe the server and the key just typed. Returns true to go on (it
-// answered and took the key, or "Continue anyway"), false to edit again.
+// answered and the key check said 200, or "Continue anyway"), false to edit
+// again.
 static bool setup_check(AppConfig *cfg, bool net_ok) {
-    char title[64], body[MAX_URL_LEN + 160];
+    char title[64], body[MAX_URL_LEN + 224];
     if (net_ok) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
         ui_busy("Set up", msg);
         bool answered = network_select_server(cfg);
         u32 key = answered ? titles_probe_key(cfg) : 0;
-        if (answered && key != 401) return true;
-        if (answered) {
+        if (answered && key == 200) return true;
+        if (answered && key == 401) {
             snprintf(title, sizeof(title), "Key rejected");
             snprintf(body, sizeof(body), "The server at %s refused this API key (401).\n"
                      UI_DIM "It is saved anyway; you can fix it later in Settings.", config_active_url(cfg));
+        } else if (answered) {
+            // The server answered /status, but not the key check (no answer,
+            // or an error): the key is still unchecked
+            char why[64];
+            if (key == 0) snprintf(why, sizeof(why), "%s", network_last_error()[0] ? network_last_error() : "No reply");
+            else snprintf(why, sizeof(why), "HTTP %lu", (unsigned long)key);
+            snprintf(title, sizeof(title), "Couldn't check the key");
+            snprintf(body, sizeof(body), "The server at %s answered, but not the key check (%s).\n"
+                     UI_DIM "It is saved anyway; you can check it later in Settings.", config_active_url(cfg), why);
         } else {
             snprintf(title, sizeof(title), "No answer from the server");
             snprintf(body, sizeof(body), "%s\n" UI_DIM "%s\n" UI_DIM "It is saved anyway; check WiFi and the address.",

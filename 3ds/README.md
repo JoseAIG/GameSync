@@ -157,12 +157,13 @@ key that does the same thing.
   a progress bar (with speed, elapsed and remaining time for downloads).
   Downloads that can be stopped have a **B Cancel** button. Talking to the
   server (comparing a save, uploads, downloads, *Sync all*, History, game
-  names, the update check, *Refresh catalog* and catalog pages) runs in the
-  background, so the screen never freezes: the spinner keeps turning and the
+  names, the update check, *Refresh catalog*, catalog pages, and the server
+  and key checks in Settings and first-run setup) runs in the background, so the screen never freezes: the spinner keeps turning and the
   list underneath keeps moving. If the server hasn't answered for 5 seconds
   the card says "Waiting for the server… 0:07", and where stopping is safe
   (anything that only reads: comparing, History, names, the update check,
-  *Refresh catalog*, catalog pages) it offers **B Cancel**, which leaves
+  *Refresh catalog*, catalog pages, the server and key checks) it offers
+  **B Cancel**, which leaves
   everything as it was. Uploads, downloads and *Sync all* can't be cancelled
   once they have started. A cancelled request stops waiting for the server
   within about a second (the server may still finish its work, e.g. a

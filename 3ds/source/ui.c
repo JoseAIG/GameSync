@@ -2476,49 +2476,113 @@ static void probe_answer(int row, bool ok, const char *version) {
     else snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Answered");
 }
 
+// The Settings probes run on the worker (cancellable, the card animates and
+// offers Cancel after 5 s) on a copy of the config; the results are applied
+// on the main thread. Without a thread or memory they run here, as before.
+typedef struct {
+    AppConfig cfg;
+    int row;
+    bool ok, use_alt;
+    char version[24];
+    u32 key_status;
+} ProbeJob;
+
+// GET /status on the edited address, and which address requests use now
+static bool server_probe_job(void *ctx) {
+    ProbeJob *j = ctx;
+    AppConfig probe = j->cfg;
+    if (j->row == CFG_SERVER_URL_ALT) {
+        probe.use_alt_url = true;
+        j->ok = network_probe_status(&probe, j->version, sizeof(j->version));
+        probe.use_alt_url = false;
+        j->use_alt = j->ok && !network_probe_status(&probe, NULL, 0);
+    } else {
+        probe.use_alt_url = false;
+        j->ok = network_probe_status(&probe, j->version, sizeof(j->version));
+        j->use_alt = false;
+        if (!j->ok && probe.server_url_alt[0]) {
+            probe.use_alt_url = true;
+            j->use_alt = network_probe_status(&probe, NULL, 0);
+        }
+    }
+    return true;
+}
+
+static bool key_probe_job(void *ctx) {
+    ProbeJob *j = ctx;
+    j->key_status = titles_probe_key(&j->cfg);
+    return true;
+}
+
+// Runs fn on a ProbeJob filled from `in` (row set); false if cancelled.
+// `out` gets the results.
+static bool run_probe(UiJobFn fn, const ProbeJob *in, const char *msg, ProbeJob *out) {
+    ProbeJob *j = ui_job_ctx(sizeof(ProbeJob));
+    if (!j) {
+        ui_busy("Settings", msg);
+        *out = *in;
+        fn(out);
+        return true;
+    }
+    *j = *in;
+    UiProgress p = { 0 };
+    p.title = "Settings";
+    p.status = msg;
+    p.frac = -1;
+    bool cancelled = false;
+    ui_run_job(fn, j, &p, true, &cancelled);
+    if (cancelled) return false;
+    *out = *j;
+    ui_job_release(j);
+    return true;
+}
+
 // After a server address was saved: does it answer (GET /status), and which
 // address do requests use from now on (the primary when it answers, else
 // the alternate if that does, as at startup). Informs, never blocks.
 static void check_server(AppConfig *config, int row) {
-    ui_job_settle();   // a cancelled job may still be talking to the server
     // The key was checked against the server used before: that verdict says
     // nothing about this one
     cfg_probe[CFG_API_KEY][0] = '\0';
     cfg_probe_ok[CFG_API_KEY] = false;
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
-    AppConfig probe = *config;
-    char version[24];
     if (row == CFG_SERVER_URL_ALT) {
         cfg_probe[CFG_SERVER_URL_ALT][0] = '\0';
         config->use_alt_url = false;
         if (!config->server_url_alt[0]) return;   // turned off: the primary only
-        ui_busy("Settings", msg);
-        probe.use_alt_url = true;
-        bool alt_ok = network_probe_status(&probe, version, sizeof(version));
-        probe_answer(CFG_SERVER_URL_ALT, alt_ok, version);
-        probe.use_alt_url = false;
-        config->use_alt_url = alt_ok && !network_probe_status(&probe, NULL, 0);
+    } else {
+        row = CFG_SERVER_URL;
+    }
+    static ProbeJob in, res;   // main thread only; kept off its stack
+    memset(&in, 0, sizeof(in));
+    in.cfg = *config;
+    in.row = row;
+    if (!run_probe(server_probe_job, &in, msg, &res)) {
+        // Nothing learned: requests go to the primary, as before the edit
+        cfg_probe_ok[row] = false;
+        snprintf(cfg_probe[row], sizeof(cfg_probe[row]), "Not checked (cancelled)");
+        config->use_alt_url = false;
         return;
     }
-    ui_busy("Settings", msg);
-    probe.use_alt_url = false;
-    bool ok = network_probe_status(&probe, version, sizeof(version));
-    probe_answer(CFG_SERVER_URL, ok, version);
-    config->use_alt_url = false;
-    if (!ok && config->server_url_alt[0]) {
-        probe.use_alt_url = true;
-        config->use_alt_url = network_probe_status(&probe, NULL, 0);
-    }
+    probe_answer(row, res.ok, res.version);
+    config->use_alt_url = res.use_alt;
 }
 
 // After the API key was saved: the cheapest request that needs it
 static void check_key(const AppConfig *config) {
-    ui_job_settle();
     char msg[48];
     snprintf(msg, sizeof(msg), "Checking the key%s", gui_ellipsis());
-    ui_busy("Settings", msg);
-    u32 status = titles_probe_key(config);
+    static ProbeJob in, res;   // main thread only; kept off its stack
+    memset(&in, 0, sizeof(in));
+    in.cfg = *config;
+    in.row = CFG_API_KEY;
+    if (!run_probe(key_probe_job, &in, msg, &res)) {
+        cfg_probe_ok[CFG_API_KEY] = false;
+        snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Not checked (cancelled)");
+        return;
+    }
+    u32 status = res.key_status;
     cfg_probe_ok[CFG_API_KEY] = status == 200;
     if (status == 200) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key accepted");
     else if (status == 401) snprintf(cfg_probe[CFG_API_KEY], sizeof(cfg_probe[0]), "Key rejected (401)");

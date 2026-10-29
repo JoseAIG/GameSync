@@ -1477,6 +1477,23 @@ static bool settings_action(SettingsResult action) {
 // First-run setup
 // ---------------------------------------------------------------------------
 
+// The setup probe, on the worker (the card animates and offers Cancel after
+// 5 s), on a copy of the config
+typedef struct {
+    AppConfig cfg;
+    bool answered;
+    u32 key;
+    char error[96];
+} SetupProbeJob;
+
+static bool setup_probe_job(void *ctx) {
+    SetupProbeJob *j = ctx;
+    j->answered = network_select_server(&j->cfg);
+    j->key = j->answered ? titles_probe_key(&j->cfg) : 0;
+    snprintf(j->error, sizeof(j->error), "%s", network_last_error());
+    return true;
+}
+
 // Probe the server and the key just typed. Returns true to go on (it
 // answered and the key check said 200, or "Continue anyway"), false to edit
 // again.
@@ -1485,11 +1502,36 @@ static bool setup_check(AppConfig *cfg, bool net_ok) {
     if (net_ok) {
         char msg[48];
         snprintf(msg, sizeof(msg), "Checking the server%s", gui_ellipsis());
-        ui_busy("Set up", msg);
-        bool answered = network_select_server(cfg);
-        u32 key = answered ? titles_probe_key(cfg) : 0;
+        bool answered = false, cancelled = false;
+        u32 key = 0;
+        char error[96] = "";
+        SetupProbeJob *j = ui_job_ctx(sizeof(SetupProbeJob));
+        if (j) {
+            j->cfg = *cfg;
+            UiProgress p = { 0 };
+            p.title = "Set up";
+            p.status = msg;
+            p.frac = -1;
+            ui_run_job(setup_probe_job, j, &p, true, &cancelled);
+            if (!cancelled) {
+                cfg->use_alt_url = j->cfg.use_alt_url;
+                answered = j->answered;
+                key = j->key;
+                snprintf(error, sizeof(error), "%s", j->error);
+                ui_job_release(j);
+            }
+        } else {
+            ui_busy("Set up", msg);
+            answered = network_select_server(cfg);
+            key = answered ? titles_probe_key(cfg) : 0;
+            snprintf(error, sizeof(error), "%s", network_last_error());
+        }
         if (answered && key == 200) return true;
-        if (answered && key == 401) {
+        if (cancelled) {
+            snprintf(title, sizeof(title), "Not checked");
+            snprintf(body, sizeof(body), "You cancelled the check of %s.\n"
+                     UI_DIM "It is saved anyway; you can check it later in Settings.", cfg->server_url);
+        } else if (answered && key == 401) {
             snprintf(title, sizeof(title), "Key rejected");
             snprintf(body, sizeof(body), "The server at %s refused this API key (401).\n"
                      UI_DIM "It is saved anyway; you can fix it later in Settings.", config_active_url(cfg));
@@ -1497,7 +1539,7 @@ static bool setup_check(AppConfig *cfg, bool net_ok) {
             // The server answered /status, but not the key check (no answer,
             // or an error): the key is still unchecked
             char why[64];
-            if (key == 0) snprintf(why, sizeof(why), "%s", network_last_error()[0] ? network_last_error() : "No reply");
+            if (key == 0) snprintf(why, sizeof(why), "%.63s", error[0] ? error : "No reply");
             else snprintf(why, sizeof(why), "HTTP %lu", (unsigned long)key);
             snprintf(title, sizeof(title), "Couldn't check the key");
             snprintf(body, sizeof(body), "The server at %s answered, but not the key check (%s).\n"
@@ -1505,7 +1547,7 @@ static bool setup_check(AppConfig *cfg, bool net_ok) {
         } else {
             snprintf(title, sizeof(title), "No answer from the server");
             snprintf(body, sizeof(body), "%s\n" UI_DIM "%s\n" UI_DIM "It is saved anyway; check WiFi and the address.",
-                     config_active_url(cfg), network_last_error()[0] ? network_last_error() : "No reply");
+                     config_active_url(cfg), error[0] ? error : "No reply");
         }
     } else {
         snprintf(title, sizeof(title), "Can't check the server");

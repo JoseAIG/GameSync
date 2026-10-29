@@ -153,6 +153,9 @@ class SyncEngine(
         val rawCardMeta = mutableMapOf<String, SaveMeta>()
         // What each SyncTitle sent, for the rollback check.
         val sentSize = mutableMapOf<String, Long>()
+        // Local saves this plan couldn't compare (unreadable, card meta failed):
+        // left alone, never downloaded over through the server_only list.
+        val uncompared = mutableSetOf<String>()
 
         val (rawCardEntries, otherEntries) = resolvedSaves.partition {
             isPs1RawEntry(it) || isPs2RawEntry(it) || isGcRawEntry(it)
@@ -165,6 +168,7 @@ class SyncEngine(
             } catch (e: Exception) {
                 Log.e(TAG, "Raw-card check failed for ${entry.titleId}", e)
                 errors.add("Sync error: ${entry.displayName}: ${e.message}")
+                uncompared += entry.titleId
             }
         }
 
@@ -193,7 +197,10 @@ class SyncEngine(
 
         // Build sync request titles for entries that have a local save file
         val syncTitles = localEntries.mapNotNull { entry ->
-            buildSyncTitle(entry, syncStateByTitle[entry.titleId], errors)
+            val errorsBefore = errors.size
+            buildSyncTitle(entry, syncStateByTitle[entry.titleId], errors).also {
+                if (it == null && errors.size > errorsBefore) uncompared += entry.titleId
+            }
         }
         syncTitles.forEach { sentSize[it.title_id] = it.size }
         val sentHashes = syncTitles.associate { it.title_id to it.save_hash }
@@ -219,7 +226,10 @@ class SyncEngine(
                 // Saves the server holds that weren't in the request.  One already
                 // planned as a server-only download is not downloaded twice (the
                 // second copy would push a real backup out of the five kept).
+                // A local save left out because it couldn't be compared is not
+                // "server only": downloading would skip the three-way check.
                 syncResponse.server_only.forEach { titleId ->
+                    if (titleId in uncompared) return@forEach
                     val entry = saveMap[titleId] ?: return@forEach
                     if (!hasLocalSaveTarget(entry)) return@forEach
                     val action = if (entry.exists()) PlannedAction.DOWNLOAD else PlannedAction.DOWNLOAD_NEW

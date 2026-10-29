@@ -87,6 +87,7 @@ typedef struct {
     // test (a server returning fewer rows than its total claims)
     int ew_first, ew_off, ew_total, ew_win_off, ew_win_count;
     bool loading;            // a page request is in flight (drawn as a spinner)
+    bool shown;              // catalog_run() is drawing it (else another screen is, e.g. Settings)
     UiListAnim anim;
     UiBar bar;
     u32 held;                // keys held while the tab's own loop draws (else 0)
@@ -497,14 +498,16 @@ static void fetch_window(Catalog *cat, int offset) {
     j->config = *cat->config;
     snprintf(j->path, sizeof(j->path), "%s", path);
     // The list stays live underneath, showing its "Loading..." rows and the
-    // header spinner; a card only appears if the server is slow
+    // header spinner; a card only appears if the server is slow. Over any
+    // other screen (Settings > Refresh catalog) nothing would show the load:
+    // the card then appears at once.
     UiProgress p = { 0 };
     p.title = "Game Catalog";
     p.status = "Loading the list...";
     p.frac = -1;
     bool cancelled = false;
     cat->loading = true;
-    ui_run_job_ex(page_job, j, &p, UI_JOB_CANCELLABLE | UI_JOB_QUIET, &cancelled);
+    ui_run_job_ex(page_job, j, &p, UI_JOB_CANCELLABLE | (cat->shown ? UI_JOB_QUIET : 0), &cancelled);
     cat->loading = false;
     if (cancelled) {
         // Nothing changed; A asks again
@@ -1500,6 +1503,7 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
     }
 
     UiBackdrop prev = ui_set_backdrop(draw_top, draw_bottom, cat);
+    cat->shown = true;
     if (!cat->ready) open_catalog(cat, NULL);
     hidSetRepeatParameters(20, 4);
 
@@ -1559,6 +1563,7 @@ UiNav catalog_tab(const AppConfig *config, bool *saves_changed) {
         cat->tabs.held = 0;
     }
 
+    cat->shown = false;
     ui_restore_backdrop(prev);
     if (saves_changed) *saves_changed = cat->nds_installed;
     cat->nds_installed = false;

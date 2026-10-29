@@ -598,49 +598,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val _detectedSystemFolders = MutableStateFlow<Map<String, String>>(emptyMap())
     val detectedSystemFolders: StateFlow<Map<String, String>> = _detectedSystemFolders
 
-    init {
-        // Restore persisted filter preferences before scanning
-        viewModelScope.launch {
-            val lastSystem = settingsStore.getLastSystemFilter()
-            val lastStatusName = settingsStore.getLastStatusFilter()
-            _selectedFilter.value = lastSystem
-            _statusFilter.value = lastStatusName?.let { name ->
-                SaveSyncStatus.entries.find { it.name == name }
-            }
-        }
-        scanSaves()
-        // A catalog that failed to load retries by itself once the server is
-        // back (the 30 s ping and the header dot's tap drive this), so a pad
-        // user never has to find a Retry button.
-        viewModelScope.launch {
-            var previous: Boolean? = _serverOnline.value
-            _serverOnline.collect { online ->
-                if (previous == false && online == true && _romCatalogError.value != null) {
-                    fetchRomCatalog()
-                }
-                previous = online
-            }
-        }
-        viewModelScope.launch {
-            settingsStore.settingsFlow
-                .map { it.saveDirOverrides }
-                .distinctUntilChanged()
-                .collect { overrides ->
-                    _overrideWarnings.value = withContext(Dispatchers.IO) {
-                        EmulatorRegistry.saveDirOverrideWarningMap(overrides)
-                    }
-                }
-        }
-        // Keep the header's server dot honest: a cheap GET /status now and
-        // every 30 s while the app is open.
-        viewModelScope.launch {
-            while (isActive) {
-                pingServer()
-                delay(SERVER_PING_INTERVAL_MS)
-            }
-        }
-    }
-
     /** One GET /status for the header dot. */
     fun pingServer() {
         viewModelScope.launch { pingServerNow() }
@@ -3844,6 +3801,55 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun effectiveRomScanDir(settings: Settings, requestedDir: String = ""): String {
         return EmudeckPaths.romsDir(settings.emudeckDir)?.absolutePath
             ?: requestedDir.ifBlank { settings.romScanDir }
+    }
+
+    // Runs last on purpose. Kotlin runs property initializers and init blocks
+    // in source order, and these launches start on Dispatchers.Main.immediate,
+    // so they execute inside the constructor up to their first suspension.
+    // Anything they touch (scanSaves() sets _savesScanning, bumps
+    // activeSaveScans, ...) must already be initialized, so every property
+    // of this class has to be declared above this block.
+    init {
+        // Restore persisted filter preferences before scanning
+        viewModelScope.launch {
+            val lastSystem = settingsStore.getLastSystemFilter()
+            val lastStatusName = settingsStore.getLastStatusFilter()
+            _selectedFilter.value = lastSystem
+            _statusFilter.value = lastStatusName?.let { name ->
+                SaveSyncStatus.entries.find { it.name == name }
+            }
+        }
+        scanSaves()
+        // A catalog that failed to load retries by itself once the server is
+        // back (the 30 s ping and the header dot's tap drive this), so a pad
+        // user never has to find a Retry button.
+        viewModelScope.launch {
+            var previous: Boolean? = _serverOnline.value
+            _serverOnline.collect { online ->
+                if (previous == false && online == true && _romCatalogError.value != null) {
+                    fetchRomCatalog()
+                }
+                previous = online
+            }
+        }
+        viewModelScope.launch {
+            settingsStore.settingsFlow
+                .map { it.saveDirOverrides }
+                .distinctUntilChanged()
+                .collect { overrides ->
+                    _overrideWarnings.value = withContext(Dispatchers.IO) {
+                        EmulatorRegistry.saveDirOverrideWarningMap(overrides)
+                    }
+                }
+        }
+        // Keep the header's server dot honest: a cheap GET /status now and
+        // every 30 s while the app is open.
+        viewModelScope.launch {
+            while (isActive) {
+                pingServer()
+                delay(SERVER_PING_INTERVAL_MS)
+            }
+        }
     }
 }
 

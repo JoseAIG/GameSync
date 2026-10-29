@@ -83,6 +83,7 @@ import com.savesync.android.ui.components.SAVE_MSG_CONFLICT
 import com.savesync.android.ui.components.SAVE_MSG_ERROR
 import com.savesync.android.ui.components.SAVE_MSG_HELD_BACK
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.IOException
 import java.time.OffsetDateTime
@@ -702,6 +703,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val savesScanning: StateFlow<Boolean> = _savesScanning
     /** Scans in flight; only touched on the main thread (viewModelScope). */
     private var activeSaveScans = 0
+    /** True once a save scan has finished: [_allSaves] carries the games' names from then on. */
+    private val _savesScannedOnce = MutableStateFlow(false)
 
     fun scanSaves() {
         viewModelScope.launch {
@@ -1140,6 +1143,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 activeSaveScans--
                 _savesScanning.value = activeSaveScans > 0
+                if (activeSaveScans == 0) _savesScannedOnce.value = true
                 // A scan is when a missing folder would have mattered.
                 refreshOverrideWarnings()
             }
@@ -2402,8 +2406,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * Game names for held-back entries: the worker records title ids, which
      * the scanned list names, else the name the last sync stored (an entry
      * with neither, or a name an older version recorded, is shown as it is).
+     * On a cold start this runs before the first scan has listed anything,
+     * and a 3DS save's stored name is its bare title id, so the names wait
+     * for that scan (bounded: a scan that never ends doesn't hold the notice).
      */
     suspend fun heldBackDisplayNames(entries: List<String>): List<String> {
+        if (!_savesScannedOnce.value) {
+            withTimeoutOrNull(HELD_BACK_NAMES_WAIT_MS) { _savesScannedOnce.first { it } }
+        }
         val names = _allSaves.value.associate { it.titleId to it.displayName }
         return withContext(Dispatchers.IO) {
             entries.map { id ->
@@ -3839,6 +3849,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
 /** Header status-dot refresh cadence. */
 private const val SERVER_PING_INTERVAL_MS = 30_000L
+
+/** Longest the held-back notice waits for the first save scan to name its games. */
+private const val HELD_BACK_NAMES_WAIT_MS = 60_000L
 
 /**
  * One page of GET /roms (the server allows up to 20000; smaller pages keep

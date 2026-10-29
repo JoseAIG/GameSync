@@ -202,8 +202,11 @@ game, never in cloud backups). If that copy can't be made the save is not
 overwritten. The result offers *Undo*, and the detail screen gets a *Restore
 previous copy (<when>)* action for the same thing with the controller. A
 restored save is never downloaded over again by a sync (smart sync, Sync all or
-auto sync): it shows as a conflict until you choose *Force Upload* (keep it and
-send it to the server) or *Force Download* (take the server's copy after all).
+auto sync): it shows as a conflict, in the list and on its detail screen, until
+you choose *Force Upload* (keep it and send it to the server) or *Force
+Download* (take the server's copy after all). Two cases sync settles by itself:
+if the server holds this very save it reads *Synced* again, and if the server
+has no copy of the game the detail shows *Local Newer* and a sync uploads it.
 
 ### Catalog
 

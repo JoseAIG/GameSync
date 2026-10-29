@@ -1,6 +1,7 @@
 package com.savesync.android.ui
 
 import com.savesync.android.emulators.SaveEntry
+import com.savesync.android.sync.LocalBackupStore
 
 /**
  * One row of the Saves list: the save and its sync status.  [status] null
@@ -40,11 +41,14 @@ fun cheapSyncStatus(
 /**
  * The list's full status from this device's view: the save's sync hash
  * against the hash recorded at its last sync.  An empty [localHash] (the
- * save couldn't be hashed) is Unknown, never Synced.
+ * save couldn't be hashed) is Unknown, never Synced.  A restored save
+ * ([LocalBackupStore.RESTORED_BASE]) is a Conflict: its base matches
+ * neither side, so that is what the server answers a sync with.
  */
 fun localStatus(localHash: String, lastSyncedHash: String?): SaveSyncStatus = when {
     lastSyncedHash == null -> SaveSyncStatus.LOCAL_ONLY
     localHash.isEmpty() -> SaveSyncStatus.UNKNOWN
+    lastSyncedHash == LocalBackupStore.RESTORED_BASE -> SaveSyncStatus.CONFLICT
     localHash != lastSyncedHash -> SaveSyncStatus.LOCAL_NEWER
     else -> SaveSyncStatus.SYNCED
 }

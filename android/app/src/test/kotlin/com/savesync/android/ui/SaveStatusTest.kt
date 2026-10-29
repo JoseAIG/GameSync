@@ -50,6 +50,17 @@ class SaveStatusTest {
     }
 
     @Test
+    fun `a restored save reads as the conflict sync will report`() {
+        val restored = com.savesync.android.sync.LocalBackupStore.RESTORED_BASE
+        // The list (no server hash) and the detail (server known) agree.
+        assertEquals(SaveSyncStatus.CONFLICT, localStatus("mine", restored))
+        assertEquals(SaveSyncStatus.CONFLICT, detailSyncStatus(true, "mine", restored, ServerSide.Hash("srv"), fallback = null))
+        assertEquals(SaveSyncStatus.CONFLICT, detailSyncStatus(true, "mine", restored, ServerSide.Unknown, fallback = SaveSyncStatus.CONFLICT))
+        // The server already holds this very save: sync reports it up to date.
+        assertEquals(SaveSyncStatus.SYNCED, detailSyncStatus(true, "mine", restored, ServerSide.Hash("mine"), fallback = null))
+    }
+
+    @Test
     fun `detail status falls back to the row while loading`() {
         assertEquals(
             SaveSyncStatus.LOCAL_NEWER,

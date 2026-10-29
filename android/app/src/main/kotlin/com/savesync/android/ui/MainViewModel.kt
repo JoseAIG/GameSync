@@ -3295,7 +3295,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     scanSaves()
                     _saveDetailState.value = SaveDetailState.Success(
                         "Put back the copy from ${com.savesync.android.ui.screens.formatWhen(restored.takenAt)}. " +
-                            "Sync leaves it alone until you choose Upload or Download."
+                            "It shows as a conflict: sync leaves it alone until you choose Upload or Download."
                     )
                 }
             } catch (e: CancellationException) {
